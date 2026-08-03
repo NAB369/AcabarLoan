@@ -1,0 +1,226 @@
+/* Custom scrollbar styling */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: #94a3b8;
+}
+.custom-gradient {
+    background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+}
+.brand-glow:hover {
+    box-shadow: 0 0 15px rgba(0, 71, 171, 0.25);
+}
+.fade-in {
+    animation: fadeIn 0.2s ease-out forwards;
+}
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@media print {
+    @page {
+        size: A4 portrait;
+        margin: 10mm 12mm;
+    }
+    /* Fallback only — primary print uses dedicated popup window */
+    body * { visibility: hidden; }
+    #printable-schedule, #printable-schedule * { visibility: visible; }
+    #printable-schedule {
+        position: fixed;
+        left: 0;
+        top: 0;
+        width: 100%;
+        max-width: 100%;
+        border: none;
+        box-shadow: none;
+        padding: 0;
+        margin: 0;
+        background: #fff;
+    }
+    #printable-schedule .screen-only { display: none !important; }
+    #printable-schedule .print-only { display: block !important; }
+    .schedule-print-form {
+        width: 100%;
+        max-width: 100%;
+        font-size: 10.5pt;
+    }
+    button { display: none !important; }
+}
+
+.print-only { display: none; }
+
+/* ============================================================
+   DARK MODE
+   ============================================================ */
+.dark { color-scheme: dark; }
+
+/* Base & Layout */
+.dark html,
+.dark body                         { background-color: #0f172a; color: #e2e8f0; }
+.dark header                       { background-color: #1e293b !important; border-color: #334155 !important; }
+.dark aside                        { border-color: #334155 !important; }
+.dark main                         { background-color: #0f172a !important; }
+
+/* Backgrounds */
+.dark .bg-white                    { background-color: #1e293b !important; }
+.dark .bg-slate-50                 { background-color: #131c2e !important; }
+.dark .bg-slate-100                { background-color: #1e293b !important; }
+.dark .bg-slate-200                { background-color: #263350 !important; }
+
+/* Sidebar nav hover (sidebar itself stays dark via custom-gradient) */
+.dark .hover\:bg-slate-100:hover   { background-color: rgba(255,255,255,0.07) !important; }
+.dark .hover\:bg-slate-50:hover    { background-color: rgba(255,255,255,0.05) !important; }
+.dark .hover\:bg-slate-200:hover   { background-color: rgba(255,255,255,0.10) !important; }
+
+/* Text */
+.dark .text-slate-900              { color: #f1f5f9 !important; }
+.dark .text-slate-850              { color: #e2e8f0 !important; }
+.dark .text-slate-800              { color: #e2e8f0 !important; }
+.dark .text-slate-700              { color: #cbd5e1 !important; }
+.dark .text-slate-650              { color: #b0bcc8 !important; }
+.dark .text-slate-600              { color: #94a3b8 !important; }
+.dark .text-slate-500              { color: #64748b !important; }
+.dark .text-slate-450              { color: #56687a !important; }
+.dark .text-slate-400              { color: #475569 !important; }
+.dark .text-slate-350              { color: #3d4f62 !important; }
+
+/* Borders */
+.dark .border-slate-100            { border-color: #263350 !important; }
+.dark .border-slate-200            { border-color: #334155 !important; }
+.dark .border-slate-300            { border-color: #3d4f62 !important; }
+.dark .border-b                    { border-color: #334155; }
+.dark .divide-slate-100 > * + *    { border-color: #263350 !important; }
+.dark .divide-slate-200 > * + *    { border-color: #334155 !important; }
+.dark .divide-y > * + *            { border-color: #263350 !important; }
+.dark .ring-white                  { --tw-ring-color: #1e293b !important; }
+
+/* Form inputs */
+.dark input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="date"]),
+.dark input[type="date"],
+.dark select,
+.dark textarea {
+    background-color: #1a2844 !important;
+    border-color: #334155 !important;
+    color: #e2e8f0 !important;
+}
+.dark input::placeholder,
+.dark textarea::placeholder        { color: #475569 !important; }
+.dark input[readonly]              { background-color: #131c2e !important; color: #64748b !important; }
+
+/* Tables */
+.dark thead tr                     { background-color: #1a2844 !important; }
+.dark tbody tr:hover               { background-color: rgba(26,40,68,0.6) !important; }
+
+/* Shadows */
+.dark .shadow-sm                   { box-shadow: 0 1px 2px rgba(0,0,0,0.4) !important; }
+.dark .shadow-md                   { box-shadow: 0 4px 6px rgba(0,0,0,0.5) !important; }
+.dark .shadow-lg                   { box-shadow: 0 8px 15px rgba(0,0,0,0.5) !important; }
+.dark .shadow-xl                   { box-shadow: 0 20px 30px rgba(0,0,0,0.6) !important; }
+.dark .shadow-2xl                  { box-shadow: 0 25px 50px rgba(0,0,0,0.7) !important; }
+
+/* Status badge tint adjustments */
+.dark .bg-emerald-50               { background-color: rgba(6,78,59,0.35) !important; }
+.dark .border-emerald-200\/50      { border-color: rgba(52,211,153,0.15) !important; }
+.dark .bg-rose-50                  { background-color: rgba(136,19,55,0.35) !important; }
+.dark .border-rose-200\/50         { border-color: rgba(251,113,133,0.15) !important; }
+.dark .bg-amber-50                 { background-color: rgba(120,53,15,0.35) !important; }
+.dark .border-amber-200\/50        { border-color: rgba(252,211,77,0.15) !important; }
+.dark .bg-amber-100                { background-color: rgba(120,53,15,0.5) !important; }
+.dark .bg-brand-50                 { background-color: rgba(0,71,171,0.25) !important; }
+.dark .border-brand-200\/50        { border-color: rgba(0,71,171,0.25) !important; }
+.dark .bg-orange-50                { background-color: rgba(124,45,18,0.35) !important; }
+.dark .bg-blue-50                  { background-color: rgba(23,37,84,0.5) !important; }
+
+/* Dropdowns & floating panels */
+.dark #notifications-panel,
+.dark #user-profile-panel          { background-color: #1e293b !important; border-color: #334155 !important; }
+.dark #notifications-panel *,
+.dark #user-profile-panel *        { border-color: #334155; }
+
+/* Modal overlays */
+.dark .bg-white.rounded-2xl        { background-color: #1e293b !important; }
+
+/* Scrollbar */
+.dark ::-webkit-scrollbar-track    { background: #1e293b; }
+.dark ::-webkit-scrollbar-thumb    { background: #334155; }
+.dark ::-webkit-scrollbar-thumb:hover { background: #475569; }
+
+/* ACABAR Repayment Schedule print form (screen preview only) */
+.schedule-print-form {
+    font-family: "Khmer OS", "Khmer OS System", "Noto Sans Khmer", Arial, sans-serif;
+    font-size: 11px;
+    color: #000;
+    padding: 8px 10px;
+    width: 100%;
+    max-width: 100%;
+    margin: 0 auto;
+    box-sizing: border-box;
+}
+.spf-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    margin-bottom: 10px;
+}
+.spf-logo {
+    width: 56px;
+    height: 56px;
+    object-fit: contain;
+}
+.spf-logo-spacer { width: 56px; }
+.spf-title-block { text-align: center; flex: 1; }
+.spf-kh-title { font-size: 13px; font-weight: 700; margin: 0; }
+.spf-en-title { font-size: 16px; font-weight: 700; margin: 2px 0; letter-spacing: 0.5px; }
+.spf-doc-title { font-size: 12px; font-weight: 700; margin: 4px 0 0; text-decoration: underline; }
+.spf-meta {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px 24px;
+    margin-bottom: 6px;
+}
+.spf-meta-col { display: flex; flex-direction: column; gap: 2px; }
+.spf-row, .spf-address {
+    display: flex;
+    gap: 6px;
+    line-height: 1.35;
+}
+.spf-label { white-space: nowrap; flex-shrink: 0; }
+.spf-value { font-weight: 600; }
+.spf-address { margin-bottom: 8px; }
+.spf-table {
+    width: 100%;
+    table-layout: fixed;
+    border-collapse: collapse;
+    font-size: 8px;
+    margin-top: 4px;
+}
+.spf-table th,
+.spf-table td {
+    border: 1px solid #000;
+    padding: 3px 4px;
+    text-align: center;
+    vertical-align: middle;
+}
+.spf-table th {
+    font-weight: 700;
+    line-height: 1.2;
+}
+.spf-table th span { font-weight: 600; font-size: 9px; }
+.spf-table td.spf-col-total { font-weight: 700; }
+.spf-table tfoot td { border: 1px solid #000; font-weight: 700; }
+.spf-footer {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 12px;
+    font-size: 11px;
+}

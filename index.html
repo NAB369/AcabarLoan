@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en" class="h-full bg-slate-50">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Acabar Loan System</title>
+    <link rel="shortcut icon" type="image/png" href="/acabar-logo.png" />
+    <link rel="icon" type="image/png" href="/acabar-logo.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Libre+Baskerville:wght@400;700&family=Outfit:wght@300;400;500;600;700;800&family=Kantumruy+Pro:wght@300;400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script>
+      try {
+        if (localStorage.getItem('acabar-dark-mode') === '1') {
+          document.documentElement.classList.add('dark');
+          document.documentElement.style.backgroundColor = '#0f172a';
+        }
+      } catch(e) {}
+    </script>
+  </head>
+  <body class="h-full font-sans text-accent-800 antialiased">
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
