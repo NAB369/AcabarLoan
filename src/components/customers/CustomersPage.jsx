@@ -45,22 +45,12 @@ export default function CustomersPage() {
         <div>
           <h1 className="text-xl font-bold text-slate-800 dark:text-slate-100">Customer Management</h1>
         </div>
-        <Button
-          onClick={handleOpenCustomerWizard}
-          title={can('add_customer') ? undefined : `${state.currentRole} cannot create customers`}
-          className={`h-auto flex items-center justify-center gap-2 px-4 py-2 text-white text-sm font-semibold rounded-xl shadow-sm transition-colors flex-shrink-0 w-full sm:w-auto ${
-            can('add_customer') ? 'bg-brand-600 hover:bg-brand-700' : 'bg-slate-300 dark:bg-slate-600 cursor-not-allowed'
-          }`}
-        >
-          <Plus className="w-4 h-4" />
-          Open New Customer
-        </Button>
       </div>
 
       {/* Search + Filter Bar */}
       <div className="flex items-center gap-3 flex-wrap">
         <div className="relative w-full sm:w-64">
-          <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-4.35-4.35M17 11A6 6 0 1 1 5 11a6 6 0 0 1 12 0z" />
           </svg>
           <Input
@@ -68,18 +58,33 @@ export default function CustomersPage() {
             placeholder="Search by name, code, phone or ID…"
             value={state.customerSearch}
             onChange={e => dispatch({ type: 'SET_CUSTOMER_SEARCH', q: e.target.value })}
-            className="h-auto shadow-none md:text-sm w-full pl-9 pr-3 py-2 text-sm rounded-xl border border-slate-200 bg-white dark:bg-slate-800 dark:border-slate-700 dark:text-slate-100 dark:placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-brand-500/40 focus:border-brand-400 transition"
+            className="h-auto shadow-none md:text-xs w-full pl-8 pr-3 py-2 text-xs rounded-xl border border-slate-200 bg-white dark:bg-slate-800 dark:border-slate-700 dark:text-slate-100 dark:placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-brand-500/40 focus:border-brand-400 transition"
           />
         </div>
         <div className="flex items-center gap-2 flex-wrap">
-          <label className="text-xs font-medium text-slate-500 dark:text-slate-400 whitespace-nowrap">Created</label>
+          {/* The visible "Created" label is gone from the row, so the field carries its own
+              accessible name — a bare date input announces only as "date" to a screen reader. */}
           <input
             type="date"
+            aria-label="Filter by created date"
+            title="Filter by created date"
             value={state.customerDateFilter}
             onChange={e => dispatch({ type: 'SET_CUSTOMER_DATE_FILTER', date: e.target.value })}
-            className="px-3 py-2 text-sm rounded-xl border border-slate-200 bg-white dark:bg-slate-800 dark:border-slate-700 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500/40 focus:border-brand-400 transition"
+            className="px-3 py-2 text-xs rounded-xl border border-slate-200 bg-white dark:bg-slate-800 dark:border-slate-700 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500/40 focus:border-brand-400 transition"
           />
         </div>
+        {/* The page's one primary action, so it sits on this row with the filters but keeps
+            the solid fill that sets it apart, pushed to the far end. */}
+        <Button
+          onClick={handleOpenCustomerWizard}
+          title={can('add_customer') ? undefined : `${state.currentRole} cannot create customers`}
+          className={`h-auto flex items-center justify-center gap-1.5 px-3 py-2 text-white text-xs font-semibold rounded-xl shadow-sm transition-colors flex-shrink-0 sm:ml-auto ${
+            can('add_customer') ? 'bg-brand-600 hover:bg-brand-700' : 'bg-slate-300 dark:bg-slate-600 cursor-not-allowed'
+          }`}
+        >
+          <Plus className="w-3.5 h-3.5" />
+          Open New Customer
+        </Button>
       </div>
 
       {/* Table */}

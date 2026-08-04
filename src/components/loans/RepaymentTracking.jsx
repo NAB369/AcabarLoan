@@ -38,13 +38,23 @@ function isRowLate(row) {
 // remainderPaidDate), or collected with the next installment — RECORD_REPAYMENT
 // rolls the shortfall onto that row, so paying it in full clears this remainder
 // and supplies its paid date.
+const round2 = x => Math.round((x || 0) * 100) / 100
+
+// A residual of a cent or less is a rounding artifact, not money the borrower still owes.
+// Schedules written before amortizePeriods rounded hold full-precision figures, so a row
+// displayed as "Total Due $866.63" really wanted 866.6349 — paying exactly what the screen
+// asked for left a fraction behind that surfaced as a $0.01 debt which was never real.
+// Schedules generated now come out to the cent and land on zero, so this tolerance only
+// ever absorbs that legacy case; a genuine underpayment is orders of magnitude larger.
+const SETTLED_TOLERANCE = 0.015
+
 function getRemainder(schedule, idx) {
   const row = schedule[idx]
   if (!isRowSettled(row)) return null
-  const outstanding = Math.max(Math.round(((row.principal || 0) - (row.principalPaid || 0)) * 100) / 100, 0)
+  const outstanding = Math.max(round2(round2(row.principal) - round2(row.principalPaid)), 0)
   const next = schedule[idx + 1]
 
-  if (outstanding > 0.005) {
+  if (outstanding > SETTLED_TOLERANCE) {
     const collectedWithNext = next?.status === 'Paid'
     return {
       amount: outstanding,
@@ -719,7 +729,7 @@ export default function RepaymentTracking() {
               <p className="text-sm text-slate-600 dark:text-slate-300">
                 {recordMode === 'remainder' ? (
                   <>
-                    Remaining balance of installment <span className="font-semibold text-slate-800 dark:text-slate-100">#{schedule[recordIdx].num}</span> — {formatVal(Math.max(Math.round(((schedule[recordIdx].principal || 0) - (schedule[recordIdx].principalPaid || 0)) * 100) / 100, 0), currency, 1)}
+                    Remaining balance of installment <span className="font-semibold text-slate-800 dark:text-slate-100">#{schedule[recordIdx].num}</span> — {formatVal(Math.max(round2(round2(schedule[recordIdx].principal) - round2(schedule[recordIdx].principalPaid)), 0), currency, 1)}
                   </>
                 ) : (
                   <>

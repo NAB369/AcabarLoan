@@ -43,6 +43,53 @@ function stripCidPrefixes(value) {
   return value
 }
 
+// Repayment postings used to credit the Repayment Account (5010) the gross amount collected
+// while Account Receivable was *also* credited the principal portion, against a single bank
+// debit — so every repayment wrote an entry whose credits exceeded its debits by exactly that
+// principal, and overstated 5010 by the same amount. RECORD_REPAYMENT now credits 5010 only
+// the income half, and RECORD_REMAINDER (pure principal) credits it nothing. An install that
+// saved the old shape still holds those entries, so they are rebalanced on load and 5010 is
+// walked back by the principal it double-counted — leaving the ledger self-consistent instead
+// of carrying a permanent imbalance the System Operations verification would keep refusing.
+// Only entries that actually carry a 5010 line are touched; anything else is left as found.
+function repairRepaymentEntries(entries, chartOfAccounts) {
+  if (!entries?.length) return { entries, chartOfAccounts }
+  const AR_CODES = new Set(['1130', '1131'])
+  const round2 = n => Math.round(n * 100) / 100
+  let correction = 0
+  const repaired = entries.map(e => {
+    if (e.entryType !== 'Loan Repayment' || !Array.isArray(e.lines)) return e
+    if (!e.lines.some(l => l.accountCode === '5010')) return e
+    const debit = e.lines.reduce((s, l) => s + (l.debit || 0), 0)
+    const credit = e.lines.reduce((s, l) => s + (l.credit || 0), 0)
+    if (Math.abs(debit - credit) <= 0.005) return e
+    const arCredit = e.lines
+      .filter(l => AR_CODES.has(l.accountCode))
+      .reduce((s, l) => s + (l.credit || 0), 0)
+    // Whatever the payment covered beyond principal is the income half — nil on a remainder.
+    const income = round2(debit - arCredit)
+    const previous = e.lines
+      .filter(l => l.accountCode === '5010')
+      .reduce((s, l) => s + (l.credit || 0), 0)
+    correction = round2(correction + (income - previous))
+    return {
+      ...e,
+      lines: e.lines
+        .map(l => l.accountCode === '5010' ? { ...l, credit: income } : l)
+        .filter(l => (l.debit || 0) > 0.005 || (l.credit || 0) > 0.005),
+    }
+  })
+  if (!chartOfAccounts?.length || Math.abs(correction) <= 0.005) {
+    return { entries: repaired, chartOfAccounts }
+  }
+  return {
+    entries: repaired,
+    chartOfAccounts: chartOfAccounts.map(a =>
+      a.code === '5010' ? { ...a, balance: round2((a.balance || 0) + correction) } : a
+    ),
+  }
+}
+
 function loadPersistedState() {
   try {
     const saved = localStorage.getItem(STORAGE_KEY)
@@ -105,6 +152,7 @@ function loadPersistedState() {
           }))
         })
       : null
+    const repaired = repairRepaymentEntries(p.journalEntries, p.chartOfAccounts)
     return {
       customers: p.customers || null,
       // Income verification reads the monthly figures off the bank statement, which loans
@@ -118,14 +166,20 @@ function loadPersistedState() {
       feeSettings,
       loanProducts,
       activeStatement: p.activeStatement || null,
-      chartOfAccounts: p.chartOfAccounts || null,
+      chartOfAccounts: repaired.chartOfAccounts || null,
       realBankAccounts,
-      journalEntries: p.journalEntries || null,
+      journalEntries: repaired.entries || null,
       employees: p.employees || null,
       payrollRuns: p.payrollRuns || null,
       auditLogs: p.auditLogs || null,
       systemUsers: p.systemUsers || null,
       integrations: p.integrations || null,
+      customGeo: p.customGeo || null,
+      // Which business day is open (or was last closed) and the batch history behind it.
+      // Both are additive — an install saved before System Operations existed has neither,
+      // and falls back to a closed day with no history rather than needing a key bump.
+      businessDay: p.businessDay || null,
+      batchRuns: p.batchRuns || null,
     }
   } catch { return {} }
 }
@@ -180,6 +234,13 @@ function mergeSeededIntegrations(saved) {
       // Which provider account this install registered/signed in as — install data, like
       // the credentials beside it. A seeded provider that was signed out stays signed out.
       login: s.login ?? seed.login,
+      // The uploaded KHQR and its on/off switch belong to the install, not the build — the
+      // seed ships them empty/off, so without carrying them across every reload would drop
+      // the merchant's own code back to nothing.
+      khqrEnabled: s.khqrEnabled ?? seed.khqrEnabled,
+      khqrImage: s.khqrImage ?? seed.khqrImage,
+      khqrSource: s.khqrSource ?? seed.khqrSource,
+      khqrCurrency: s.khqrCurrency ?? seed.khqrCurrency,
       logs: s.logs || seed.logs,
       scopes: seed.scopes.map(scope => {
         const savedScope = (s.scopes || []).find(x => x.id === scope.id)
@@ -303,6 +364,26 @@ const INITIAL_STATE = {
   // Third-party connections (WeBill365, WeUMS) — credentials, what each is allowed to
   // sync and its exchange history. See mergeSeededIntegrations.
   integrations: mergeSeededIntegrations(persisted.integrations),
+  // Address values an operator added because the built-in Cambodian geo lists didn't carry
+  // them. KH_DISTRICTS covers every province, but KH_COMMUNES only reaches the districts the
+  // app's own records use and KH_VILLAGES is explicitly not a gazetteer — a customer living
+  // outside that coverage still has to be registrable. Kept per install so a commune added
+  // while registering one customer is on the list for the next.
+  //
+  // Scoped by parent rather than by name alone: district names repeat across provinces
+  // (Samraong is in both Oddar Meanchey and Takéo, Memot in both Kampong Cham and Tboung
+  // Khmum), so an unscoped key would surface a custom commune under the wrong province.
+  customGeo: persisted.customGeo || { provinces: [], districts: {}, communes: {}, villages: {} },
+  // ─── system operations ───────────────────────────────────────────────────
+  systemOpsOpen: false,
+  // The business-day gate. Start of Day opens a day, End of Day closes it, and End of Month
+  // needs every day closed. A fresh install starts closed with no date — the header shows
+  // "Day closed" until an operator opens one. Nothing else in the app is blocked by this;
+  // it records and displays where the back office is in its daily cycle.
+  businessDay: persisted.businessDay || { date: null, status: 'closed', openedAt: null, openedBy: null, closedAt: null, closedBy: null },
+  // What each batch verified and posted, newest first — the audit trail behind the day.
+  // End of Month reads it back to refuse closing a period it has already closed.
+  batchRuns: persisted.batchRuns || [],
 }
 
 // Cash moves through the real bank account held in the loan's currency AND branch —
@@ -708,7 +789,16 @@ function reducer(state, action) {
       const principalPaid = Math.min(Math.max(installmentPayment - row.interest, 0), balanceBefore)
       const interestPaid = Math.round((installmentPayment - principalPaid) * 100) / 100
       const newBalance = Math.round((balanceBefore - principalPaid) * 100) / 100
-      const status = principalPaid < (row.principal || 0) - 0.005 ? 'Partial' : 'Paid'
+      // What was collected is compared against the scheduled principal with both sides
+      // rounded to the cent, and a residual of a cent or less counts as settled. Schedules
+      // written before amortizePeriods rounded still hold full-precision figures, so a
+      // borrower paying exactly the total the screen asked for came up a fraction short —
+      // which marked the instalment 'Partial' and rolled a phantom cent onto the next one.
+      // Schedules generated now land on zero, so this tolerance only absorbs legacy rows.
+      const SETTLED_TOLERANCE = 0.015
+      const scheduledPrincipal = Math.round((row.principal || 0) * 100) / 100
+      const principalPaidRounded = Math.round(principalPaid * 100) / 100
+      const status = principalPaidRounded < scheduledPrincipal - SETTLED_TOLERANCE ? 'Partial' : 'Paid'
 
       // principalPaid/interestPaid capture what THIS payment actually covered (e.g. interest-only),
       // as distinct from row.principal/row.interest which is what the schedule originally called for —
@@ -717,7 +807,7 @@ function reducer(state, action) {
         i === idx
           ? {
               ...r, paid: amt, status, paidDate: paymentDate, paymentMethod, balance: newBalance, memo, bankName, receivedCurrency, exchangeRate,
-              principalPaid: Math.round(principalPaid * 100) / 100, interestPaid, lateFeePaid: lateFee,
+              principalPaid: principalPaidRounded, interestPaid, lateFeePaid: lateFee,
               trxId, referenceNo, payerName, outlet, remark, toAccount, txnHash,
             }
           : r
@@ -729,9 +819,9 @@ function reducer(state, action) {
       // The carried balance also picks up a penalty at the loan's contract rate
       // (condition 2); paying the remainder directly before it comes due unrolls
       // both the balance and this penalty (see RECORD_REMAINDER).
-      const shortfall = Math.round((row.principal - principalPaid) * 100) / 100
+      const shortfall = Math.round((scheduledPrincipal - principalPaidRounded) * 100) / 100
       const penaltyRate = loan.penaltyRate || 0
-      if (Math.abs(shortfall) > 0.005 && schedule[idx + 1] && schedule[idx + 1].status !== 'Paid' && schedule[idx + 1].status !== 'Partial') {
+      if (Math.abs(shortfall) > SETTLED_TOLERANCE && schedule[idx + 1] && schedule[idx + 1].status !== 'Paid' && schedule[idx + 1].status !== 'Partial') {
         const carryPenalty = shortfall > 0.005 ? Math.round(shortfall * (penaltyRate / 100) * 100) / 100 : 0
         schedule = schedule.map((r, i) =>
           i === idx + 1
@@ -774,9 +864,15 @@ function reducer(state, action) {
       // are income the borrower never owed as principal, so they leave the receivable
       // untouched and land in 5010 with the rest of the payment.
       const principalRetired = Math.round(principalPaid * 100) / 100
+      // 5010 takes the income half of the payment only. It used to take the gross amount
+      // while Account Receivable was *also* credited the principal, which made every
+      // repayment entry's credits exceed its debits by exactly that principal — the payment
+      // was being recognised twice, once as income and once as principal recovered. The
+      // bank still receives the full amount; that is the one real cash movement.
+      const repaymentIncomeGl = Math.round((amt - principalRetired) * 100) / 100
       const chartOfAccounts = applyGlMovements(
         state.chartOfAccounts.map(a => {
-          if (a.code === '5010') return { ...a, balance: (a.balance || 0) + amt }
+          if (a.code === '5010') return { ...a, balance: (a.balance || 0) + repaymentIncomeGl }
           if (a.code === fundingBankGL) return { ...a, balance: (a.balance || 0) + amt }
           return a
         }),
@@ -791,7 +887,9 @@ function reducer(state, action) {
         memo: repaymentMemo,
         amount: amt,
         lines: [
-          { accountCode: '5010', debit: 0, credit: amt, memo: repaymentMemo },
+          ...(repaymentIncomeGl > 0.005
+            ? [{ accountCode: '5010', debit: 0, credit: repaymentIncomeGl, memo: repaymentMemo }]
+            : []),
           { accountCode: fundingBankGL, debit: amt, credit: 0, memo: repaymentMemo },
           ...(principalRetired > 0.005
             ? [{ accountCode: AR_LOAN_CODE, debit: 0, credit: principalRetired, memo: `Principal collected — installment #${row.num}` }]
@@ -896,10 +994,11 @@ function reducer(state, action) {
       }]
       const accounts = state.accounts.map(a => a.code === 'ACC-REPAYMENT' ? { ...a, balance: (a.balance || 0) + amt } : a)
       // A remainder payment is principal and nothing else, so the whole amount comes
-      // off Account Receivable.
+      // off Account Receivable — and none of it is income. 5010 is deliberately left alone
+      // here: crediting it the gross amount alongside the full receivable credit was what
+      // made these entries carry twice the credit of their debit.
       const chartOfAccounts = applyGlMovements(
         state.chartOfAccounts.map(a => {
-          if (a.code === '5010') return { ...a, balance: (a.balance || 0) + amt }
           if (a.code === fundingBankGL) return { ...a, balance: (a.balance || 0) + amt }
           return a
         }),
@@ -914,7 +1013,6 @@ function reducer(state, action) {
         memo: remainderMemo,
         amount: amt,
         lines: [
-          { accountCode: '5010', debit: 0, credit: amt, memo: remainderMemo },
           { accountCode: fundingBankGL, debit: amt, credit: 0, memo: remainderMemo },
           { accountCode: AR_LOAN_CODE, debit: 0, credit: amt, memo: `Principal remainder collected — installment #${row.num}` },
         ],
@@ -928,6 +1026,21 @@ function reducer(state, action) {
         accounts,
         chartOfAccounts,
         journalEntries: [remainderJournalEntry, ...state.journalEntries],
+      }
+    }
+    // The borrower's own KHQR, held on the loan rather than on the WeBill365 connection: a
+    // single company-wide code would collect payments nobody could attribute, so each loan
+    // carries the code issued for it (see utils/khqr.js, which rides the loan reference in as
+    // the bill number). activeLoan mirrors whichever loan is open, so it moves with the list
+    // or the schedule view would keep showing the code it was opened with.
+    case 'SET_LOAN_KHQR': {
+      const ref = action.ref
+      if (!ref) return state
+      const apply = loan => loan.ref === ref ? { ...loan, ...action.khqr } : loan
+      return {
+        ...state,
+        loanApplications: state.loanApplications.map(apply),
+        activeLoan: state.activeLoan?.ref === ref ? apply(state.activeLoan) : state.activeLoan,
       }
     }
     case 'ADJUST_LATE_FEE': {
@@ -1182,6 +1295,239 @@ function reducer(state, action) {
         : i)
     }
 
+    // A province/district/commune/village the built-in geo lists don't carry, added from the
+    // address form. Guarded on the value already being present so adding twice can't produce
+    // two identical entries, and scoped by `key` (its parent path) so a custom commune shows
+    // up only under the district it was added for — see customGeo in INITIAL_STATE.
+    case 'ADD_GEO_VALUE': {
+      const name = (action.value || '').trim()
+      const geo = state.customGeo
+      if (!name || !geo[action.level]) return state
+      if (action.level === 'provinces') {
+        if (geo.provinces.includes(name)) return state
+        return { ...state, customGeo: { ...geo, provinces: [...geo.provinces, name] } }
+      }
+      if (!action.key) return state
+      const existing = geo[action.level][action.key] || []
+      if (existing.includes(name)) return state
+      return {
+        ...state,
+        customGeo: {
+          ...geo,
+          [action.level]: { ...geo[action.level], [action.key]: [...existing, name] },
+        },
+      }
+    }
+
+    // ─── system operations: SOD / EOD / EOM batches ──────────────────────
+    // Each batch is handed the plan the operator approved (see utils/systemOperations.js —
+    // the modal previews it and passes that same object here), so what posts is exactly what
+    // was shown. The reducer still owns the gates: a blocked plan and an out-of-sequence run
+    // are both refused here regardless of what the UI thought.
+    case 'OPEN_SYSTEM_OPS': return { ...state, systemOpsOpen: true }
+    case 'CLOSE_SYSTEM_OPS': return { ...state, systemOpsOpen: false }
+
+    // Opening the day posts nothing — it sets the gate the other two batches branch on.
+    // Refused while a day is already open, so a second dispatch can't overwrite the running
+    // day's openedAt or strand the day it replaced.
+    case 'RUN_SOD': {
+      const plan = action.plan
+      if (!plan || plan.blocked || plan.kind !== 'SOD') return state
+      if (state.businessDay?.status === 'open') return state
+      // A day End of Day has already closed cannot be reopened — reopening it would let the
+      // same date accrue interest twice, under a journal id keyed by that date.
+      if (state.batchRuns.some(r => r.kind === 'EOD' && r.date === plan.date)) return state
+      const runAt = auditStamp()
+      return {
+        ...state,
+        businessDay: {
+          date: plan.date,
+          status: 'open',
+          openedAt: runAt,
+          openedBy: state.currentRole,
+          closedAt: null,
+          closedBy: null,
+        },
+        batchRuns: [{
+          id: `sod-${plan.date}-${Date.now()}`,
+          kind: 'SOD',
+          date: plan.date,
+          period: plan.date.slice(0, 7),
+          runAt,
+          runBy: state.currentRole,
+          checks: plan.checks,
+          summary: `Business day ${plan.date} opened`,
+          postings: [],
+        }, ...state.batchRuns].slice(0, 200),
+      }
+    }
+
+    // Closing the day is where the day's accounting happens: the contract penalty is stamped
+    // on installments that went past due, and one day of interest is recognised on every
+    // active loan. Branches on the day being *open* rather than on the plan alone — the same
+    // transition guard loanPayableDelta uses — so a re-dispatch after the day has closed
+    // posts neither the accrual nor the penalties a second time.
+    case 'RUN_EOD': {
+      const plan = action.plan
+      if (!plan || plan.blocked || plan.kind !== 'EOD') return state
+      if (state.businessDay?.status !== 'open') return state
+      // Belt and braces beside the open-day guard: the accrual entry's id is keyed by date,
+      // so a second close of the same date must never post regardless of how the day reopened.
+      if (state.batchRuns.some(r => r.kind === 'EOD' && r.date === plan.date)) return state
+      const runAt = auditStamp()
+      const round2 = n => Math.round(n * 100) / 100
+
+      // A late fee lives on the schedule row, not in the ledger — a penalty becomes income
+      // only when it is actually collected (RECORD_REPAYMENT), which is how ADJUST_LATE_FEE
+      // already treats it. Grouped by loan so a loan with several overdue installments has
+      // its schedule rebuilt once. A row that somehow picked up a fee between preview and
+      // confirm is left alone, so no installment is ever charged twice.
+      const overdueByRef = new Map()
+      for (const item of plan.overdue || []) {
+        if (!overdueByRef.has(item.ref)) overdueByRef.set(item.ref, [])
+        overdueByRef.get(item.ref).push(item)
+      }
+      const loanApplications = overdueByRef.size
+        ? state.loanApplications.map(loan => {
+            const items = overdueByRef.get(loan.ref)
+            if (!items) return loan
+            return {
+              ...loan,
+              schedule: loan.schedule.map((row, idx) => {
+                const hit = items.find(i => i.idx === idx)
+                if (!hit || (row.lateFee || 0) > 0) return row
+                return {
+                  ...row,
+                  lateFee: hit.fee,
+                  lateFeeNote: `Penalty (${hit.penaltyRate}%) applied by End of Day ${plan.date} — ${hit.daysLate} day${hit.daysLate === 1 ? '' : 's'} past due`,
+                }
+              }),
+            }
+          })
+        : state.loanApplications
+
+      // activeLoan mirrors whichever loan the detail view has open; it has to pick up the
+      // same schedule or that view would keep showing pre-batch late fees until reopened.
+      const activeLoan = state.activeLoan
+        ? loanApplications.find(l => l.ref === state.activeLoan.ref) || state.activeLoan
+        : state.activeLoan
+
+      // One balanced entry per currency. Interest earned but not yet collected is an asset,
+      // so the accrued receivable is debited and accrued interest income credited by the
+      // same amount — posted against the accounts of the loan's own currency, never a
+      // hardcoded pair.
+      const movements = (plan.accrual?.movements || []).filter(m => m.amount > 0.005)
+      const glMovements = {}
+      const accrualEntries = movements.map(m => {
+        glMovements[m.receivable] = round2((glMovements[m.receivable] || 0) + m.amount)
+        glMovements[m.income] = round2((glMovements[m.income] || 0) + m.amount)
+        const memo = `End of Day interest accrual — ${plan.date} (${m.currency})`
+        return {
+          id: `eod-accrual-${plan.date}-${m.currency}`,
+          entryType: 'EOD Interest Accrual',
+          date: plan.date,
+          transactionNo: `EOD-${plan.date}-${m.currency}`,
+          memo,
+          amount: m.amount,
+          currency: m.currency,
+          lines: [
+            { accountCode: m.receivable, debit: m.amount, credit: 0, memo: `Interest receivable accrued — ${m.currency}` },
+            { accountCode: m.income, debit: 0, credit: m.amount, memo },
+          ],
+          createdAt: new Date().toISOString(),
+        }
+      })
+
+      const accruedTotal = movements.map(m => `${m.currency} ${m.amount.toFixed(2)}`).join(', ')
+      return {
+        ...state,
+        loanApplications,
+        activeLoan,
+        chartOfAccounts: applyGlMovements(state.chartOfAccounts, glMovements),
+        journalEntries: [...accrualEntries, ...state.journalEntries],
+        businessDay: {
+          ...state.businessDay,
+          status: 'closed',
+          closedAt: runAt,
+          closedBy: state.currentRole,
+        },
+        batchRuns: [{
+          id: `eod-${plan.date}-${Date.now()}`,
+          kind: 'EOD',
+          date: plan.date,
+          period: plan.date.slice(0, 7),
+          runAt,
+          runBy: state.currentRole,
+          checks: plan.checks,
+          summary: `Day closed — ${(plan.overdue || []).length} overdue installment${(plan.overdue || []).length === 1 ? '' : 's'} penalised, interest accrued ${accruedTotal || 'nil'}`,
+          postings: accrualEntries.map(e => ({ transactionNo: e.transactionNo, amount: e.amount, currency: e.currency })),
+        }, ...state.batchRuns].slice(0, 200),
+      }
+    }
+
+    // Month close rebuilds the required loan-loss allowance from the PAR bands and posts only
+    // the difference against what the allowance already carries, so the charge reflects how
+    // the book actually moved. Refused for a period already closed — the batch history is the
+    // guard, which is why it is persisted alongside the ledger it describes.
+    case 'RUN_EOM': {
+      const plan = action.plan
+      if (!plan || plan.blocked || plan.kind !== 'EOM') return state
+      if (state.businessDay?.status === 'open') return state
+      if (state.batchRuns.some(r => r.kind === 'EOM' && r.period === plan.period)) return state
+      const runAt = auditStamp()
+      const round2 = n => Math.round(n * 100) / 100
+
+      // A rising allowance is a charge (debit the provision expense, credit the allowance);
+      // a falling one releases it back the other way. Either way the two lines carry the same
+      // absolute amount, so the entry balances whichever direction the book moved.
+      const movements = (plan.provision?.movements || []).filter(m => Math.abs(m.delta) > 0.005)
+      const glMovements = {}
+      const provisionEntries = movements.map(m => {
+        glMovements[m.allowance] = round2((glMovements[m.allowance] || 0) + m.delta)
+        glMovements[m.expense] = round2((glMovements[m.expense] || 0) + m.delta)
+        const amount = round2(Math.abs(m.delta))
+        const raising = m.delta > 0
+        const memo = `End of Month loan-loss provision — ${plan.period} (${m.currency}), required ${m.required.toFixed(2)} against ${m.held.toFixed(2)} held`
+        return {
+          id: `eom-provision-${plan.period}-${m.currency}`,
+          entryType: 'EOM Loan Loss Provision',
+          date: plan.date,
+          transactionNo: `EOM-${plan.period}-${m.currency}`,
+          memo,
+          amount,
+          currency: m.currency,
+          lines: raising
+            ? [
+                { accountCode: m.expense, debit: amount, credit: 0, memo: `Provision charge — ${m.currency}` },
+                { accountCode: m.allowance, debit: 0, credit: amount, memo },
+              ]
+            : [
+                { accountCode: m.allowance, debit: amount, credit: 0, memo: `Provision released — ${m.currency}` },
+                { accountCode: m.expense, debit: 0, credit: amount, memo },
+              ],
+          createdAt: new Date().toISOString(),
+        }
+      })
+
+      const provisionTotal = movements.map(m => `${m.currency} ${m.delta > 0 ? '+' : ''}${m.delta.toFixed(2)}`).join(', ')
+      return {
+        ...state,
+        chartOfAccounts: applyGlMovements(state.chartOfAccounts, glMovements),
+        journalEntries: [...provisionEntries, ...state.journalEntries],
+        batchRuns: [{
+          id: `eom-${plan.period}-${Date.now()}`,
+          kind: 'EOM',
+          date: plan.date,
+          period: plan.period,
+          runAt,
+          runBy: state.currentRole,
+          checks: plan.checks,
+          summary: `Period ${plan.period} closed — provision movement ${provisionTotal || 'nil'}`,
+          postings: provisionEntries.map(e => ({ transactionNo: e.transactionNo, amount: e.amount, currency: e.currency })),
+        }, ...state.batchRuns].slice(0, 200),
+      }
+    }
+
     // Notifications
     case 'ADD_NOTIFICATION': return { ...state, notifications: [action.notification, ...state.notifications] }
     case 'MARK_NOTIFICATIONS_READ': return {
@@ -1221,9 +1567,12 @@ export function AppProvider({ children }) {
         integrations: state.integrations,
         auditLogs: state.auditLogs,
         systemUsers: state.systemUsers,
+        businessDay: state.businessDay,
+        batchRuns: state.batchRuns,
+        customGeo: state.customGeo,
       }))
     } catch {}
-  }, [state.systemUsers, state.auditLogs, state.integrations, state.payrollRuns, state.customers, state.loanApplications, state.incomes, state.expenses, state.notifications, state.cashTransfers, state.accounts, state.feeSettings, state.loanProducts, state.activeStatement, state.chartOfAccounts, state.realBankAccounts, state.journalEntries, state.companyProfile, state.employees])
+  }, [state.systemUsers, state.auditLogs, state.integrations, state.payrollRuns, state.customers, state.loanApplications, state.incomes, state.expenses, state.notifications, state.cashTransfers, state.accounts, state.feeSettings, state.loanProducts, state.activeStatement, state.chartOfAccounts, state.realBankAccounts, state.journalEntries, state.companyProfile, state.employees, state.businessDay, state.batchRuns, state.customGeo])
 
   // Dark mode
   useEffect(() => {

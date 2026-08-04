@@ -8,6 +8,7 @@ import ReminderPage from './components/reminders/ReminderPage'
 import AccountingPage from './components/accounting/AccountingPage'
 import ReportsPage from './components/reports/ReportsPage'
 import SettingsModal from './components/settings/SettingsModal'
+import SystemOperationsModal from './components/layout/SystemOperationsModal'
 import Toast from './components/shared/Toast'
 
 export default function App() {
@@ -17,6 +18,7 @@ export default function App() {
     const handleKey = (e) => {
       if (e.key !== 'Escape') return
       if (state.settingsOpen) dispatch({ type: 'CLOSE_SETTINGS' })
+      if (state.systemOpsOpen) dispatch({ type: 'CLOSE_SYSTEM_OPS' })
       if (state.customerWizardOpen) dispatch({ type: 'CLOSE_CUSTOMER_WIZARD' })
       if (state.loanWizardOpen) dispatch({ type: 'CLOSE_LOAN_WIZARD' })
       if (state.previewCustomerCode) dispatch({ type: 'CLOSE_CUSTOMER_PREVIEW' })
@@ -42,6 +44,7 @@ export default function App() {
       </Layout>
 
       <SettingsModal />
+      <SystemOperationsModal />
       <Toast />
     </>
   )

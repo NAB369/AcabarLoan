@@ -70,16 +70,6 @@ export default function LoanPage() {
               Back to Loan Applications
             </button>
           )}
-          <button
-            onClick={handleNewLoan}
-            title={can('open_loan') ? undefined : `${state.currentRole} cannot open loans`}
-            className={`flex items-center justify-center gap-2 px-4 py-2.5 text-white text-sm font-semibold rounded-xl shadow-sm transition-colors ${
-              can('open_loan') ? 'bg-[#0047ab] hover:bg-blue-700' : 'bg-slate-300 dark:bg-slate-600 cursor-not-allowed'
-            }`}
-          >
-            <Plus className="w-4 h-4" />
-            New Application
-          </button>
         </div>
       </div>
 
@@ -188,6 +178,19 @@ export default function LoanPage() {
         >
           <Settings className="w-3.5 h-3.5" />
           Loan Setting
+        </button>
+        {/* The page's one primary action, so it sits on this row with the other controls but
+            keeps the solid fill that separates it from them — and is pushed to the far end so
+            it does not read as another filter. */}
+        <button
+          onClick={handleNewLoan}
+          title={can('open_loan') ? undefined : `${state.currentRole} cannot open loans`}
+          className={`flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-xl text-white shadow-sm transition-colors flex-shrink-0 sm:ml-auto ${
+            can('open_loan') ? 'bg-[#0047ab] hover:bg-blue-700' : 'bg-slate-300 dark:bg-slate-600 cursor-not-allowed'
+          }`}
+        >
+          <Plus className="w-3.5 h-3.5" />
+          New Application
         </button>
       </div>
 

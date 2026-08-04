@@ -42,9 +42,16 @@
   .dark {
     --background: 222.2 84% 4.9%;
     --foreground: 210 40% 98%;
-    --card: 222.2 84% 4.9%;
+    /* shadcn ships --card and --popover equal to --background, so a Card sat on the page at
+       exactly the page's colour and read as a floating border. The app's own cards are
+       #1e293b (see `.dark .bg-white` below), so the tokens are set to that same value —
+       217.2 32.6% 17.5% — and a shadcn Card now matches the hand-built ones beside it
+       instead of being a second, darker surface.
+       Popovers go one step lighter again: a dropdown opening over a card needs to separate
+       from it, and at the same value it relied on its shadow alone to be seen. */
+    --card: 217.2 32.6% 17.5%;
     --card-foreground: 210 40% 98%;
-    --popover: 222.2 84% 4.9%;
+    --popover: 217.2 32.6% 20.5%;
     --popover-foreground: 210 40% 98%;
     --primary: 215 80% 46%;
     --primary-foreground: 210 40% 98%;
@@ -83,6 +90,23 @@
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+/* The thumb had no dark variant, so every scroller on a dark page carried a near-white bar —
+   the brightest thing on the screen, next to the content it was scrolling. */
+.dark ::-webkit-scrollbar-thumb { background: #3d4d63; }
+.dark ::-webkit-scrollbar-thumb:hover { background: #55677f; }
+
+/* Toggling the theme repaints every surface in the same frame; with nothing easing it that
+   lands as a hard flash. Limited to the colour properties that actually change and to the
+   surfaces that carry them — putting this on `*` would drag every hover and focus state into
+   a transition too, and make the whole UI feel laggy rather than smooth. */
+body, header, aside, main,
+.bg-white, .bg-slate-50, .bg-slate-100, .bg-slate-200 {
+  transition: background-color 200ms ease, border-color 200ms ease, color 200ms ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  body, header, aside, main,
+  .bg-white, .bg-slate-50, .bg-slate-100, .bg-slate-200 { transition: none; }
+}
 
 /* For a scroller whose scrollbar is presented elsewhere (see StickyHScroll) */
 .no-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
@@ -153,6 +177,50 @@
   .printable-area > .flex p { font-size: 9px !important; }
   button { display: none !important; }
   .print-only { display: block !important; }
+
+  /* ── Repayment schedule sheet ──────────────────
+     The rules above are tuned for the dense on-screen tables the reports and accounting
+     pages print. The schedule is already laid out as an A4 document, so it opts out of the
+     parts that would reshape it and prints at the size it is designed at. */
+
+  /* Its letterhead is a heading block, not the meta paragraphs `> .flex p` is aimed at —
+     that rule printed the company name at 9px, smaller than the title beneath it. These
+     restore the sizes the sheet shows on screen. The extra line-height is for the Khmer
+     name: Kantumruy Pro's diacritics sit above the cap height and clip when packed tight.
+     Scoped to the name block rather than to every paragraph in the letterhead: the KHQR
+     caption beside it is also a first-and-last child, and would otherwise be sized as
+     though it were the company name. */
+  .printable-area.schedule-sheet > .doc-letterhead .letterhead-name p { line-height: 1.45 !important; }
+  .printable-area.schedule-sheet > .doc-letterhead .letterhead-name p:first-child { font-size: 18px !important; }
+  .printable-area.schedule-sheet > .doc-letterhead .letterhead-name p:last-child { font-size: 14px !important; }
+  /* The borrower's KHQR card sits in the letterhead's right slot. Sized in absolute units so
+     the code has enough module area on paper for a phone to lock on regardless of how the
+     browser scales the page, and the whole card is kept off a page fold. */
+  .printable-area.schedule-sheet > .doc-letterhead { break-inside: avoid; page-break-inside: avoid; }
+  .printable-area.schedule-sheet .doc-logo { width: 77px !important; height: 77px !important; }
+  .printable-area.schedule-sheet .khqr-card { width: 93px !important; }
+  .printable-area.schedule-sheet .khqr-card-band { padding: 3px 0 !important; }
+  .printable-area.schedule-sheet .khqr-wordmark { font-size: 11px !important; }
+  .printable-area.schedule-sheet .khqr-payee { font-size: 8px !important; line-height: 1.3 !important; }
+  .printable-area.schedule-sheet .khqr-badge { font-size: 9px !important; }
+  .printable-area.schedule-sheet .khqr-ref { font-size: 7px !important; line-height: 1.3 !important; }
+
+  /* 8px is for a 15-column ledger table; this one has 8 columns across a full A4 width and
+     is legible — and expected — at the size it was designed at. */
+  .printable-area.schedule-sheet th,
+  .printable-area.schedule-sheet td {
+    font-size: 10px !important;
+    padding: 4px 5px !important;
+    line-height: 1.45;
+  }
+  /* A date is a single token. Letting the generic rule wrap it turned one column into three
+     lines and threw every row out of alignment. */
+  .printable-area.schedule-sheet td.whitespace-nowrap { white-space: nowrap !important; }
+  /* A schedule runs past one page, so the header repeats and no row is split down the fold. */
+  .printable-area.schedule-sheet thead { display: table-header-group; }
+  .printable-area.schedule-sheet tr { break-inside: avoid; page-break-inside: avoid; }
+  /* The signing block belongs with the schedule it signs off, not stranded on its own page. */
+  .printable-area.schedule-sheet table + div { break-inside: avoid; page-break-inside: avoid; }
 }
 
 /* ── DARK MODE ────────────────────────────────── */
@@ -168,12 +236,20 @@
 .dark .hover\:bg-slate-100:hover    { background-color: rgba(255,255,255,0.07) !important; }
 .dark .hover\:bg-slate-50:hover     { background-color: rgba(255,255,255,0.05) !important; }
 .dark .hover\:bg-slate-200:hover    { background-color: rgba(255,255,255,0.10) !important; }
-.dark .text-slate-900               { color: #f1f5f9 !important; }
+/* The text ramp used to be the light-mode slate scale shifted one step darker, which inverts
+   what the low end is for: on paper slate-400 is a soft grey on white, but on a #1e293b card
+   the same idea has to get *lighter*, not darker. It mapped to #475569 — 1.9:1 against the
+   card, effectively invisible — and slate-500 to #64748b at 3.1:1, both under the 4.5:1 body
+   text needs. They carry captions, meta lines and empty states in 700+ places, so most of the
+   secondary text in the app was unreadable at night.
+   Each step below clears 4.5:1 on the card surface while keeping the ramp's original order,
+   so nothing that was quiet becomes loud — the dim end just stops disappearing. */
+.dark .text-slate-900               { color: #f8fafc !important; }
 .dark .text-slate-800               { color: #e2e8f0 !important; }
 .dark .text-slate-700               { color: #cbd5e1 !important; }
-.dark .text-slate-600               { color: #94a3b8 !important; }
-.dark .text-slate-500               { color: #64748b !important; }
-.dark .text-slate-400               { color: #475569 !important; }
+.dark .text-slate-600               { color: #b0bccd !important; }
+.dark .text-slate-500               { color: #9aa9bd !important; }
+.dark .text-slate-400               { color: #8b9cb0 !important; }
 .dark .border-slate-100             { border-color: #263350 !important; }
 .dark .border-slate-200             { border-color: #334155 !important; }
 .dark .border-slate-300             { border-color: #3d4f62 !important; }

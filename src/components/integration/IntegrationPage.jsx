@@ -1,12 +1,14 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   ChevronLeft, Plug, Unlink, RefreshCw, Plus, MoreVertical, Info, Trash2, X,
   UserCircle2, LogOut,
   Eye, EyeOff, KeyRound, Globe, ShieldCheck, Settings2, History,
   ArrowDownLeft, ArrowUpRight, CheckCircle2, AlertTriangle, XCircle, Save,
+  QrCode, Upload,
 } from 'lucide-react'
 import { useApp } from '../../context/AppContext'
 import { formatDateDisplay, splitTimestamp } from '../../utils/format'
+import { buildKhqrPayload, renderKhqrImage } from '../../utils/khqr'
 import ProviderLogo from './ProviderLogo'
 import { INTEGRATION_CATALOGUE, buildIntegration } from './catalogue'
 import { Button } from '@/components/ui/button'
@@ -463,6 +465,207 @@ function ConnectionPanel({ integration, onSave, onTest, onDisconnect }) {
               <p className="text-xs font-semibold text-slate-700 dark:text-slate-200 text-right">{row.value}</p>
             </div>
           ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── KHQR (Connection tab, WeBill365 only) ───────────────────────────────────
+// Two ways in, because a back office should never be blocked from putting a payment code on
+// its own paperwork by the state of a third-party connection:
+//   • Connected — generate the code from the merchant account WeBill365 signs in as.
+//   • Any time — upload the KHQR image the bank or Bakong issued, connection or not.
+// Whichever produced the current code, the switch is what puts it on the repayment schedule;
+// turning it off leaves the image in place so it can be switched back on without redoing it.
+//
+// An uploaded image is downscaled on the way in for the same reason the company logo is (it
+// rides in localStorage with the rest of the state), but to 512px rather than 256 — a dense
+// KHQR starts losing modules, and with them scannability, at the logo's size.
+const KHQR_MAX_PX = 512
+
+function KhqrPanel({ integration, dispatch, showToast, companyName }) {
+  const fileInputRef = useRef(null)
+  const [generating, setGenerating] = useState(false)
+  const connected = integration.status === 'connected'
+  const hasImage = !!integration.khqrImage
+  const currency = integration.khqrCurrency || 'USD'
+
+  const update = updates => dispatch({ type: 'UPDATE_INTEGRATION', id: integration.id, updates })
+
+  // "Retrieving" is generating locally from the merchant account — the connection is a mock
+  // with no endpoint to ask (see INITIAL_INTEGRATIONS), so the payload is built here in the
+  // EMVCo shape Bakong reads rather than fetched. See utils/khqr.js on what that does and
+  // does not guarantee.
+  async function handleGenerate() {
+    const account = (integration.account || '').trim()
+    if (!account) {
+      showToast(`Set the ${integration.accountLabel} above and save before generating a KHQR`, 'error')
+      return
+    }
+    setGenerating(true)
+    try {
+      const payload = buildKhqrPayload({ account, merchantName: companyName, currency })
+      const image = await renderKhqrImage(payload)
+      update({ khqrImage: image, khqrEnabled: true, khqrSource: 'webill365' })
+      showToast(`KHQR generated for ${account} — scan it once to confirm it resolves`, 'success')
+    } catch {
+      showToast('That KHQR could not be generated', 'error')
+    } finally {
+      setGenerating(false)
+    }
+  }
+
+  function handleFile(e) {
+    const file = e.target.files?.[0]
+    e.target.value = '' // so picking the same file twice still fires onChange
+    if (!file) return
+    if (!file.type.startsWith('image/')) {
+      showToast('Choose an image file', 'error')
+      return
+    }
+    const reader = new FileReader()
+    reader.onerror = () => showToast('That image could not be read', 'error')
+    reader.onload = () => {
+      const img = new Image()
+      img.onerror = () => showToast('That image could not be read', 'error')
+      img.onload = () => {
+        const scale = Math.min(1, KHQR_MAX_PX / Math.max(img.width, img.height))
+        const canvas = document.createElement('canvas')
+        canvas.width = Math.round(img.width * scale)
+        canvas.height = Math.round(img.height * scale)
+        const ctx = canvas.getContext('2d')
+        // Flattened onto white first — a QR saved with a transparent background loses its
+        // quiet zone against a dark sheet, and a scanner needs that margin to lock on.
+        ctx.fillStyle = '#ffffff'
+        ctx.fillRect(0, 0, canvas.width, canvas.height)
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+        // Switched on by the upload — someone who has just supplied the code wants it shown,
+        // and leaving it off would read as the upload having failed.
+        update({ khqrImage: canvas.toDataURL('image/png'), khqrEnabled: true, khqrSource: 'uploaded' })
+        showToast('KHQR image uploaded — it will appear on the repayment schedule', 'success')
+      }
+      img.src = reader.result
+    }
+    reader.readAsDataURL(file)
+  }
+
+  function handleRemove() {
+    update({ khqrImage: '', khqrEnabled: false, khqrSource: '' })
+    showToast('KHQR image removed', 'info')
+  }
+
+  return (
+    <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/60 dark:border-slate-700 shadow-sm overflow-hidden">
+      <div className="px-4 sm:px-6 py-4 border-b border-slate-100 dark:border-slate-700 flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-sm font-bold text-slate-800 dark:text-slate-100">KHQR on Repayment Schedule</h2>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+            {integration.khqrEnabled
+              ? hasImage
+                ? 'Shown on the repayment schedule preview and on the printed copy.'
+                : 'Switched on, but there is no code yet — nothing will be shown.'
+              : 'Off — the repayment schedule carries no payment code.'}
+          </p>
+        </div>
+        <Toggle
+          checked={!!integration.khqrEnabled}
+          onChange={() => {
+            if (!integration.khqrEnabled && !hasImage) {
+              showToast('Generate or upload a KHQR first', 'error')
+              return
+            }
+            update({ khqrEnabled: !integration.khqrEnabled })
+          }}
+          label="Show KHQR on repayment schedule"
+        />
+      </div>
+
+      <div className="p-4 sm:p-6">
+        <div className="flex flex-col sm:flex-row items-start gap-4">
+          <div className="flex-shrink-0">
+            <div className="w-32 h-32 rounded-xl border border-slate-200 dark:border-slate-600 bg-white flex items-center justify-center overflow-hidden">
+              {hasImage
+                ? <img src={integration.khqrImage} alt="KHQR payment code" className="w-full h-full object-contain" />
+                : <QrCode className="w-8 h-8 text-slate-300 dark:text-slate-500" aria-hidden="true" />}
+            </div>
+            {hasImage && (
+              <p className="text-[10px] text-center text-slate-400 dark:text-slate-500 mt-1.5">
+                {integration.khqrSource === 'webill365' ? `From ${integration.name}` : 'Uploaded'}
+              </p>
+            )}
+          </div>
+
+          <div className="min-w-0 flex-1 space-y-3">
+            {/* Generate — only meaningful once the connection has a merchant account to key
+                the code on. Kept above upload because it is the path that needs no file. */}
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  type="button"
+                  onClick={handleGenerate}
+                  disabled={!connected || generating}
+                  className="h-auto flex items-center gap-2 px-4 py-2 rounded-xl bg-brand-600 hover:bg-brand-700 disabled:opacity-40 disabled:cursor-not-allowed text-xs font-bold"
+                >
+                  <QrCode className="w-3.5 h-3.5" />
+                  {generating ? 'Generating…' : `Generate from ${integration.name}`}
+                </Button>
+                <select
+                  value={currency}
+                  onChange={e => update({ khqrCurrency: e.target.value })}
+                  aria-label="KHQR currency"
+                  className={`${inputClass} w-auto text-xs py-2`}
+                >
+                  <option value="USD">USD</option>
+                  <option value="KHR">KHR</option>
+                </select>
+              </div>
+              <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-1.5 leading-relaxed">
+                {connected
+                  ? `Built from the ${integration.accountLabel} on this connection. Scan the result once to confirm it resolves before issuing schedules.`
+                  : `${integration.name} is not connected — connect it to generate, or upload the code below.`}
+              </p>
+            </div>
+
+            {/* Upload — deliberately never gated on the connection. A KHQR issued by the bank
+                or Bakong direct is just as valid, and paperwork should not wait on a
+                third-party integration being reachable. */}
+            <div className="border-t border-slate-100 dark:border-slate-700 pt-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={handleFile}
+                  className="hidden"
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="h-auto flex items-center gap-2 px-4 py-2 rounded-xl border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 text-xs font-bold"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  {hasImage ? 'Replace with an image' : 'Upload KHQR image'}
+                </Button>
+                {hasImage && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    onClick={handleRemove}
+                    className="h-auto flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-900/20"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    Remove
+                  </Button>
+                )}
+              </div>
+              <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-1.5 leading-relaxed">
+                Upload the KHQR your bank or Bakong issued. Available whether or not {integration.name} is
+                connected, and it replaces whatever code is held now.
+              </p>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -1035,13 +1238,25 @@ export default function IntegrationPage({ embedded = false }) {
           </div>
 
           {tab === 'connection' && (
-            <ConnectionPanel
-              key={active.id}
-              integration={active}
-              onSave={form => handleSave(active, form)}
-              onTest={form => handleTest(active, form)}
-              onDisconnect={() => handleDisconnect(active)}
-            />
+            <div className="space-y-4">
+              <ConnectionPanel
+                key={active.id}
+                integration={active}
+                onSave={form => handleSave(active, form)}
+                onTest={form => handleTest(active, form)}
+                onDisconnect={() => handleDisconnect(active)}
+              />
+              {/* KHQR is a WeBill365 capability — the other providers have no merchant code
+                  to present, so the card only appears for that connection. */}
+              {active.id === 'webill365' && (
+                <KhqrPanel
+                  integration={active}
+                  dispatch={dispatch}
+                  showToast={showToast}
+                  companyName={state.companyProfile?.name}
+                />
+              )}
+            </div>
           )}
 
           {tab === 'sync' && (

@@ -199,6 +199,14 @@ export default function LoanOverview() {
   const approvalState = loan.approvalState || 1
   const readyToDisburse = approvalState >= 3 && !isDisbursed
   const isApproved = readyToDisburse || isDisbursed
+  // Whether the loan can still be acted on, as distinct from whether it ever reached approval.
+  // A cancelled or rejected loan keeps the approvalState it had got to, so it still reads as
+  // approved — which is right for the Repayment tabs and the approval reason below, and wrong
+  // for the Customer Cancel / Disburse buttons, which were still being offered on a loan
+  // nobody can disburse. Kept separate from `isApproved` so fixing the buttons does not pull
+  // tabs out from under a cancelled loan and shift every tab index with them.
+  const isClosed = loan.status === 'Cancelled' || loan.status === 'Rejected'
+  const canDisburse = readyToDisburse && !isClosed
   // A cleared repayment date blocks the payout too — the confirm dialog is where the
   // collection day is agreed, so it cannot be released without one.
   const disburseReady = !!customer?.accountNumber && disburseConfirmed && can('disburse_loan')
@@ -446,7 +454,7 @@ export default function LoanOverview() {
               Approval
             </button>
           )}
-          {!isDisbursed && readyToDisburse && (
+          {!isDisbursed && canDisburse && (
             <>
               <button
                 onClick={openCancelModal}

@@ -1,18 +1,21 @@
 import { useState, useRef, useEffect } from 'react'
 import jsPDF from 'jspdf'
-import { DollarSign, TrendingUp, Calculator, FileText, Building, Briefcase, Calendar, X, Check, Printer, Download, Bell, Phone, ShieldAlert, CheckCircle, Clock, AlertCircle, ChevronRight } from 'lucide-react'
+import { DollarSign, TrendingUp, Calculator, FileText, Building, Briefcase, Calendar, X, Check, Printer, Download, Bell, Phone, ShieldAlert, CheckCircle, Clock, AlertCircle, ChevronRight, QrCode, Upload } from 'lucide-react'
 import { useApp, hasFundingAccount } from '../../context/AppContext'
 import { buildReminderRecipients, buildSampleReminderMessage, daysUntilDue as daysUntilDueISO, weumsSignedIn } from '../../utils/reminders'
 import { formatVal, formatAddress, buildAmortizationData, splitTimestamp, formatDateDisplay } from '../../utils/format'
 import { LOAN_TAB_ICONS } from '../../utils/tabIcons'
 import { downloadSheetPdf } from '../../utils/exportPdf'
 import { companyLogoSrc } from '../../utils/companyLogo'
+import { buildKhqrPayload, renderKhqrImage } from '../../utils/khqr'
 import { InfoRow, InfoCard } from '../shared/InfoCard'
 import DocList from '../shared/DocList'
 import WeumsGateModal from '../shared/WeumsGateModal'
 import RepaymentTracking from './RepaymentTracking'
 import FirstRepaymentDateField from './FirstRepaymentDateField'
 import CBCReport from './CBCReport'
+import KhqrCard from './KhqrCard'
+import KhqrCropModal from './KhqrCropModal'
 import { assessLoanRisk } from '../../utils/riskAssessment'
 import { incomeCapacity } from '../../utils/statementIncome'
 import { expenseCapacity } from '../../utils/statementExpense'
@@ -111,6 +114,9 @@ export default function LoanPreview() {
   const [showCancelModal, setShowCancelModal] = useState(false)
   const [cancelReason, setCancelReason] = useState('')
   const [scheduleDownloading, setScheduleDownloading] = useState(false)
+  const [khqrBusy, setKhqrBusy] = useState(false)
+  const [khqrCropFile, setKhqrCropFile] = useState(null)
+  const khqrFileRef = useRef(null)
   const profileDocRef = useRef(null)
   const scheduleSheetRef = useRef(null)
 
@@ -232,6 +238,88 @@ export default function LoanPreview() {
   const selectedRecipient = reminderRecipients.find(r => r.key === reminderRecipientKey) || reminderRecipients[0]
   const sampleReminderMessage = buildSampleReminderMessage('Message', selectedRecipient, nextPayment, currency, loan)
   const reminderMessage = reminderMessageOverride ?? sampleReminderMessage
+
+  // The KHQR belongs to this loan, not to the company — one code per borrower is what makes a
+  // collected payment attributable to the loan it settles. The switch is per loan too, so a
+  // schedule can be issued without a payment code without disturbing anyone else's.
+  const webill365 = state.integrations?.find(i => i.id === 'webill365')
+  const khqrImage = loan.khqrEnabled ? (loan.khqrImage || '') : ''
+  const hasKhqr = !!loan.khqrImage
+  // Binding needs both a live connection and the merchant account the code is keyed on —
+  // either missing and there is nothing for the button to fetch.
+  const khqrCanBind = webill365?.status === 'connected' && !!(webill365.account || '').trim()
+
+  function setKhqr(khqr) {
+    dispatch({ type: 'SET_LOAN_KHQR', ref: loan.ref, khqr })
+  }
+
+  // Generated from the WeBill365 merchant account with this loan's reference riding inside it.
+  // The connection is a mock with no endpoint (see INITIAL_INTEGRATIONS), so the payload is
+  // built locally in the shape Bakong reads rather than fetched — utils/khqr.js covers what
+  // that does and does not guarantee.
+  async function handleGenerateKhqr() {
+    const account = (webill365?.account || '').trim()
+    if (webill365?.status !== 'connected' || !account) {
+      showToast('Connect WeBill365 and set its Merchant ID first, or upload a KHQR image', 'error')
+      return
+    }
+    setKhqrBusy(true)
+    try {
+      // Recorded alongside the image because the currency is baked into the payload at this
+      // moment and cannot change afterwards. The card used to read its symbol from the live
+      // schedule currency, so switching the app's currency toggle put a riel symbol on a code
+      // that still encoded dollars — the badge now reports what the QR actually carries.
+      const khqrCurrency = loan.currency || currency
+      const payload = buildKhqrPayload({
+        account,
+        merchantName: state.companyProfile?.name,
+        currency: khqrCurrency,
+        billNumber: loan.ref,
+        reference: loan.customerCode,
+      })
+      const image = await renderKhqrImage(payload)
+      setKhqr({ khqrImage: image, khqrEnabled: true, khqrSource: 'webill365', khqrCurrency })
+      showToast(`KHQR generated for ${loan.ref} — scan it once to confirm it resolves`, 'success')
+    } catch {
+      showToast('That KHQR could not be generated', 'error')
+    } finally {
+      setKhqrBusy(false)
+    }
+  }
+
+  // This button is the WeBill365 path and nothing else: switching it on binds the code from
+  // that connection every time, rather than reusing whatever image happens to be held. Upload
+  // (Replace KHQR) is a separate route to the same slot and deliberately does not feed this —
+  // so the button never shows a code that did not come from WeBill365.
+  //
+  // Switching *off* stays available with or without a connection: a code already on a schedule
+  // has to be removable even when the provider is unreachable.
+  async function handleKhqrToggle() {
+    if (loan.khqrEnabled) {
+      setKhqr({ khqrEnabled: false })
+      return
+    }
+    await handleGenerateKhqr()
+  }
+
+  // Upload runs through the cropper rather than straight into state — see KhqrCropModal on
+  // why a screenshot of a bank app is rarely usable uncropped.
+  function handleKhqrFile(e) {
+    const file = e.target.files?.[0]
+    e.target.value = '' // so picking the same file twice still fires onChange
+    if (!file) return
+    if (!file.type.startsWith('image/')) {
+      showToast('Choose an image file', 'error')
+      return
+    }
+    setKhqrCropFile(file)
+  }
+
+  function handleKhqrCropped(dataUrl) {
+    setKhqrCropFile(null)
+    setKhqr({ khqrImage: dataUrl, khqrEnabled: true, khqrSource: 'uploaded' })
+    showToast(`KHQR set for ${loan.ref}`, 'success')
+  }
 
   const overviewTabIdx = TABS.indexOf('Overview')
   const loanProfileTabIdx = TABS.indexOf('Loan Profile')
@@ -999,6 +1087,46 @@ export default function LoanPreview() {
                   <Download className="w-3.5 h-3.5" />
                   {scheduleDownloading ? 'Preparing…' : 'Download PDF'}
                 </button>
+
+                {/* One control for this loan's payment code. Switching it on with nothing on
+                    file binds it from WeBill365 as part of the same action, so there is no
+                    separate step to know about. Disabled while switched off and the provider
+                    is unreachable — there would be nothing to bind — but never while switched
+                    on, so a code already on a schedule can always be taken back off. */}
+                <button
+                  onClick={handleKhqrToggle}
+                  disabled={khqrBusy || (!loan.khqrEnabled && !khqrCanBind)}
+                  aria-pressed={!!loan.khqrEnabled}
+                  title={loan.khqrEnabled
+                    ? 'KHQR is shown on this schedule — click to hide it'
+                    : khqrCanBind
+                      ? `Bind this loan’s KHQR from ${webill365?.name || 'WeBill365'} and show it`
+                      : `${webill365?.name || 'WeBill365'} is not connected — connect it, or use Replace KHQR to supply the code by hand`}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                    loan.khqrEnabled
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-900/25 dark:text-emerald-400'
+                      : 'border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700'
+                  }`}
+                >
+                  <QrCode className="w-3.5 h-3.5" />
+                  {/* What pressing it actually does while switched off — bind from WeBill365 —
+                      is carried by the tooltip and the busy label rather than the resting one,
+                      which stays a plain on/off. */}
+                  {khqrBusy
+                    ? 'Binding from WeBill365…'
+                    : loan.khqrEnabled
+                      ? 'KHQR On'
+                      : 'KHQR Off'}
+                </button>
+                <input ref={khqrFileRef} type="file" accept="image/*" onChange={handleKhqrFile} className="hidden" />
+                <button
+                  onClick={() => khqrFileRef.current?.click()}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  {hasKhqr ? 'Replace KHQR' : 'Upload KHQR'}
+                </button>
+
                 <button
                   onClick={() => window.print()}
                   className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
@@ -1008,19 +1136,42 @@ export default function LoanPreview() {
                 </button>
               </div>
 
+              {/* `schedule-sheet` opts this document out of the generic print rules written
+                  for the dense on-screen tables elsewhere — see the print block in
+                  globals.css, which would otherwise shrink the letterhead below the title
+                  and wrap the date column. */}
               <div
                 ref={scheduleSheetRef}
-                className="printable-area bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl p-6 mx-auto w-full max-w-[210mm] shadow-sm"
+                className="printable-area schedule-sheet bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl p-6 mx-auto w-full max-w-[210mm] shadow-sm"
                 style={{ fontFamily: "'Kantumruy Pro', 'Outfit', sans-serif" }}
               >
-                {/* Header */}
-                <div className="flex items-center gap-3">
-                  <img src={companyLogoSrc(state.companyProfile)} alt={state.companyProfile.name} className="w-14 h-14 object-contain flex-shrink-0" />
-                  <div className="flex-1 text-center">
+                {/* Header. Both outer slots are the same width so the company name stays
+                    optically centred whether or not this loan carries a KHQR. */}
+                <div className="doc-letterhead flex items-start gap-3">
+                  <div className="w-32 flex-shrink-0 flex items-start justify-start">
+                    <img src={companyLogoSrc(state.companyProfile)} alt={state.companyProfile.name} className="doc-logo w-[77px] h-[77px] object-contain" />
+                  </div>
+                  <div className="letterhead-name flex-1 text-center pt-1">
                     <p className="text-lg font-bold text-slate-800 dark:text-slate-100">{state.companyProfile.nameKh}</p>
                     <p className="text-sm font-bold tracking-wide text-slate-700 dark:text-slate-200">{state.companyProfile.name.toUpperCase()}</p>
                   </div>
-                  <div className="w-14 h-14 flex-shrink-0" aria-hidden="true" />
+                  <div className="w-32 flex-shrink-0 flex flex-col items-end">
+                    {khqrImage && (
+                      <KhqrCard
+                        className="w-[102px]"
+                        image={khqrImage}
+                        // The borrower, not the company — the code is issued per loan, so the
+                        // name on it should say who is paying against it.
+                        payeeName={loan.customerName}
+                        // What the code encodes, not what the sheet is currently displayed in.
+                        currency={loan.khqrCurrency || loan.currency || currency}
+                        reference={loan.ref}
+                        // An uploaded image is already a complete KHQR card; framing it again
+                        // stacked a second banner and payee on top of the one in the picture.
+                        framed={loan.khqrSource !== 'uploaded'}
+                      />
+                    )}
+                  </div>
                 </div>
                 <p className="text-center text-base font-bold text-slate-800 dark:text-slate-100 mt-1 mb-5">តារាងកាលវិភាគសងប្រាក់</p>
 
@@ -1389,6 +1540,15 @@ export default function LoanPreview() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Crop step for an uploaded KHQR — handles its own Escape, see KhqrCropModal. */}
+      {khqrCropFile && (
+        <KhqrCropModal
+          file={khqrCropFile}
+          onCancel={() => setKhqrCropFile(null)}
+          onApply={handleKhqrCropped}
+        />
       )}
 
       {/* Image Lightbox */}

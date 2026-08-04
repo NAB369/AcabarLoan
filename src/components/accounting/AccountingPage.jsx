@@ -7,7 +7,7 @@ import {
   FileText, ChevronDown,
   Banknote, Users, Zap, Receipt, ArrowUpCircle, ArrowDownCircle, HandCoins, Landmark, ChevronRight, ChevronLeft,
   Settings, Pencil, Search, Eye, LayoutDashboard, BookOpen, Check, CheckCheck, Trash2, History,
-  Download, Columns3, ExternalLink,
+  Download, Columns3, ExternalLink, CornerDownRight,
 } from 'lucide-react'
 import { useApp, canFundExpense, expenseFundingAccount } from '../../context/AppContext'
 import { formatVal } from '../../utils/format'
@@ -716,9 +716,47 @@ const SE_COLUMNS = [
 
 // Chart of accounts columns — same contract as GL_COLUMNS: one definition drives the
 // header, the rows and the View menu. `ctx` carries the row actions.
+// An account either heads the chart or hangs off another one (`parentCode`), and the table
+// rendered both identically — nothing on a row said which it was, or what a sub-account
+// belonged to. The name now carries it at a glance and the Level column states it outright,
+// so it survives a column being hidden and lands in the CSV export too.
+const isSubAccount = a => !!(a.parentCode || '').trim()
+
 const COA_COLUMNS = [
   { id: 'code', label: 'Code', text: a => a.code || '', render: a => a.code, cellClass: 'font-bold font-mono text-brand-600 dark:text-brand-400' },
-  { id: 'name', label: 'Account Name', text: a => a.name || '', render: a => a.name, cellClass: 'font-semibold text-slate-800 dark:text-slate-100' },
+  {
+    id: 'name', label: 'Account Name',
+    text: a => a.name || '',
+    // Weight is set here rather than in cellClass because it differs per row: a main account
+    // stays bold, a sub-account steps in under it at a lighter weight.
+    render: a => isSubAccount(a)
+      ? (
+        <span className="flex items-center gap-1.5 pl-3 font-medium">
+          <CornerDownRight className="w-3 h-3 flex-shrink-0 text-slate-400 dark:text-slate-500" aria-hidden="true" />
+          {a.name}
+        </span>
+      )
+      : <span className="font-bold">{a.name}</span>,
+    cellClass: 'text-slate-800 dark:text-slate-100',
+  },
+  {
+    id: 'level', label: 'Level',
+    text: a => isSubAccount(a) ? `Sub-account of ${a.parentCode}` : 'Main account',
+    // Shape and wording carry the distinction, not colour alone — these print to PDF and are
+    // read by people who cannot rely on hue.
+    render: a => isSubAccount(a)
+      ? (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-slate-200 dark:border-slate-600 text-[10px] font-semibold text-slate-500 dark:text-slate-400 whitespace-nowrap">
+          <CornerDownRight className="w-2.5 h-2.5 flex-shrink-0" aria-hidden="true" />
+          Sub · {a.parentCode}
+        </span>
+      )
+      : (
+        <span className="inline-flex items-center px-2 py-0.5 rounded-full border border-brand-200 bg-brand-50 dark:border-brand-800 dark:bg-brand-900/30 text-[10px] font-bold text-brand-700 dark:text-brand-300 whitespace-nowrap">
+          Main
+        </span>
+      ),
+  },
   { id: 'nameKhmer', label: 'Name (Khmer)', text: a => a.nameKhmer || '—', render: a => a.nameKhmer || '—', cellClass: 'text-slate-500 dark:text-slate-400 font-khmer' },
   {
     id: 'normalBalance', label: 'Normal Balance',
@@ -1607,6 +1645,44 @@ export default function AccountingPage() {
     return all
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [incomes, approvedExpenses, cashTransfers, loanLedgerEntries, chartOfAccounts, accounts, glFilter, glAccountFilter, glDate, glSearch])
+
+  // Accounts for the account pickers (General Ledger, Cash Transfer), ordered
+  // parent-then-children so the list mirrors the chart's shape. A flat "code — name" list gave
+  // no way to tell 1110 (Allowance for Loan Losses) from 1111 (one of its stages) when
+  // choosing what to filter by — they read as siblings. Sorted on code rather than trusting
+  // the stored order, since an account added by hand lands at the end of the list regardless
+  // of where it belongs in the hierarchy.
+  const accountPickerOptions = useMemo(() => {
+    const byCode = (a, b) => (a.code || '').localeCompare(b.code || '')
+    const children = new Map()
+    const roots = []
+    for (const a of chartOfAccounts) {
+      const parent = (a.parentCode || '').trim()
+      if (parent) {
+        if (!children.has(parent)) children.set(parent, [])
+        children.get(parent).push(a)
+      } else {
+        roots.push(a)
+      }
+    }
+    const out = []
+    const placed = new Set()
+    for (const root of [...roots].sort(byCode)) {
+      out.push({ account: root, isSub: false })
+      placed.add(root.code)
+      for (const child of (children.get(root.code) || []).sort(byCode)) {
+        out.push({ account: child, isSub: true })
+        placed.add(child.code)
+      }
+    }
+    // A sub-account whose parent is not in the chart (a deleted or mistyped parentCode) has no
+    // root to sit under and would otherwise drop out of the picker entirely — it is still a
+    // real account holding a real balance, so it is appended rather than lost.
+    for (const a of chartOfAccounts) {
+      if (!placed.has(a.code)) out.push({ account: a, isSub: true })
+    }
+    return out
+  }, [chartOfAccounts])
 
   // Chart of accounts, grouped by type and filtered by the panel's own controls. Groups
   // with nothing left after filtering drop out rather than printing an empty band.
@@ -3241,7 +3317,14 @@ export default function AccountingPage() {
                 className="appearance-none border border-slate-200 dark:border-slate-600 rounded-lg pl-3 pr-7 py-1.5 text-xs font-medium bg-white dark:bg-slate-700 text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-500"
               >
                 <option value="all">All Accounts</option>
-                {chartOfAccounts.map(a => <option key={a.code} value={a.code}>{a.code} — {a.name}</option>)}
+                {/* Same hierarchy as the General Ledger picker — see accountPickerOptions. */}
+                {accountPickerOptions.map(({ account, isSub }) => (
+                  <option key={account.code} value={account.code}>
+                    {isSub
+                      ? `↳ ${account.code} — ${account.name} · under ${account.parentCode}`
+                      : `${account.code} — ${account.name}`}
+                  </option>
+                ))}
               </select>
               <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400 pointer-events-none" />
             </div>
@@ -3642,7 +3725,16 @@ export default function AccountingPage() {
                 className="appearance-none border border-slate-200 dark:border-slate-600 rounded-lg pl-3 pr-7 py-1.5 text-xs font-medium bg-white dark:bg-slate-700 text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-500"
               >
                 <option value="all">All Accounts</option>
-                {chartOfAccounts.map(a => <option key={a.code} value={a.code}>{a.code} — {a.name}</option>)}
+                {/* A native option cannot carry markup, so the hierarchy lives in the text: a
+                    sub-account is arrowed in under its parent and names it. The arrow does the
+                    indenting because browsers collapse leading whitespace in an option. */}
+                {accountPickerOptions.map(({ account, isSub }) => (
+                  <option key={account.code} value={account.code}>
+                    {isSub
+                      ? `↳ ${account.code} — ${account.name} · under ${account.parentCode}`
+                      : `${account.code} — ${account.name}`}
+                  </option>
+                ))}
               </select>
               <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400 pointer-events-none" />
             </div>

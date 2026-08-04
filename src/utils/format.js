@@ -84,21 +84,36 @@ export function formatAddress(addr) {
 // re-amortization after an underpaid/overpaid installment (e.g. a borrower
 // who can only afford interest one month) shifts the real outstanding balance
 // away from what the original schedule assumed.
+// Every figure is rounded to the cent as it is produced, not just when it is displayed.
+// Carrying full-precision floats here meant a row could show "Total Due $866.63" while
+// really holding 866.6349 — a borrower who paid exactly what the screen told them to was
+// left a fraction short, which surfaced later as a phantom $0.01 remainder they had to pay
+// a second time. What the schedule stores is now exactly what it shows.
+//
+// Rounding each period independently would make the instalments drift away from the
+// principal borrowed, so the final period is settled against whatever is actually left
+// rather than being handed another rounded EMI. That keeps sum(principal) === the amount
+// borrowed exactly, and the last instalment absorbs the accumulated half-cents.
 export function amortizePeriods(balance, monthlyRate, n) {
-  const emi = monthlyRate > 0
+  const round2 = x => Math.round(x * 100) / 100
+  const emi = round2(monthlyRate > 0
     ? (balance * monthlyRate * Math.pow(1 + monthlyRate, n)) / (Math.pow(1 + monthlyRate, n) - 1)
-    : balance / n
+    : balance / n)
 
-  let remainingBalance = balance
+  let remainingBalance = round2(balance)
   const periods = []
   for (let i = 1; i <= n; i++) {
-    const interestPaid = remainingBalance * monthlyRate
-    const principalPaid = emi - interestPaid
-    remainingBalance -= principalPaid
+    const interestPaid = round2(remainingBalance * monthlyRate)
+    // The last period clears the balance outright; earlier ones can't retire more principal
+    // than is left either, which matters on a short term where the EMI overshoots.
+    const principalPaid = i === n
+      ? remainingBalance
+      : Math.min(round2(emi - interestPaid), remainingBalance)
+    remainingBalance = round2(remainingBalance - principalPaid)
     periods.push({
       principal: principalPaid,
       interest: interestPaid,
-      totalDue: emi,
+      totalDue: round2(principalPaid + interestPaid),
       balance: i === n ? 0 : Math.max(0, remainingBalance),
     })
   }

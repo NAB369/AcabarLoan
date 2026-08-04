@@ -270,7 +270,12 @@ export default function LoanDetail() {
 
   const customer = state.customers.find(c => c.code === loan.customerCode) || null
   const isDisbursed = loan.status === 'Active'
-  const readyToDisburse = (loan.approvalState || 1) >= 3 && !isDisbursed
+  // Cancelling or rejecting a loan leaves its approvalState where it had got to — the customer
+  // cancel flow only rewrites `status` — so testing the approval stage alone still counted a
+  // dead loan as ready and kept offering Go to Disbursement on it. Both closed states are
+  // excluded explicitly rather than inferred from the stage.
+  const isClosed = loan.status === 'Cancelled' || loan.status === 'Rejected'
+  const readyToDisburse = (loan.approvalState || 1) >= 3 && !isDisbursed && !isClosed
 
   const borrowerDocTypes = (customer?.maritalStatus === 'Married'
     ? [...IDENTITY_DOC_TYPES.slice(0, -1), 'Marriage Certificate', IDENTITY_DOC_TYPES[IDENTITY_DOC_TYPES.length - 1]]
@@ -559,6 +564,34 @@ export default function LoanDetail() {
   const [lightbox, setLightbox] = useState(null)
   const [activeTab, setActiveTab] = useState(0)
   const [showApprovalModal, setShowApprovalModal] = useState(false)
+  // Which party's CBC the tab is showing. The two used to stack down one scroll, so reading
+  // the co-borrower's report meant scrolling past the whole of the borrower's A4 sheet.
+  const [cbcTarget, setCbcTarget] = useState('borrower')
+  // The co-borrower only has a sub-tab once its section exists. `activeCbcTarget` is derived
+  // rather than corrected in an effect, so removing the co-borrower while its tab is open
+  // falls straight back to the borrower instead of rendering one frame against a party that
+  // no longer has a section.
+  const cbcTargets = ['borrower', ...(showCoBorrowerCbc ? ['coBorrower'] : [])]
+  const activeCbcTarget = cbcTargets.includes(cbcTarget) ? cbcTarget : 'borrower'
+  const cbcTabRefs = useRef({})
+
+  // Arrow keys move between the parties and Home/End jump to the ends, which is what a tab
+  // bar is expected to do once it is marked up as one — without it the roving tabindex below
+  // would leave every tab but the active one unreachable from the keyboard.
+  function handleCbcTabKey(e) {
+    const step = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0
+    let next = null
+    if (e.key === 'Home') next = cbcTargets[0]
+    else if (e.key === 'End') next = cbcTargets[cbcTargets.length - 1]
+    else if (step) {
+      const i = cbcTargets.indexOf(activeCbcTarget)
+      next = cbcTargets[(i + step + cbcTargets.length) % cbcTargets.length]
+    }
+    if (!next) return
+    e.preventDefault()
+    setCbcTarget(next)
+    cbcTabRefs.current[next]?.focus()
+  }
 
   // All of this screen's modals are local component state, so App.jsx's global Escape
   // handler (which only knows about reducer state) can't reach them — this closes
@@ -1799,7 +1832,75 @@ export default function LoanDetail() {
         {activeTab === 2 && (
         /* Section 3: Credit History & Score (CBC) */
         <div className="space-y-4">
-          {['borrower', ...(showCoBorrowerCbc ? ['coBorrower'] : [])].map((target, idx) => {
+          {/* One sub-tab per party, marked up as a real tablist so arrow keys move between
+              them and a screen reader announces the relationship to the sheet below. Which
+              tab is active is derived rather than stored, so removing the co-borrower's CBC
+              while its tab is open falls back to the borrower instead of leaving the panel
+              pointed at a party that no longer has a section to show. */}
+          <div className="flex items-end justify-between gap-3 flex-wrap border-b border-slate-200 dark:border-slate-700">
+            <div role="tablist" aria-label="CBC report by party" onKeyDown={handleCbcTabKey} className="flex items-end gap-1 flex-wrap">
+              {cbcTargets.map(t => {
+                const count = cbcReportsOf(loan[CREDIT_HISTORY_FIELD[t]]).length
+                const active = t === activeCbcTarget
+                const person = resolveCbcPerson(t)
+                return (
+                  <button
+                    key={t}
+                    id={`cbc-tab-${t}`}
+                    role="tab"
+                    aria-selected={active}
+                    aria-controls={`cbc-panel-${t}`}
+                    // Roving tabindex: Tab reaches the bar, arrows move within it.
+                    tabIndex={active ? 0 : -1}
+                    ref={el => { cbcTabRefs.current[t] = el }}
+                    onClick={() => setCbcTarget(t)}
+                    className={`flex items-center gap-2 px-3.5 py-2 rounded-t-xl border-b-2 -mb-px transition-colors ${
+                      active
+                        ? 'border-[#0047ab] dark:border-blue-400 bg-blue-50/60 dark:bg-blue-900/20'
+                        : 'border-transparent hover:bg-slate-50 dark:hover:bg-slate-700/50'
+                    }`}
+                  >
+                    <div className="text-left min-w-0">
+                      <span className={`block text-xs font-bold leading-tight ${
+                        active ? 'text-[#0047ab] dark:text-blue-400' : 'text-slate-600 dark:text-slate-300'
+                      }`}>
+                        {CREDIT_HISTORY_LABEL[t]}
+                      </span>
+                      {/* Whose report this is. "Borrower" alone means checking somewhere else
+                          to find out which person's credit history is on screen. */}
+                      <span className="block text-[10px] font-medium text-slate-400 dark:text-slate-500 truncate max-w-[9rem] leading-tight">
+                        {person?.enName || 'Not on file'}
+                      </span>
+                    </div>
+                    {/* A bare "0" reads as a score or an amount. Nothing on file is said in
+                        words; a real count gets the pill. */}
+                    {count > 0 ? (
+                      <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold flex-shrink-0 ${
+                        active
+                          ? 'bg-[#0047ab] text-white dark:bg-blue-400 dark:text-slate-900'
+                          : 'bg-slate-100 text-slate-500 dark:bg-slate-700 dark:text-slate-300'
+                      }`}>
+                        {count}
+                      </span>
+                    ) : (
+                      <span className="text-[10px] font-semibold text-slate-400 dark:text-slate-500 flex-shrink-0">None</span>
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+            {/* Adding the co-borrower creates a tab, so the action belongs beside the tabs
+                rather than buried in the borrower's own toolbar where it used to sit. */}
+            {!isDisbursed && !showCoBorrowerCbc && (
+              <button
+                onClick={() => { setShowCoBorrowerCbc(true); setCbcTarget('coBorrower') }}
+                className="flex items-center gap-1 mb-2 px-2.5 py-1.5 text-[11px] font-semibold rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" /> Add Co-Borrower
+              </button>
+            )}
+          </div>
+          {[activeCbcTarget].map(target => {
             const info = loan[CREDIT_HISTORY_FIELD[target]]
             const reports = cbcReportsOf(info)
             // Every report on file gets its own sheet, laid out side by side so several
@@ -1812,7 +1913,14 @@ export default function LoanDetail() {
             return (
               /* No `overflow-hidden` here: it would make this box the sticky header's
                  scroll container and the header would never stick to the panel top. */
-              <div key={target} className={`rounded-xl ${idx > 0 ? 'border-t border-slate-100 dark:border-slate-700 pt-4' : ''}`}>
+              <div
+                key={target}
+                id={`cbc-panel-${target}`}
+                role="tabpanel"
+                aria-labelledby={`cbc-tab-${target}`}
+                tabIndex={0}
+                className="rounded-xl focus:outline-none"
+              >
                 <div className="sticky top-0 z-10 -mx-6 px-6 py-3 bg-white dark:bg-slate-800 border-b border-slate-100 dark:border-slate-700 flex items-center justify-between gap-2 flex-wrap">
                   <div className="min-w-0">
                     <span className="text-sm font-bold text-slate-700 dark:text-slate-200">{CREDIT_HISTORY_LABEL[target]} CBC Report</span>
@@ -1829,15 +1937,6 @@ export default function LoanDetail() {
                         className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-semibold rounded-lg bg-green-700 text-white hover:bg-green-800 transition-colors"
                       >
                         <Upload className="w-3.5 h-3.5" /> Upload CBC Report
-                      </button>
-                    )}
-                    {/* Section-level action, kept in this one pinned toolbar */}
-                    {!isDisbursed && target === 'borrower' && !showCoBorrowerCbc && (
-                      <button
-                        onClick={() => setShowCoBorrowerCbc(true)}
-                        className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-semibold rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
-                      >
-                        Add Co-Borrower CBC
                       </button>
                     )}
                     {!isDisbursed && target === 'coBorrower' && (

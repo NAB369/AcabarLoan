@@ -1,5 +1,5 @@
 import { useState, useId } from 'react'
-import { Bell, Moon, Sun, Settings, LogOut, User, ChevronLeft, Menu, MonitorCog, RefreshCw, ChevronDown, Check } from 'lucide-react'
+import { Bell, Moon, Sun, Settings, LogOut, User, ChevronLeft, Menu, MonitorCog, ChevronDown, Check } from 'lucide-react'
 import { useApp } from '../../context/AppContext'
 import { Button } from '@/components/ui/button'
 import {
@@ -83,25 +83,24 @@ export default function Header({ onMenuClick }) {
   const { state, dispatch, showToast } = useApp()
   const [notifOpen, setNotifOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
-  const [sysOpsOpen, setSysOpsOpen] = useState(false)
   const [langOpen, setLangOpen] = useState(false)
   const isKh = state.language === 'kh'
   const activeLang = LANGUAGES.find(l => l.code === state.language) || LANGUAGES[0]
 
   const unread = state.notifications.filter(n => !n.read).length
+  const dayOpen = state.businessDay?.status === 'open'
   const inLoanDetail = state.activeTab === 'open-loan' && state.loanDetailIdx !== null && state.loanDetailIdx !== undefined
   const inLoanOverview = state.activeTab === 'open-loan' && state.loanOverviewOpen
   const inLoanPreview = state.activeTab === 'open-loan' && state.loanPreviewOpen
 
-  // Each of the four header menus closes its siblings when it opens — Radix already
-  // closes a menu on outside click / Escape on its own, this just preserves the
-  // "only one open at a time" behavior the hand-rolled version had.
+  // Each of the header menus closes its siblings when it opens — Radix already closes a
+  // menu on outside click / Escape on its own, this just preserves the "only one open at a
+  // time" behavior the hand-rolled version had.
   function only(setter) {
     return (open) => {
       setter(open)
       if (open) {
         if (setter !== setLangOpen) setLangOpen(false)
-        if (setter !== setSysOpsOpen) setSysOpsOpen(false)
         if (setter !== setNotifOpen) setNotifOpen(false)
         if (setter !== setProfileOpen) setProfileOpen(false)
       }
@@ -178,62 +177,28 @@ export default function Header({ onMenuClick }) {
           </DropdownMenuContent>
         </DropdownMenu>
 
-        {/* System operations (EOD / EOM batches) */}
-        <DropdownMenu open={sysOpsOpen} onOpenChange={only(setSysOpsOpen)}>
-          <DropdownMenuTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon"
-              title={isKh ? 'ប្រតិបត្តិការប្រព័ន្ធ' : 'System Operations'}
-              className="text-slate-500 hover:text-slate-700 hover:bg-slate-100 rounded-lg dark:text-slate-400 dark:hover:text-slate-200 dark:hover:bg-white/5"
-            >
-              <MonitorCog className="w-5 h-5" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent
-            align="end"
-            className="w-[calc(100vw-1.5rem)] max-w-80 rounded-2xl shadow-xl p-0 dark:bg-slate-800 dark:border-slate-700"
+        {/* System operations (SOD / EOD / EOM batches). The batches verify live data and
+            post to the ledger, which needs more room than a dropdown — the icon opens the
+            System Operations modal instead. The pill beside it carries the business-day
+            state, so where the back office sits in its daily cycle is readable from any
+            page rather than only once the modal is open. */}
+        <Button
+          variant="ghost"
+          onClick={() => dispatch({ type: 'OPEN_SYSTEM_OPS' })}
+          title={isKh ? 'ប្រតិបត្តិការប្រព័ន្ធ' : 'System Operations'}
+          className="flex items-center gap-1.5 h-auto px-2 py-1.5 text-slate-500 hover:text-slate-700 hover:bg-slate-100 rounded-lg dark:text-slate-400 dark:hover:text-slate-200 dark:hover:bg-white/5"
+        >
+          <MonitorCog className="w-5 h-5 flex-shrink-0" />
+          <span
+            className={`hidden md:inline text-[10px] font-bold px-1.5 py-0.5 rounded-md ${
+              dayOpen
+                ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400'
+                : 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300'
+            }`}
           >
-            <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-700">
-              <p className="text-sm font-bold text-slate-800 dark:text-slate-200">
-                {isKh ? 'ប្រតិបត្តិការប្រព័ន្ធ' : 'System Operations'}
-              </p>
-            </div>
-            <div className="p-3 space-y-3">
-              <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-3">
-                <p className="text-xs font-bold text-slate-800 dark:text-slate-100">End of Day (EOD) Batch</p>
-                <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1 leading-relaxed">
-                  Calculates daily accruals, updates account balances, runs overdue detection, generates daily summary reports, and posts automated journal entries.
-                </p>
-                <Button
-                  onClick={() => { showToast('EOD batch completed successfully', 'success'); setSysOpsOpen(false) }}
-                  className="mt-2.5 w-full h-auto flex items-center justify-center gap-1.5 bg-brand-600 hover:bg-brand-700 text-white px-3 py-2 rounded-xl text-xs font-bold"
-                >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                  Run EOD
-                </Button>
-              </div>
-              <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-3">
-                <p className="text-xs font-bold text-slate-800 dark:text-slate-100">End of Month (EOM) Batch</p>
-                <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1 leading-relaxed">
-                  Finalizes monthly accruals and interest income, runs PAR aging, calculates required loan loss provisions, closes monthly accounting period, and archives data for regulatory reporting.
-                </p>
-                <Button
-                  onClick={() => { showToast('EOM batch completed successfully', 'success'); setSysOpsOpen(false) }}
-                  className="mt-2.5 w-full h-auto flex items-center justify-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-2 rounded-xl text-xs font-bold"
-                >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                  Run EOM
-                </Button>
-              </div>
-              <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700/50 rounded-xl p-3">
-                <p className="text-[10px] font-semibold text-amber-700 dark:text-amber-400 leading-relaxed">
-                  Note: Batch operations are irreversible. Ensure all daily transactions have been posted before running EOD. Contact your system administrator before running EOM.
-                </p>
-              </div>
-            </div>
-          </DropdownMenuContent>
-        </DropdownMenu>
+            {dayOpen ? 'Day open' : 'Day closed'}
+          </span>
+        </Button>
 
         {/* Notifications */}
         <DropdownMenu open={notifOpen} onOpenChange={only(setNotifOpen)}>

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Check, ChevronsUpDown } from 'lucide-react'
+import { Check, ChevronsUpDown, Plus } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '@/components/ui/command'
@@ -9,6 +9,11 @@ import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, Command
 // else a picker is drawn from a list that grows with the business rather than staying fixed).
 // `options` is `{ value, label, sublabel? }[]`; filtering matches label and sublabel together
 // so "code · name" both find the same row.
+//
+// Pass `onCreate` where the list is a starting point rather than the whole world — reference
+// data the app ships can always be missing an entry the operator in front of it needs (a
+// commune outside the built-in gazetteer, say). Typing a name that isn't on the list then
+// offers to add it, instead of leaving the user stuck at an empty menu.
 export default function SearchableSelect({
   value,
   onChange,
@@ -18,12 +23,21 @@ export default function SearchableSelect({
   triggerPlaceholder = 'Select…',
   triggerClassName,
   disabled = false,
+  onCreate = null,
+  createLabel = query => `Add "${query}"`,
 }) {
   const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
   const selected = options.find(o => o.value === value) || null
 
+  const typed = query.trim()
+  // Only offered when what was typed isn't already on the list — an existing entry should be
+  // picked, not duplicated under a second spelling.
+  const canCreate = !!onCreate && typed.length > 0
+    && !options.some(o => (o.label || '').toLowerCase() === typed.toLowerCase())
+
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={open} onOpenChange={next => { setOpen(next); if (!next) setQuery('') }}>
       <PopoverTrigger asChild>
         <button
           type="button"
@@ -47,7 +61,7 @@ export default function SearchableSelect({
         className="p-0 w-[var(--radix-popover-trigger-width)]"
       >
         <Command>
-          <CommandInput placeholder={placeholder} />
+          <CommandInput placeholder={placeholder} value={query} onValueChange={setQuery} />
           <CommandList>
             <CommandEmpty>{emptyText}</CommandEmpty>
             <CommandGroup>
@@ -64,6 +78,18 @@ export default function SearchableSelect({
                   </div>
                 </CommandItem>
               ))}
+              {/* Carries the typed text as its own cmdk value so the list's filter always
+                  keeps it visible — it is the one row that should survive any query. */}
+              {canCreate && (
+                <CommandItem
+                  value={typed}
+                  onSelect={() => { onCreate(typed); setOpen(false); setQuery('') }}
+                  className="text-brand-700 dark:text-brand-400"
+                >
+                  <Plus className="w-3.5 h-3.5 shrink-0" />
+                  <p className="truncate font-semibold">{createLabel(typed)}</p>
+                </CommandItem>
+              )}
             </CommandGroup>
           </CommandList>
         </Command>
