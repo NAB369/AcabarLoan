@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useMemo } from 'react'
 import jsPDF from 'jspdf'
 import html2canvas from 'html2canvas'
 import { X, Pencil, User, Building, CreditCard, TrendingUp, DollarSign, FileText, Calculator, Briefcase, Wallet, Trash2, Scale, ShieldAlert, Send, Check, Calendar, LayoutDashboard, History, Plus, ArrowDownLeft, Eye, Printer, Download, Upload, PiggyBank } from 'lucide-react'
@@ -26,6 +26,7 @@ import {
 import CustomerWizard from '../customers/CustomerWizard'
 import AddressFields from '../shared/AddressFields'
 import CBCReportDocument from './CBCReportA4'
+import CreditVerificationPanel from './CreditVerificationPanel'
 import StickyHScroll from '../shared/StickyHScroll'
 import { assessLoanRisk } from '../../utils/riskAssessment'
 import { extractCbcSummary } from '../../utils/parseCbcReport'
@@ -682,6 +683,8 @@ export default function LoanDetail() {
       schedule: mergeSchedule(rows, loan.schedule),
     }
     dispatch({ type: 'UPDATE_LOAN', loan: updatedLoan })
+    logActivity('Overview', 'Loan info updated',
+      `${loanInfoForm.product} · ${formatVal(amt, currency, 1)} · ${rate}% · ${term} months · ${loanInfoForm.creditOfficer || '—'} · ${loanInfoForm.branch}`)
     showToast('Loan info updated', 'success')
     setShowLoanInfoModal(false)
   }
@@ -696,6 +699,7 @@ export default function LoanDetail() {
       schedule: mergeSchedule(rows, loan.schedule),
     }
     dispatch({ type: 'UPDATE_LOAN', loan: updatedLoan })
+    logActivity('Loan Assessment', 'Installment term applied', `${term} months · EMI ${formatVal(newEmi, currency, 1)}`)
     showToast(`Installment term updated to ${term} months`, 'success')
   }
 
@@ -707,6 +711,7 @@ export default function LoanDetail() {
     const { emi: newEmi, rows } = buildAmortizationData(loan.amount, rate, term, loan.firstInstallment)
     const updatedLoan = { ...loan, interestRate: rate, installments: term, termSelected: true, emi: newEmi, schedule: mergeSchedule(rows, loan.schedule) }
     dispatch({ type: 'UPDATE_LOAN', loan: updatedLoan })
+    logActivity('Loan Assessment', 'Interest rate and term changed', `${rate}% p.a. · ${term} months`)
     showToast('Loan product rate updated', 'success')
     setEditingAssessmentRate(false)
   }
@@ -723,6 +728,8 @@ export default function LoanDetail() {
       .filter(f => f.name.trim())
       .map(f => ({ name: f.name.trim(), rate: Math.max(0, parseFloat(f.rate) || 0), included: f.included !== false }))
     dispatch({ type: 'UPDATE_LOAN', loan: { ...loan, benefitFeeKeys: ordered, benefitFeeRates: rates, customBenefitFees: custom } })
+    logActivity('Loan Assessment', 'Benefit fees updated',
+      `${ordered.length} built-in fee${ordered.length === 1 ? '' : 's'} applied, ${custom.length} custom`)
     showToast('Benefit fees updated', 'success')
     setEditingBenefitRate(false)
   }
@@ -752,6 +759,14 @@ export default function LoanDetail() {
     }
   }
 
+  // Records what was just done and which tab it was done from, so the Audit Log answers
+  // "who changed this loan, where, and when" rather than only tracking approval stages.
+  // Called after the dispatch that actually changed something, never before — an entry for
+  // an edit that was rejected by a guard would be a lie in the trail.
+  function logActivity(section, entry, detail) {
+    dispatch({ type: 'ADD_LOAN_ACTIVITY', ref: loan.ref, entry: { section, action: entry, detail: detail || '' } })
+  }
+
   function updateCreditHistory(target, patch) {
     dispatch({ type: 'PATCH_LOAN_FIELD', ref: loan.ref, field: CREDIT_HISTORY_FIELD[target], patch })
   }
@@ -771,7 +786,9 @@ export default function LoanDetail() {
   }
 
   function handleRemoveCbcReport(target, index) {
+    const removed = cbcReportsOf(loan[CREDIT_HISTORY_FIELD[target]])[index]
     commitCbcReports(target, cbcReportsOf(loan[CREDIT_HISTORY_FIELD[target]]).filter((_, i) => i !== index))
+    logActivity('CBC', `${CREDIT_HISTORY_LABEL[target]} CBC report removed`, removed?.document?.name || `Report ${index + 1}`)
   }
 
   function openCbcFilePicker(target) {
@@ -816,6 +833,8 @@ export default function LoanDetail() {
     // Newly added reports go to the front, so their sheets lead the row.
     commitCbcReports(target, [...added, ...cbcReportsOf(loan[CREDIT_HISTORY_FIELD[target]])])
     const accounts = added.reduce((sum, r) => sum + (r.accounts || []).length, 0)
+    logActivity('CBC', `${CREDIT_HISTORY_LABEL[target]} CBC report uploaded`,
+      `${added.map(r => r.document?.name).filter(Boolean).join(', ')} — ${accounts} credit account${accounts === 1 ? '' : 's'}`)
     showToast(`${added.length} CBC report${added.length === 1 ? '' : 's'} read — ${accounts} credit account${accounts === 1 ? '' : 's'}`, 'success')
   }
 
@@ -922,9 +941,11 @@ export default function LoanDetail() {
   }
 
   function handleRemoveCoBorrower(idx) {
+    const removed = coBorrowers[idx]
     const { coBorrower, ...loanRest } = loan
     const updatedLoan = { ...loanRest, coBorrowers: coBorrowers.filter((_, i) => i !== idx) }
     dispatch({ type: 'UPDATE_LOAN', loan: updatedLoan })
+    logActivity('Customer', 'Co-borrower removed', removed?.enName || `Co-borrower ${idx + 1}`)
     showToast('Co-borrower removed', 'success')
   }
 
@@ -964,6 +985,8 @@ export default function LoanDetail() {
     const { coBorrower, ...loanRest } = loan
     const updatedLoan = { ...loanRest, coBorrowers: updatedCoBorrowers }
     dispatch({ type: 'UPDATE_LOAN', loan: updatedLoan })
+    logActivity('Customer', editingCoBorrowerIdx !== null ? 'Co-borrower edited' : 'Co-borrower added',
+      `${entry.enName || '—'} · ${entry.idType || '—'} ${entry.idNo || ''} · ${coBorrowerDocuments.length} document${coBorrowerDocuments.length === 1 ? '' : 's'}`)
     showToast('Co-borrower info updated', 'success')
     setShowCoBorrowerModal(false)
   }
@@ -978,9 +1001,11 @@ export default function LoanDetail() {
   }
 
   function handleRemoveGuarantor(idx) {
+    const removed = guarantors[idx]
     const { guarantor, ...loanRest } = loan
     const updatedLoan = { ...loanRest, guarantors: guarantors.filter((_, i) => i !== idx) }
     dispatch({ type: 'UPDATE_LOAN', loan: updatedLoan })
+    logActivity('Customer', 'Guarantor removed', removed?.enName || `Guarantor ${idx + 1}`)
     showToast('Guarantor removed', 'success')
   }
 
@@ -1020,6 +1045,8 @@ export default function LoanDetail() {
     const { guarantor, ...loanRest } = loan
     const updatedLoan = { ...loanRest, guarantors: updatedGuarantors }
     dispatch({ type: 'UPDATE_LOAN', loan: updatedLoan })
+    logActivity('Customer', editingGuarantorIdx !== null ? 'Guarantor edited' : 'Guarantor added',
+      `${entry.enName || '—'} · ${entry.idType || '—'} ${entry.idNo || ''} · ${guarantorDocuments.length} document${guarantorDocuments.length === 1 ? '' : 's'}`)
     showToast('Guarantor info updated', 'success')
     setShowGuarantorModal(false)
   }
@@ -1089,14 +1116,19 @@ export default function LoanDetail() {
     const { collateral, ...loanRest } = loan
     const updatedLoan = { ...loanRest, collaterals: updatedCollaterals }
     dispatch({ type: 'UPDATE_LOAN', loan: updatedLoan })
+    logActivity('Collateral', editingCollateralIdx !== null ? 'Collateral edited' : 'Collateral added',
+      `${resolvedType} · ${formatVal(value, currency, 1)}${ltvRatio ? ` · LTV ${ltvRatio.toFixed(1)}%` : ''}`)
     showToast('Collateral info updated', 'success')
     setShowCollateralModal(false)
   }
 
   function handleRemoveCollateral(idx) {
+    const removed = collaterals[idx]
     const { collateral, ...loanRest } = loan
     const updatedLoan = { ...loanRest, collaterals: collaterals.filter((_, i) => i !== idx) }
     dispatch({ type: 'UPDATE_LOAN', loan: updatedLoan })
+    logActivity('Collateral', 'Collateral removed',
+      `${removed?.type || 'Collateral'} · ${formatVal(parseFloat(removed?.value) || 0, currency, 1)}`)
     showToast('Collateral removed', 'success')
   }
 
@@ -1274,14 +1306,24 @@ export default function LoanDetail() {
     const { [INCOME_FIELD[incomeTarget]]: legacyRemoved, ...loanRest } = loan
     const updatedLoan = { ...loanRest, [INCOME_LIST_FIELD[incomeTarget]]: updatedList }
     dispatch({ type: 'UPDATE_LOAN', loan: updatedLoan })
+    logActivity('Income Verification',
+      `${INCOME_LABEL[incomeTarget]} income ${editingIncomeIdx !== null ? 'edited' : 'added'}`,
+      [entry.occupation || entry.employmentStatus, entry.companyName,
+        `${formatVal(total, currency, 1)}/month from ${cleanedSources.length} source${cleanedSources.length === 1 ? '' : 's'}`,
+      ].filter(Boolean).join(' · '))
     showToast(`${INCOME_LABEL[incomeTarget]} income updated`, 'success')
     setShowIncomeModal(false)
   }
 
   function handleRemoveIncome(target, idx) {
     const list = getIncomeList(target)
+    const removed = list[idx]
     const { [INCOME_FIELD[target]]: legacyRemoved, ...loanRest } = loan
     dispatch({ type: 'UPDATE_LOAN', loan: { ...loanRest, [INCOME_LIST_FIELD[target]]: list.filter((_, i) => i !== idx) } })
+    logActivity('Income Verification', `${INCOME_LABEL[target]} income removed`,
+      [removed?.occupation || removed?.employmentStatus, removed?.companyName,
+        removed?.totalMonthlyIncome != null ? `${formatVal(removed.totalMonthlyIncome, currency, 1)}/month` : null,
+      ].filter(Boolean).join(' · ') || `Entry ${idx + 1}`)
     showToast(`${INCOME_LABEL[target]} income removed`, 'success')
   }
 
@@ -1400,6 +1442,8 @@ export default function LoanDetail() {
       },
     }
     dispatch({ type: 'UPDATE_LOAN', loan: updatedLoan })
+    logActivity('Expense Verification', `${EXPENSE_LABEL[expenseTarget]} expenses updated`,
+      `${cleanedExpenses.length} item${cleanedExpenses.length === 1 ? '' : 's'} · ${formatVal(total, currency, 1)}/month`)
     showToast(`${EXPENSE_LABEL[expenseTarget]} expense updated`, 'success')
     setShowExpenseModal(false)
   }
@@ -1407,6 +1451,8 @@ export default function LoanDetail() {
   function handleRemoveExpense(target) {
     const { [EXPENSE_FIELD[target]]: removed, ...loanRest } = loan
     dispatch({ type: 'UPDATE_LOAN', loan: loanRest })
+    logActivity('Expense Verification', `${EXPENSE_LABEL[target]} expenses removed`,
+      removed?.totalMonthlyExpense != null ? `${formatVal(removed.totalMonthlyExpense, currency, 1)}/month` : '')
     showToast(`${EXPENSE_LABEL[target]} expense removed`, 'success')
   }
 
@@ -1414,6 +1460,8 @@ export default function LoanDetail() {
     const { [CREDIT_HISTORY_FIELD.coBorrower]: removed, ...loanRest } = loan
     dispatch({ type: 'UPDATE_LOAN', loan: loanRest })
     setShowCoBorrowerCbc(false)
+    logActivity('CBC', 'Co-Borrower CBC removed',
+      `${cbcReportsOf(removed).length} report${cbcReportsOf(removed).length === 1 ? '' : 's'} dropped`)
     showToast('Co-Borrower CBC removed', 'success')
   }
 
@@ -1421,11 +1469,13 @@ export default function LoanDetail() {
     if (!text.trim()) return
     const current = loan.manualRiskFactors?.[type] || []
     dispatch({ type: 'PATCH_LOAN_FIELD', ref: loan.ref, field: 'manualRiskFactors', patch: { [type]: [...current, text.trim()] } })
+    logActivity('Risk Assessment', `Manual ${type === 'positives' ? 'positive' : 'negative'} factor added`, text.trim())
   }
 
   function removeManualRiskFactor(type, index) {
     const current = loan.manualRiskFactors?.[type] || []
     dispatch({ type: 'PATCH_LOAN_FIELD', ref: loan.ref, field: 'manualRiskFactors', patch: { [type]: current.filter((_, i) => i !== index) } })
+    logActivity('Risk Assessment', `Manual ${type === 'positives' ? 'positive' : 'negative'} factor removed`, current[index] || '')
   }
 
   function startRiskSectionEdit(type, manual) {
@@ -1436,6 +1486,8 @@ export default function LoanDetail() {
   function saveRiskSectionEdit(type) {
     const cleaned = riskSectionDraft.map(v => v.trim()).filter(Boolean)
     dispatch({ type: 'PATCH_LOAN_FIELD', ref: loan.ref, field: 'manualRiskFactors', patch: { [type]: cleaned } })
+    logActivity('Risk Assessment', `Manual ${type === 'positives' ? 'positive' : 'negative'} factors edited`,
+      `${cleaned.length} factor${cleaned.length === 1 ? '' : 's'} on file`)
     setEditingRiskSection(null)
     setRiskSectionDraft([])
   }
@@ -1444,6 +1496,30 @@ export default function LoanDetail() {
     setEditingRiskSection(null)
     setRiskSectionDraft([])
   }
+
+  // The audit trail is the approval workflow and the per-tab edits read as one list. They are
+  // stored apart (see ADD_LOAN_ACTIVITY) because ApprovalTimeline walks approvalHistory to draw
+  // the stages, but an officer asking "what happened to this loan" wants both in one column of
+  // time. Sorted on the parsed timestamp rather than on array order: approvalHistory is oldest
+  // first and activityLog newest first, so concatenating them alone would interleave wrongly.
+  const auditEntries = useMemo(() => {
+    const sortKey = ts => {
+      const { date, time } = splitTimestamp(ts)
+      // splitTimestamp handles both stored formats. "26/07/2026" has to be reordered to compare;
+      // "2026-07-26" already sorts lexically.
+      const iso = /^\d{2}\/\d{2}\/\d{4}$/.test(date)
+        ? `${date.slice(6, 10)}-${date.slice(3, 5)}-${date.slice(0, 2)}`
+        : date
+      return `${iso} ${time}`
+    }
+    const fromApproval = (loan.approvalHistory || []).map(h => ({
+      timestamp: h.timestamp, section: 'Approval', action: h.action, detail: '', user: h.user,
+    }))
+    const fromActivity = (loan.activityLog || []).map(a => ({
+      timestamp: a.timestamp, section: a.section || 'Loan', action: a.action, detail: a.detail || '', user: a.user,
+    }))
+    return [...fromApproval, ...fromActivity].sort((a, b) => sortKey(b.timestamp).localeCompare(sortKey(a.timestamp)))
+  }, [loan.approvalHistory, loan.activityLog])
 
   const inputCls = 'w-full px-3 py-2 text-sm rounded-xl border border-slate-200 bg-white dark:bg-slate-900 dark:border-slate-700 dark:text-slate-100 dark:placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-[#0047ab] transition'
   const labelCls = 'block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1'
@@ -2201,8 +2277,15 @@ export default function LoanDetail() {
         )}
 
         {activeTab === 6 && (
-        /* Section 6: Loan Assessment — rate adjustment (left) + repayment capacity & benefit to the bank (right) */
-        <div className="grid grid-cols-1 lg:grid-cols-10 gap-4 items-start pt-6">
+        /* Section 6: Loan Assessment — the verification verdict, then rate adjustment (left)
+           and repayment capacity & benefit to the bank (right). The verdict leads because it is
+           what the terms below have to be justified against. */
+        <div className="pt-6">
+          <CreditVerificationPanel loan={loan} currency={currency} />
+        </div>
+        )}
+        {activeTab === 6 && (
+        <div className="grid grid-cols-1 lg:grid-cols-10 gap-4 items-start pt-4">
           {/* Left: adjust loan product rate and benefit rate */}
           <div className="lg:col-span-3 space-y-4">
             <div className="rounded-xl overflow-hidden border border-slate-100 dark:border-slate-700">
@@ -2687,30 +2770,46 @@ export default function LoanDetail() {
                     <tr className="bg-slate-50 dark:bg-slate-900/50 border-b border-slate-200 dark:border-slate-700">
                       <th className="px-3 py-3 text-left font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap">Date</th>
                       <th className="px-3 py-3 text-left font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap">Time</th>
+                      <th className="px-3 py-3 text-left font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap">Section</th>
                       <th className="px-3 py-3 text-left font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide">Action</th>
                       <th className="px-3 py-3 text-left font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide">User</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
-                    {!loan.approvalHistory?.length ? (
+                    {auditEntries.length === 0 ? (
                       <tr>
-                        <td colSpan={4} className="px-3">
+                        <td colSpan={5} className="px-3">
                           <EmptyState
                             bare
                             icon={History}
                             title="No audit log entries for this loan"
-                            hint="Submitting, approving or editing this loan writes an entry here."
+                            hint="Submitting or approving this loan, and any edit made on the tabs above, writes an entry here."
                           />
                         </td>
                       </tr>
-                    ) : loan.approvalHistory.map((h, i) => {
+                    ) : auditEntries.map((h, i) => {
                       const { date, time } = splitTimestamp(h.timestamp)
                       return (
-                      <tr key={i} className="hover:bg-slate-50 dark:hover:bg-slate-700/30 transition-colors">
+                      <tr key={i} className="hover:bg-slate-50 dark:hover:bg-slate-700/30 transition-colors align-top">
                         <td className="px-3 py-3 font-mono text-slate-500 dark:text-slate-400 whitespace-nowrap">{date}</td>
                         <td className="px-3 py-3 font-mono text-slate-500 dark:text-slate-400 whitespace-nowrap">{time}</td>
-                        <td className="px-3 py-3 font-semibold text-slate-700 dark:text-slate-200">{h.action || '—'}</td>
-                        <td className="px-3 py-3 text-slate-600 dark:text-slate-300">{h.user || '—'}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">
+                          {/* Which tab the action came from. Approval entries are the workflow
+                              itself, so they carry the brand colour the timeline uses. */}
+                          <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                            h.section === 'Approval'
+                              ? 'bg-blue-50 text-[#0047ab] dark:bg-blue-900/30 dark:text-blue-400'
+                              : 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300'
+                          }`}>
+                            {h.section}
+                          </span>
+                        </td>
+                        <td className="px-3 py-3">
+                          <span className="font-semibold text-slate-700 dark:text-slate-200">{h.action || '—'}</span>
+                          {/* What actually changed, so the row says more than that something did */}
+                          {h.detail && <span className="block text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">{h.detail}</span>}
+                        </td>
+                        <td className="px-3 py-3 text-slate-600 dark:text-slate-300 whitespace-nowrap">{h.user || '—'}</td>
                       </tr>
                       )
                     })}

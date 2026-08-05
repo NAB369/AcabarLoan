@@ -183,26 +183,33 @@ body, header, aside, main,
      pages print. The schedule is already laid out as an A4 document, so it opts out of the
      parts that would reshape it and prints at the size it is designed at. */
 
-  /* Its letterhead is a heading block, not the meta paragraphs `> .flex p` is aimed at —
-     that rule printed the company name at 9px, smaller than the title beneath it. These
-     restore the sizes the sheet shows on screen. The extra line-height is for the Khmer
-     name: Kantumruy Pro's diacritics sit above the cap height and clip when packed tight.
-     Scoped to the name block rather than to every paragraph in the letterhead: the KHQR
-     caption beside it is also a first-and-last child, and would otherwise be sized as
-     though it were the company name. */
-  .printable-area.schedule-sheet > .doc-letterhead .letterhead-name p { line-height: 1.45 !important; }
-  .printable-area.schedule-sheet > .doc-letterhead .letterhead-name p:first-child { font-size: 18px !important; }
-  .printable-area.schedule-sheet > .doc-letterhead .letterhead-name p:last-child { font-size: 14px !important; }
-  /* The borrower's KHQR card sits in the letterhead's right slot. Sized in absolute units so
-     the code has enough module area on paper for a phone to lock on regardless of how the
-     browser scales the page, and the whole card is kept off a page fold. */
-  .printable-area.schedule-sheet > .doc-letterhead { break-inside: avoid; page-break-inside: avoid; }
+  /* A letterhead is a heading block, not the meta paragraphs `> .flex p` is aimed at — that
+     rule printed the company name at 9px, smaller than the title beneath it. These restore the
+     sizes the sheet shows on screen. The extra line-height is for the Khmer name: Kantumruy
+     Pro's diacritics sit above the cap height and clip when packed tight.
+     Scoped to the name block rather than to every paragraph in the letterhead: the KHQR caption
+     beside it is also a first-and-last child, and would otherwise be sized as though it were the
+     company name.
+     Applies to any sheet carrying the letterhead — the schedule and the loan profile both do,
+     and the profile printed its name at 9px for exactly the same reason until it was marked up
+     the same way. */
+  .printable-area > .doc-letterhead .letterhead-name p { line-height: 1.45 !important; }
+  .printable-area > .doc-letterhead .letterhead-name p:first-child { font-size: 18px !important; }
+  .printable-area > .doc-letterhead .letterhead-name p:last-child { font-size: 14px !important; }
+  /* The document title sits inside the letterhead's centre column so it fills the height the
+     KHQR card takes rather than being pushed below it. That puts it inside the reach of the
+     generic `> .flex p` rule, which would print it at 9px — smaller than the company name it
+     is meant to sit under. */
+  .printable-area > .doc-letterhead .doc-title { font-size: 16px !important; line-height: 1.45 !important; }
+  .printable-area > .doc-letterhead { break-inside: avoid; page-break-inside: avoid; }
+  /* The borrower's KHQR card sits in the schedule letterhead's right slot. Sized in absolute
+     units so the code has enough module area on paper for a phone to lock on regardless of how
+     the browser scales the page. */
   .printable-area.schedule-sheet .doc-logo { width: 77px !important; height: 77px !important; }
   .printable-area.schedule-sheet .khqr-card { width: 93px !important; }
   .printable-area.schedule-sheet .khqr-card-band { padding: 3px 0 !important; }
   .printable-area.schedule-sheet .khqr-wordmark { font-size: 11px !important; }
   .printable-area.schedule-sheet .khqr-payee { font-size: 8px !important; line-height: 1.3 !important; }
-  .printable-area.schedule-sheet .khqr-badge { font-size: 9px !important; }
   .printable-area.schedule-sheet .khqr-ref { font-size: 7px !important; line-height: 1.3 !important; }
 
   /* 8px is for a 15-column ledger table; this one has 8 columns across a full A4 width and

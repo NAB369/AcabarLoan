@@ -164,6 +164,8 @@ export function getStatusBadgeClass(status) {
     'Disbursed':       'bg-brand-50   text-brand-700   border-brand-200/60    dark:bg-brand-900/30   dark:text-brand-400   dark:border-brand-800',
     'Rejected':        'bg-rose-50    text-rose-700    border-rose-200/60     dark:bg-rose-900/30    dark:text-rose-400    dark:border-rose-800',
     'Cancelled':       'bg-slate-100  text-slate-600   border-slate-200       dark:bg-slate-700/50    dark:text-slate-300   dark:border-slate-600',
+    // Closed, but settled rather than abandoned — read as its own outcome, not as a rejection.
+    'Refinanced':      'bg-violet-50  text-violet-700  border-violet-200/60   dark:bg-violet-900/30  dark:text-violet-400  dark:border-violet-800',
     'Inactive':        'bg-slate-100  text-slate-600   border-slate-200       dark:bg-slate-700/50    dark:text-slate-300   dark:border-slate-600',
     'Locked':          'bg-amber-50   text-amber-700   border-amber-200       dark:bg-amber-900/30   dark:text-amber-400   dark:border-amber-800',
     'Suspended':       'bg-rose-50    text-rose-700    border-rose-200        dark:bg-rose-900/30    dark:text-rose-400    dark:border-rose-800',

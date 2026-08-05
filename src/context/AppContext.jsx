@@ -260,6 +260,53 @@ const INITIAL_LOAN_PRODUCTS = [
   { name: 'Vehicle Loan',      rate: 13, maxAmount: 30000 },
 ]
 
+// Every posted record carries a stable record number. It is stamped in one place rather than at
+// each of the routes that write one — the manual forms, disbursement, repayment, the remainder,
+// sales invoices, the EOD and EOM batches, refinance and cash transfers — because a route added
+// later would otherwise have to remember to set one, and the first that forgot would leave a gap
+// nobody notices until an auditor asks.
+//
+// Numbers follow the order records were created, so the walk direction has to match how the
+// register is ordered: the journal is newest-first and is walked from the back, while cash
+// transfers are appended and so are walked from the front. Getting that backwards would hand the
+// newest record the lowest number.
+// A number already assigned is never rewritten — a record's id has to survive across sessions.
+//
+// Declared above INITIAL_STATE on purpose: INITIAL_STATE calls stampRecIds while the module is
+// still evaluating. The function itself hoists, but REC_ID_MAX is a const its body reads, and a
+// const declared further down is in the temporal dead zone at that moment — which threw on load
+// and took the whole app with it before anything rendered.
+const REC_ID_MAX = 999999
+
+function highestRecId(entries) {
+  return (entries || []).reduce((max, e) => {
+    const match = /^REC-(\d+)$/.exec(e?.recId || '')
+    const value = match ? parseInt(match[1], 10) : 0
+    return value <= REC_ID_MAX ? Math.max(max, value) : max
+  }, 0)
+}
+
+export function stampRecIds(entries, { oldestFirst = false } = {}) {
+  const list = entries || []
+  if (!list.some(e => e && !e.recId)) return list
+  let highest = highestRecId(list)
+  const stamped = [...list]
+  const order = [...stamped.keys()]
+  if (!oldestFirst) order.reverse()
+  for (const i of order) {
+    if (stamped[i] && !stamped[i].recId) {
+      highest += 1
+      stamped[i] = { ...stamped[i], recId: `REC-${String(highest).padStart(6, '0')}` }
+    }
+  }
+  return stamped
+}
+
+// The next number the stamper will hand out, for a form that wants to show it before saving.
+export function nextRecId(entries) {
+  return `REC-${String(highestRecId(entries) + 1).padStart(6, '0')}`
+}
+
 const INITIAL_STATE = {
   // navigation
   activeTab: 'dashboard',
@@ -320,7 +367,10 @@ const INITIAL_STATE = {
   notifications: persisted.notifications || [],
   // Same length check as journalEntries — an install that never made a transfer gets the
   // seeded ones, one that did keeps its own.
-  cashTransfers: persisted.cashTransfers?.length ? persisted.cashTransfers : INITIAL_CASH_TRANSFERS,
+  // Stamped like the journal is. Cash transfers are their own register, so the series runs
+  // independently of the journal's — a record number is unique within the file it belongs to,
+  // and sharing one counter across two separate arrays would need a counter neither of them owns.
+  cashTransfers: stampRecIds(persisted.cashTransfers?.length ? persisted.cashTransfers : INITIAL_CASH_TRANSFERS, { oldestFirst: true }),
   accounts: persisted.accounts || INITIAL_ACCOUNTS,
   // Sign-in accounts, editable in Settings → User Management → User Accounts. Kept across
   // reloads for the same reason the audit trail is: an account added here would otherwise be
@@ -354,7 +404,9 @@ const INITIAL_STATE = {
   // An install that has never posted a journal entry gets the seeded ones; anything it did
   // post is kept. Checked on length, not existence — earlier versions saved an empty array,
   // and `[] || seed` would keep that empty array forever.
-  journalEntries: persisted.journalEntries?.length ? persisted.journalEntries : INITIAL_JOURNAL_ENTRIES,
+  // Stamped on the way in, so the seeded entries and anything an older install saved before the
+  // field existed both arrive already numbered rather than waiting for the first dispatch.
+  journalEntries: stampRecIds(persisted.journalEntries?.length ? persisted.journalEntries : INITIAL_JOURNAL_ENTRIES),
   // Payroll staff register — the Employee Information page of Payroll Management. Checked
   // on length for the same reason as journalEntries: an install that saved an empty list
   // once would otherwise never see the seed again.
@@ -1028,6 +1080,220 @@ function reducer(state, action) {
         journalEntries: [remainderJournalEntry, ...state.journalEntries],
       }
     }
+    // ─── restructuring an active loan ────────────────────────────────────
+    // Re-amortizes what is still owed over new terms. Nothing is posted: no money moves, the
+    // principal outstanding is the same principal outstanding, and the receivable it sits in
+    // has not changed. Only the schedule the borrower pays against does — which is exactly
+    // why this is separate from REFINANCE_LOAN below rather than a variant of it.
+    case 'RESCHEDULE_LOAN': {
+      const plan = action.plan
+      if (!plan || plan.kind !== 'reschedule' || !action.ref) return state
+      const target = state.loanApplications.find(l => l.ref === action.ref)
+      // Only a live loan can be rescheduled — there is nothing to re-amortize on one that was
+      // never disbursed, and a closed one must not sprout a new schedule.
+      if (!target || target.status !== 'Active') return state
+      const runAt = auditStamp()
+      const apply = l => l.ref !== action.ref ? l : {
+        ...l,
+        schedule: plan.schedule,
+        installments: plan.schedule.length,
+        interestRate: plan.interestRate,
+        emi: plan.emi,
+        firstInstallment: plan.firstDueISO,
+        rescheduleHistory: [{
+          at: runAt,
+          by: state.currentRole,
+          reason: action.reason || '',
+          principal: plan.principal,
+          interestRate: plan.interestRate,
+          installments: plan.installments,
+          firstDueISO: plan.firstDueISO,
+          emi: plan.emi,
+        }, ...(l.rescheduleHistory || [])],
+        activityLog: [{
+          timestamp: runAt,
+          user: state.currentRole,
+          section: 'Reschedule',
+          action: 'Loan rescheduled',
+          detail: `${plan.principal.toFixed(2)} over ${plan.installments} months at ${plan.interestRate}% from ${plan.firstDueISO}${action.reason ? ` — ${action.reason}` : ''}`,
+        }, ...(l.activityLog || [])].slice(0, 300),
+      }
+      return {
+        ...state,
+        loanApplications: state.loanApplications.map(apply),
+        activeLoan: state.activeLoan?.ref === action.ref ? apply(state.activeLoan) : state.activeLoan,
+      }
+    }
+
+    // Issues a new loan whose principal settles the old one. The borrower walks away with the
+    // difference, so this is a real money-out event and posts one balanced entry:
+    //
+    //   Dr  Account Receivable        new principal        (the new loan the borrower now owes)
+    //   Cr  Account Receivable        settled principal    (the old loan, cleared)
+    //   Cr  Loan Fee Income           refinance fee        (earned on the restructure)
+    //   Cr  Bank                      net paid out         (what actually leaves)
+    //
+    // The credits sum to the debit because the net is defined as new − settled − fee, so the
+    // entry balances by construction rather than by a figure someone typed. A refinance that
+    // would not cover what it settles is refused outright, not clamped — the same rule that
+    // stops an expense overdrawing its account.
+    case 'REFINANCE_LOAN': {
+      const plan = action.plan
+      if (!plan || plan.kind !== 'refinance' || !action.ref) return state
+      const previous = state.loanApplications.find(l => l.ref === action.ref)
+      if (!previous || previous.status !== 'Active') return state
+      if (plan.netToBorrower < -0.005) return state
+      // Money-out gate, same as disbursement: the account the cash is going to must be on file.
+      const customer = state.customers.find(c => c.code === previous.customerCode)
+      if (!customer?.accountNumber) return state
+      const currency = previous.currency || 'USD'
+      const fundingBankGL = fundingGLCode(state.realBankAccounts, currency, previous.branch, 'ACC-LOAN')
+      if (!fundingBankGL) return state
+
+      const round2 = n => Math.round(n * 100) / 100
+      const runAt = auditStamp()
+      const today = new Date().toISOString().split('T')[0]
+      const feeGL = currency === 'KHR' ? '5031' : '5030'
+
+      // Same rule as the loan wizard's own getNextLoanRef — highest number on file, plus one.
+      const nextNum = state.loanApplications.reduce((max, l) => {
+        const m = /^AC-L-(\d+)$/.exec(l.ref || '')
+        return m ? Math.max(max, parseInt(m[1], 10)) : max
+      }, 0) + 1
+      const newRef = `AC-L-${String(nextNum).padStart(6, '0')}`
+
+      const cycle = String((parseInt(previous.loanCycle, 10) || 1) + 1)
+      const newLoan = {
+        ...previous,
+        ref: newRef,
+        loanCycle: cycle,
+        amount: plan.newAmount,
+        interestRate: plan.interestRate,
+        installments: plan.installments,
+        firstInstallment: plan.firstDueISO,
+        emi: plan.emi,
+        schedule: plan.schedule,
+        refinanceFee: plan.refinanceFee,
+        status: 'Active',
+        approvalState: 3,
+        termSelected: true,
+        disbursementDate: today,
+        // Where this loan came from, and what the old one became. Kept on both records so the
+        // chain reads in either direction without searching the whole book.
+        refinancedFromRef: previous.ref,
+        refinancedFromAmount: plan.settlement,
+        refinancedToRef: undefined,
+        rescheduleHistory: [],
+        approvalHistory: [
+          ...(previous.approvalHistory || []),
+          { stage: 3, action: `Opened by refinancing ${previous.ref} — ${plan.settlement.toFixed(2)} settled, ${plan.netToBorrower.toFixed(2)} released`, user: state.currentRole, timestamp: new Date().toLocaleString('en-GB') },
+        ],
+        activityLog: [{
+          timestamp: runAt, user: state.currentRole, section: 'Refinance',
+          action: 'Loan opened by refinance',
+          detail: `From ${previous.ref} · settled ${plan.settlement.toFixed(2)} · fee ${plan.refinanceFee.toFixed(2)} · released ${plan.netToBorrower.toFixed(2)}`,
+        }],
+      }
+
+      const closedPrevious = {
+        ...previous,
+        status: 'Refinanced',
+        refinancedToRef: newRef,
+        closedDate: today,
+        approvalHistory: [
+          ...(previous.approvalHistory || []),
+          { stage: previous.approvalState || 3, action: `Refinanced into ${newRef}${action.reason ? `: ${action.reason}` : ''}`, user: state.currentRole, timestamp: new Date().toLocaleString('en-GB') },
+        ],
+        activityLog: [{
+          timestamp: runAt, user: state.currentRole, section: 'Refinance',
+          action: 'Loan refinanced and closed',
+          detail: `Into ${newRef} · ${plan.settlement.toFixed(2)} outstanding settled${action.reason ? ` — ${action.reason}` : ''}`,
+        }, ...(previous.activityLog || [])].slice(0, 300),
+      }
+
+      const memo = `Refinance ${previous.ref} → ${newRef} — ${customer.enName || previous.customerName || ''}`.trim()
+      const journalEntry = {
+        id: `rfn-${newRef}`,
+        entryType: 'Loan Refinance',
+        date: today,
+        transactionNo: `RFN-${newRef}`,
+        memo,
+        amount: plan.newAmount,
+        currency,
+        lines: [
+          { accountCode: AR_LOAN_CODE, debit: plan.newAmount, credit: 0, memo: `Loan receivable opened — ${newRef}` },
+          { accountCode: AR_LOAN_CODE, debit: 0, credit: plan.settlement, memo: `Loan receivable settled by refinance — ${previous.ref}` },
+          ...(plan.refinanceFee > 0.005
+            ? [{ accountCode: feeGL, debit: 0, credit: plan.refinanceFee, memo: `Refinance fee — ${newRef}` }]
+            : []),
+          ...(plan.netToBorrower > 0.005
+            ? [{ accountCode: fundingBankGL, debit: 0, credit: plan.netToBorrower, memo: `Net released to borrower — ${newRef}` }]
+            : []),
+        ],
+        createdAt: new Date().toISOString(),
+      }
+
+      // The receivable moves by the difference, not by either leg on its own — the old balance
+      // never leaves the book as cash, it is rolled straight into the new loan.
+      const chartOfAccounts = applyGlMovements(state.chartOfAccounts, {
+        [AR_LOAN_CODE]: round2(plan.newAmount - plan.settlement),
+        [feeGL]: plan.refinanceFee,
+        [fundingBankGL]: -plan.netToBorrower,
+      })
+
+      // Mirrors what disbursement records, so the refinance shows up in Cash Out and in the
+      // bank's own history rather than only in the journal.
+      const releaseExpense = plan.netToBorrower > 0.005 ? [{
+        code: `RFN-${newRef}`,
+        category: 'Loan Refinance',
+        amount: plan.netToBorrower,
+        date: today,
+        description: `${memo} (Account: ${customer.accountNumber})`,
+        account: fundingBankGL,
+        status: 'Approved',
+        approvedBy: state.currentRole,
+        approvedDate: today,
+        customerCode: previous.customerCode,
+        customerName: previous.customerName,
+      }] : []
+
+      const feeIncome = plan.refinanceFee > 0.005 ? [{
+        category: 'Refinance Fee', amount: plan.refinanceFee, code: `RFF-${newRef}`,
+        date: today, description: `Refinance fee — ${newRef}`, account: feeGL,
+        source: `Fee earned refinancing ${previous.ref}`,
+        customerCode: previous.customerCode, customerName: previous.customerName,
+      }] : []
+
+      return {
+        ...state,
+        loanApplications: [newLoan, ...state.loanApplications.map(l => l.ref === action.ref ? closedPrevious : l)],
+        activeLoan: state.activeLoan?.ref === action.ref ? closedPrevious : state.activeLoan,
+        expenses: [...releaseExpense, ...state.expenses],
+        incomes: [...feeIncome, ...state.incomes],
+        chartOfAccounts,
+        journalEntries: [journalEntry, ...state.journalEntries],
+      }
+    }
+
+    // Everything an officer does to a loan outside the approval workflow — editing its terms,
+    // adding a guarantor, uploading a CBC report, dropping a collateral. It is kept separate
+    // from `approvalHistory` because that list is also what ApprovalTimeline walks to draw the
+    // stages; folding edits into it would put "Collateral added" on the approval track. The
+    // Audit Log tab reads both together, so the record stays whole while the timeline stays
+    // about approval. Newest first and capped, like the system-wide trail it mirrors.
+    case 'ADD_LOAN_ACTIVITY': {
+      if (!action.ref || !action.entry?.action) return state
+      const entry = { timestamp: auditStamp(), user: state.currentRole, ...action.entry }
+      const apply = l => l.ref === action.ref
+        ? { ...l, activityLog: [entry, ...(l.activityLog || [])].slice(0, 300) }
+        : l
+      return {
+        ...state,
+        loanApplications: state.loanApplications.map(apply),
+        activeLoan: state.activeLoan?.ref === action.ref ? apply(state.activeLoan) : state.activeLoan,
+      }
+    }
+
     // The borrower's own KHQR, held on the loan rather than on the WeBill365 connection: a
     // single company-wide code would collect payments nobody could attribute, so each loan
     // carries the code issued for it (see utils/khqr.js, which rides the loan reference in as
@@ -1138,9 +1404,15 @@ function reducer(state, action) {
 
     case 'ADD_CASH_TRANSFER': {
       const { transfer } = action
+      // The amount is stated in the source account's currency. Where the two accounts are held
+      // in different currencies the destination receives the converted figure, not the same
+      // number — moving 100 out of a dollar account used to put 100 into a riel one, which is
+      // out by a factor of the exchange rate. A rate of 1 (same currency) leaves this alone.
+      const rate = Number(transfer.exchangeRate) > 0 ? Number(transfer.exchangeRate) : 1
+      const credited = Math.round(transfer.amount * rate * 100) / 100
       const chartOfAccounts = state.chartOfAccounts.map(a => {
         if (a.code === transfer.fromCode) return { ...a, balance: Math.max(0, (a.balance || 0) - transfer.amount) }
-        if (a.code === transfer.toCode)   return { ...a, balance: (a.balance || 0) + transfer.amount }
+        if (a.code === transfer.toCode)   return { ...a, balance: (a.balance || 0) + credited }
         return a
       })
       return { ...state, cashTransfers: [...state.cashTransfers, transfer], chartOfAccounts }
@@ -1541,8 +1813,25 @@ function reducer(state, action) {
 
 const AppContext = createContext(null)
 
+// Wraps the reducer so a record number is assigned wherever a journal entry came from. Only
+// runs when the journal actually changed, and stampRecIds itself returns the same array when
+// nothing is missing a number — so the common case costs one identity check.
+function reducerWithRecIds(state, action) {
+  const next = reducer(state, action)
+  let out = next
+  if (next.journalEntries !== state.journalEntries) {
+    const stamped = stampRecIds(next.journalEntries)
+    if (stamped !== next.journalEntries) out = { ...out, journalEntries: stamped }
+  }
+  if (next.cashTransfers !== state.cashTransfers) {
+    const stamped = stampRecIds(next.cashTransfers, { oldestFirst: true })
+    if (stamped !== next.cashTransfers) out = { ...out, cashTransfers: stamped }
+  }
+  return out
+}
+
 export function AppProvider({ children }) {
-  const [state, dispatch] = useReducer(reducer, INITIAL_STATE)
+  const [state, dispatch] = useReducer(reducerWithRecIds, INITIAL_STATE)
 
   // Persist key data
   useEffect(() => {

@@ -506,7 +506,7 @@ function KhqrPanel({ integration, dispatch, showToast, companyName }) {
     setGenerating(true)
     try {
       const payload = buildKhqrPayload({ account, merchantName: companyName, currency })
-      const image = await renderKhqrImage(payload)
+      const image = await renderKhqrImage(payload, currency)
       update({ khqrImage: image, khqrEnabled: true, khqrSource: 'webill365' })
       showToast(`KHQR generated for ${account} — scan it once to confirm it resolves`, 'success')
     } catch {

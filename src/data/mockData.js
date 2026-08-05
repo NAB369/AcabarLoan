@@ -1277,6 +1277,10 @@ export const INITIAL_CHART_OF_ACCOUNTS = [
   // recognises against it. Merging them would make collected and earned indistinguishable.
   { code:'5020', type:'Income',    name:'Interest Income (Accrued)',    nameKhmer:'', normalBalance:'CREDIT', parentCode:'',     description:'Interest earned on outstanding principal, recognised daily by the End of Day batch.', status:'ACTIVE', currency:'USD', balance:0 },
   { code:'5021', type:'Income',    name:'Interest Income (Accrued) (KHR)', nameKhmer:'', normalBalance:'CREDIT', parentCode:'',  description:'Interest earned on outstanding riel principal, recognised daily by the End of Day batch.', status:'ACTIVE', currency:'KHR', balance:0 },
+  // Fees charged on restructuring rather than on lending — the refinance fee lands here, kept
+  // out of 5010 because that account is borrower repayments and a fee is not one.
+  { code:'5030', type:'Income',    name:'Loan Fee Income',              nameKhmer:'', normalBalance:'CREDIT', parentCode:'',     description:'Fees earned on refinancing and other restructuring.', status:'ACTIVE', currency:'USD', balance:0 },
+  { code:'5031', type:'Income',    name:'Loan Fee Income (KHR)',        nameKhmer:'', normalBalance:'CREDIT', parentCode:'',     description:'Restructuring fees earned on riel loans.', status:'ACTIVE', currency:'KHR', balance:0 },
   { code:'6010', type:'Expense',   name:'Loan Release Account',         nameKhmer:'', normalBalance:'DEBIT',  parentCode:'',     description:'Funds loan principal on disbursement.',                        status:'ACTIVE', currency:'USD', balance:6680 },
   { code:'6020', type:'Expense',   name:'Payroll Account',              nameKhmer:'', normalBalance:'DEBIT',  parentCode:'',     description:'Funds staff salaries.',                                        status:'ACTIVE', currency:'USD', balance:6300 },
   // The KHR side of the payroll account, so the KHR payroll card has a GL of its own

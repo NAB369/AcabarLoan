@@ -1,5 +1,18 @@
 import { openPdf, readPdfRows, rowsText, labelledValue, labelledAmount } from './pdfText'
-import { DOC_STATUS, SHORTFALL_TOLERANCE_PCT } from './statementIncome'
+import { DOC_STATUS } from './statementIncome'
+
+// How far a payslip may sit under the declared income and still confirm it.
+//
+// This used to borrow the bank statement's 15%, and that was wrong. The statement's tolerance
+// exists because deposits swing month to month — takings differ, a transfer lands late, a month
+// runs short — so demanding an exact figure off a statement would fail honest applications. A
+// payslip has none of that variance: it prints one contractual figure, and the only legitimate
+// gap between it and a correctly declared salary is rounding.
+//
+// Carrying the statement's allowance over meant a payslip stating 900 against 1,000 declared —
+// an 11% overstatement of the borrower's capacity — cleared as "Verified" and never reached an
+// officer. 2% absorbs rounding and nothing else.
+const PAYSLIP_TOLERANCE_PCT = 2
 
 // ── Reader for an uploaded payslip ─────────────────────────────────────────────
 // A payslip is verified against the income the borrower declared, the same way a bank statement
@@ -158,7 +171,7 @@ export function assessPayslipIncome(analysis, declared, sourceCount = 1) {
     return out(DOC_STATUS.partial, `${found}, but no income is declared to compare against`, reading.monthly)
   }
 
-  if (reading.monthly >= declared * (1 - SHORTFALL_TOLERANCE_PCT / 100)) {
+  if (reading.monthly >= declared * (1 - PAYSLIP_TOLERANCE_PCT / 100)) {
     return out(DOC_STATUS.verified, `${found} against ${money(declared)} declared`, reading.monthly)
   }
   // Short of the declared total, but a payslip only ever states a salary. Where the entry

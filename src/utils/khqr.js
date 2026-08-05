@@ -105,16 +105,50 @@ export function buildKhqrPayload({
 // Rendered at the same 512px the uploaded image is downscaled to, on an opaque white ground
 // with the quiet zone EMVCo requires — a QR without that margin will not lock on.
 //
-// Error correction is 'H' (recovers ~30%) rather than the usual 'M' (~15%) because the card
-// this is shown in lays a currency badge over the middle of the code. At 'M' that badge eats
-// most of the recovery budget and a slightly creased or poorly-lit print stops scanning; at
-// 'H' the same badge covers well under half of what the code can lose.
-export async function renderKhqrImage(payload) {
+// Error correction is 'H' (recovers ~30%) rather than the usual 'M' (~15%) because the currency
+// badge sits over the middle of the code. At 'M' that badge eats most of the recovery budget and
+// a slightly creased or poorly-lit print stops scanning; at 'H' it covers well under half of what
+// the code can afford to lose.
+//
+// The badge is drawn INTO the image rather than laid over it in CSS. It used to be an absolutely
+// positioned overlay, which looked right on screen and came out wrong in the exported PDF —
+// html2canvas re-lays the sheet out in its own clone and does not reproduce transforms or
+// percentage-sized overlays faithfully. Composited here, the badge is part of the raster: screen,
+// print and PDF all get the same pixels, and there is nothing left for the exporter to misplace.
+const BADGE_DIAMETER_RATIO = 0.24
+
+export async function renderKhqrImage(payload, currency = 'USD') {
   if (!payload) return ''
-  return QRCode.toDataURL(payload, {
+
+  const canvas = document.createElement('canvas')
+  await QRCode.toCanvas(canvas, payload, {
     width: 512,
     margin: 2,
     errorCorrectionLevel: 'H',
     color: { dark: '#000000', light: '#ffffff' },
   })
+
+  // The riel sign is a Khmer glyph, so the webfont carrying it has to be loaded before it is
+  // painted — canvas silently falls back to a box or a blank otherwise.
+  if (typeof document !== 'undefined' && document.fonts?.ready) {
+    try { await document.fonts.ready } catch { /* fall through to whatever is available */ }
+  }
+
+  const ctx = canvas.getContext('2d')
+  const size = canvas.width
+  const centre = size / 2
+  const radius = (size * BADGE_DIAMETER_RATIO) / 2
+
+  ctx.fillStyle = '#000000'
+  ctx.beginPath()
+  ctx.arc(centre, centre, radius, 0, Math.PI * 2)
+  ctx.fill()
+
+  ctx.fillStyle = '#ffffff'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.font = `bold ${Math.round(radius * 1.15)}px "Kantumruy Pro", "Outfit", sans-serif`
+  ctx.fillText(currency === 'KHR' ? '៛' : '$', centre, centre)
+
+  return canvas.toDataURL('image/png')
 }

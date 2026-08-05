@@ -1,7 +1,9 @@
-import { useState, useRef, useEffect } from 'react'
-import jsPDF from 'jspdf'
-import { DollarSign, TrendingUp, Calculator, FileText, Building, Briefcase, Calendar, X, Check, Printer, Download, Bell, Phone, ShieldAlert, CheckCircle, Clock, AlertCircle, ChevronRight, QrCode, Upload } from 'lucide-react'
+import { useState, useRef, useEffect, useMemo } from 'react'
+import { DollarSign, TrendingUp, Calculator, FileText, Building, Briefcase, Calendar, X, Check, Printer, Download, Bell, Phone, ShieldAlert, CheckCircle, Clock, AlertCircle, ChevronRight, ChevronDown, QrCode, Upload, CalendarClock, RefreshCw } from 'lucide-react'
 import { useApp, hasFundingAccount } from '../../context/AppContext'
+import {
+  DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator,
+} from '@/components/ui/dropdown-menu'
 import { buildReminderRecipients, buildSampleReminderMessage, daysUntilDue as daysUntilDueISO, weumsSignedIn } from '../../utils/reminders'
 import { formatVal, formatAddress, buildAmortizationData, splitTimestamp, formatDateDisplay } from '../../utils/format'
 import { LOAN_TAB_ICONS } from '../../utils/tabIcons'
@@ -14,6 +16,7 @@ import WeumsGateModal from '../shared/WeumsGateModal'
 import RepaymentTracking from './RepaymentTracking'
 import FirstRepaymentDateField from './FirstRepaymentDateField'
 import CBCReport from './CBCReport'
+import RestructureModal from './RestructureModal'
 import KhqrCard from './KhqrCard'
 import KhqrCropModal from './KhqrCropModal'
 import { assessLoanRisk } from '../../utils/riskAssessment'
@@ -72,8 +75,10 @@ function ScheduleField({ label, value }) {
 
 function DocSection({ title, children, first }) {
   return (
+    // The heading is marked as a unit so the PDF export never cuts a page between a section
+    // title and the first field under it — see keepWhole in handleDownloadPdf.
     <div className={first ? 'mb-5' : 'mb-5 mt-6'}>
-      <h4 className="text-xs font-bold uppercase tracking-wide text-slate-700 dark:text-slate-200 border-b border-slate-200 dark:border-slate-700 pb-1 mb-2">{title}</h4>
+      <h4 data-doc-section className="text-xs font-bold uppercase tracking-wide text-slate-700 dark:text-slate-200 border-b border-slate-200 dark:border-slate-700 pb-1 mb-2">{title}</h4>
       {children}
     </div>
   )
@@ -85,7 +90,7 @@ function DocSubHeading({ children }) {
 
 function DocField({ label, value }) {
   return (
-    <div className="flex items-baseline gap-3 py-1 border-b border-dotted border-slate-200 dark:border-slate-700 text-xs">
+    <div data-doc-field className="flex items-baseline gap-3 py-1 border-b border-dotted border-slate-200 dark:border-slate-700 text-xs">
       <span className="text-slate-500 dark:text-slate-400 w-36 flex-shrink-0">{label}</span>
       <span className="font-medium text-slate-800 dark:text-slate-100 text-left truncate">{value ?? '—'}</span>
     </div>
@@ -114,6 +119,7 @@ export default function LoanPreview() {
   const [showCancelModal, setShowCancelModal] = useState(false)
   const [cancelReason, setCancelReason] = useState('')
   const [scheduleDownloading, setScheduleDownloading] = useState(false)
+  const [restructureMode, setRestructureMode] = useState(null)
   const [khqrBusy, setKhqrBusy] = useState(false)
   const [khqrCropFile, setKhqrCropFile] = useState(null)
   const khqrFileRef = useRef(null)
@@ -130,17 +136,18 @@ export default function LoanPreview() {
   // Without this, Escape would bounce the officer out of the whole loan record instead
   // of just backing out of the disburse/cancel confirmation.
   useEffect(() => {
-    if (!(showDisburseModal || showCancelModal || lightbox)) return
+    if (!(showDisburseModal || showCancelModal || lightbox || restructureMode)) return
     const handleEscape = (e) => {
       if (e.key !== 'Escape') return
       e.stopPropagation()
       if (lightbox) setLightbox(null)
+      else if (restructureMode) setRestructureMode(null)
       else if (showDisburseModal) setShowDisburseModal(false)
       else if (showCancelModal) setShowCancelModal(false)
     }
     document.addEventListener('keydown', handleEscape, true)
     return () => document.removeEventListener('keydown', handleEscape, true)
-  }, [showDisburseModal, showCancelModal, lightbox])
+  }, [showDisburseModal, showCancelModal, lightbox, restructureMode])
 
   if (!loan) return null
 
@@ -222,7 +229,6 @@ export default function LoanPreview() {
   // Risk Assessment: auto-derived from each party's CBC data — see utils/riskAssessment.
   const riskAssessment = assessLoanRisk(loan)
 
-  const approvalHistory = loan.approvalHistory || []
 
   const upcomingInstallments = schedule.filter(r => r.status !== 'Paid')
   const nextPayment = upcomingInstallments[0] || null
@@ -259,8 +265,15 @@ export default function LoanPreview() {
   // that does and does not guarantee.
   async function handleGenerateKhqr() {
     const account = (webill365?.account || '').trim()
-    if (webill365?.status !== 'connected' || !account) {
-      showToast('Connect WeBill365 and set its Merchant ID first, or upload a KHQR image', 'error')
+    // Two separate reasons this can fail, reported separately. They used to share one message
+    // that blamed the connection, so a connection that was up but had no Merchant ID on it read
+    // as "not connected" and sent the operator to the wrong screen.
+    if (webill365?.status !== 'connected') {
+      showToast(`${webill365?.name || 'WeBill365'} is not connected — connect it in Integrations, or upload a KHQR image`, 'error')
+      return
+    }
+    if (!account) {
+      showToast(`${webill365?.name || 'WeBill365'} has no ${webill365?.accountLabel || 'Merchant ID'} set — add it in Integrations → Configure`, 'error')
       return
     }
     setKhqrBusy(true)
@@ -277,8 +290,12 @@ export default function LoanPreview() {
         billNumber: loan.ref,
         reference: loan.customerCode,
       })
-      const image = await renderKhqrImage(payload)
+      // The currency drives the badge painted into the middle of the code, so it is passed
+      // rather than left to a default that could disagree with the payload's own tag 53.
+      const image = await renderKhqrImage(payload, khqrCurrency)
       setKhqr({ khqrImage: image, khqrEnabled: true, khqrSource: 'webill365', khqrCurrency })
+      logActivity('Repayment Schedule', 'KHQR generated',
+        `From ${webill365?.name || 'WeBill365'} · merchant ${account} · ${khqrCurrency}`)
       showToast(`KHQR generated for ${loan.ref} — scan it once to confirm it resolves`, 'success')
     } catch {
       showToast('That KHQR could not be generated', 'error')
@@ -287,18 +304,45 @@ export default function LoanPreview() {
     }
   }
 
-  // This button is the WeBill365 path and nothing else: switching it on binds the code from
-  // that connection every time, rather than reusing whatever image happens to be held. Upload
-  // (Replace KHQR) is a separate route to the same slot and deliberately does not feed this —
-  // so the button never shows a code that did not come from WeBill365.
+  // What switching on does depends on where a code would come from, and the connection only
+  // governs the codes that belong to it:
   //
-  // Switching *off* stays available with or without a connection: a code already on a schedule
-  // has to be removable even when the provider is unreachable.
+  //   WeBill365 reachable      → generate a fresh code from it. That is the point of the link.
+  //   held code was uploaded   → show it. An uploaded image is the operator's own file and has
+  //                              nothing to do with whether the provider is up.
+  //   held code was generated  → refused while the connection is down. It was issued against a
+  //                              connection that is no longer there, so putting it back on a
+  //                              borrower's schedule would present a code this install can no
+  //                              longer stand behind.
+  //   nothing held             → say which half is missing.
+  //
+  // Switching *off* never depends on any of it: a code already on a schedule has to be
+  // removable whatever the provider is doing.
   async function handleKhqrToggle() {
     if (loan.khqrEnabled) {
       setKhqr({ khqrEnabled: false })
+      logActivity('Repayment Schedule', 'KHQR hidden from schedule',
+        loan.khqrSource === 'webill365' ? `Code from ${webill365?.name || 'WeBill365'}` : 'Uploaded code')
       return
     }
+    if (khqrCanBind) {
+      await handleGenerateKhqr()
+      return
+    }
+    if (hasKhqr && loan.khqrSource === 'uploaded') {
+      setKhqr({ khqrEnabled: true })
+      logActivity('Repayment Schedule', 'KHQR shown on schedule', 'Uploaded code')
+      return
+    }
+    if (hasKhqr) {
+      showToast(
+        `That KHQR was generated from ${webill365?.name || 'WeBill365'}, which is no longer connected —`
+        + ' reconnect it to generate a current code, or upload one.',
+        'error',
+      )
+      return
+    }
+    // Nothing to show and nothing to generate from — say which, rather than sitting inert.
     await handleGenerateKhqr()
   }
 
@@ -315,10 +359,16 @@ export default function LoanPreview() {
     setKhqrCropFile(file)
   }
 
+  // An upload shows on the schedule straight away — supplying the code is the whole intent, and
+  // leaving it stored-but-hidden behind a second click made it look as though nothing happened.
+  // What it must NOT do is imply WeBill365 bound it: the button is a display switch, and the
+  // source chip beside it says where the code actually came from.
   function handleKhqrCropped(dataUrl) {
     setKhqrCropFile(null)
-    setKhqr({ khqrImage: dataUrl, khqrEnabled: true, khqrSource: 'uploaded' })
-    showToast(`KHQR set for ${loan.ref}`, 'success')
+    setKhqr({ khqrImage: dataUrl, khqrSource: 'uploaded', khqrEnabled: true })
+    logActivity('Repayment Schedule', hasKhqr ? 'KHQR replaced by upload' : 'KHQR uploaded',
+      khqrCropFile?.name || 'image file')
+    showToast(`KHQR uploaded for ${loan.ref}`, 'success')
   }
 
   const overviewTabIdx = TABS.indexOf('Overview')
@@ -337,22 +387,23 @@ export default function LoanPreview() {
     }
   }
 
+  // The profile used to go out through jsPDF's own `pdf.html()` with autoPaging, which drew the
+  // sheet at x:0 y:0 across the full page — no margin on any edge — and cut pages wherever the
+  // text happened to fall, so a field's label could end one page and its value start the next.
+  // It now takes the same route the schedule does: rasterised at paper width, inset by a margin
+  // on all four sides, and cut only between whole blocks. `keepWhole` names the units that must
+  // not be split — a section heading, a field row, a document row.
   async function handleDownloadPdf() {
     const element = profileDocRef.current
     if (!element || downloading) return
     setDownloading(true)
     try {
-      const pdf = new jsPDF('p', 'pt', 'a4')
-      const pdfWidth = pdf.internal.pageSize.getWidth()
-      await pdf.html(element, {
-        x: 0,
-        y: 0,
-        width: pdfWidth,
-        windowWidth: element.scrollWidth,
-        autoPaging: 'text',
-        html2canvas: { scale: pdfWidth / element.scrollWidth, useCORS: true },
+      await downloadSheetPdf(element, `Loan-Profile-${loan.ref || 'loan'}`, {
+        keepWhole: '[data-doc-section], [data-doc-field], tbody tr',
       })
-      pdf.save(`Loan-Profile-${loan.ref}.pdf`)
+      // Logged after the export resolved, so a failed or cancelled save leaves no entry
+      // claiming the document went out.
+      logActivity('Loan Profile', 'Profile exported to PDF', `Loan-Profile-${loan.ref || 'loan'}.pdf`)
     } finally {
       setDownloading(false)
     }
@@ -363,6 +414,8 @@ export default function LoanPreview() {
     setScheduleDownloading(true)
     try {
       await downloadSheetPdf(scheduleSheetRef.current, `Repayment-Schedule-${loan.ref || 'loan'}`)
+      logActivity('Repayment Schedule', 'Schedule exported to PDF',
+        `${schedule.length} installments${khqrImage ? ' · with KHQR' : ''}`)
     } finally {
       setScheduleDownloading(false)
     }
@@ -465,6 +518,11 @@ export default function LoanPreview() {
       ],
     }
     dispatch({ type: 'UPDATE_LOAN', loan: updatedLoan })
+    logActivity('Repayment Reminder', 'Reminder sent',
+      [`${selectedRecipient?.role || 'Recipient'} ${selectedRecipient?.name || ''}`.trim(),
+        destination || 'no number on file',
+        nextPayment ? `installment #${nextPayment.num} due ${nextPayment.dueDate}` : null,
+      ].filter(Boolean).join(' · '))
     showToast(`Repayment reminder sent to ${selectedRecipient?.name}${destination ? ` (${destination})` : ''}`, 'success')
   }
 
@@ -472,6 +530,35 @@ export default function LoanPreview() {
     setReminderRecipientKey(key)
     setReminderMessageOverride(null)
   }
+
+  // Records what was done and which tab it was done from. Called after the action has actually
+  // happened, never before — an entry for something a guard turned back would be a lie in the
+  // trail. Same store the Loan Detail tabs write to, so one loan has one history.
+  function logActivity(section, action, detail) {
+    dispatch({ type: 'ADD_LOAN_ACTIVITY', ref: loan.ref, entry: { section, action, detail: detail || '' } })
+  }
+
+  // The approval workflow and the per-tab activity read as one column of time. They are stored
+  // apart because ApprovalTimeline walks approvalHistory to draw the stages, and the two use
+  // different timestamp formats — toLocaleString('en-GB') against auditStamp() — so they are
+  // normalised to a common sort key rather than concatenated.
+  const auditEntries = useMemo(() => {
+    const sortKey = ts => {
+      const { date, time } = splitTimestamp(ts)
+      const iso = /^\d{2}\/\d{2}\/\d{4}$/.test(date)
+        ? `${date.slice(6, 10)}-${date.slice(3, 5)}-${date.slice(0, 2)}`
+        : date
+      return `${iso} ${time}`
+    }
+    const fromApproval = (loan.approvalHistory || []).map(h => ({
+      timestamp: h.timestamp, section: 'Approval', action: h.action, detail: '', user: h.user,
+    }))
+    const fromActivity = (loan.activityLog || []).map(a => ({
+      timestamp: a.timestamp, section: a.section || 'Loan', action: a.action, detail: a.detail || '', user: a.user,
+    }))
+    return [...fromApproval, ...fromActivity]
+      .sort((a, b) => sortKey(b.timestamp).localeCompare(sortKey(a.timestamp)))
+  }, [loan.approvalHistory, loan.activityLog])
 
   return (
     <>
@@ -487,6 +574,27 @@ export default function LoanPreview() {
           </div>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{loan.ref} · {loan.product} · {loan.customerName}</p>
         </div>
+        {/* A live loan can be restructured. Reschedule only rewrites the schedule; refinance
+            settles this loan with a new one and moves money, so it carries the heavier
+            treatment of the two. */}
+        {isDisbursed && (
+          <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
+            <button
+              onClick={() => setRestructureMode('reschedule')}
+              className="flex items-center justify-center gap-2 px-4 py-2 border border-slate-200 dark:border-slate-600 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 text-sm font-semibold rounded-xl transition-colors flex-shrink-0 w-full sm:w-auto"
+            >
+              <CalendarClock className="w-4 h-4" />
+              Reschedule
+            </button>
+            <button
+              onClick={() => setRestructureMode('refinance')}
+              className="flex items-center justify-center gap-2 px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white text-sm font-semibold rounded-xl shadow-sm transition-colors flex-shrink-0 w-full sm:w-auto"
+            >
+              <RefreshCw className="w-4 h-4" />
+              Refinance
+            </button>
+          </div>
+        )}
         {readyToDisburse && (
           <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
             <button
@@ -668,7 +776,10 @@ export default function LoanPreview() {
             <div className="space-y-3">
               <div className="flex justify-end gap-2">
                 <button
-                  onClick={() => window.print()}
+                  onClick={() => {
+                    logActivity('Loan Profile', 'Profile printed', `${loan.ref} · ${loan.product || 'loan'}`)
+                    window.print()
+                  }}
                   className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
                 >
                   <Printer className="w-3.5 h-3.5" />
@@ -689,10 +800,12 @@ export default function LoanPreview() {
                 className="printable-area bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl p-6 mx-auto w-full max-w-[210mm] shadow-sm"
                 style={{ fontFamily: "'Kantumruy Pro', 'Outfit', sans-serif" }}
               >
-                {/* Header */}
-                <div className="flex items-center gap-3">
-                  <img src={companyLogoSrc(state.companyProfile)} alt={state.companyProfile.name} className="w-14 h-14 object-contain flex-shrink-0" />
-                  <div className="flex-1 text-center">
+                {/* Header. Carries doc-letterhead / letterhead-name so the print rules size the
+                    company name as a heading — without them the generic `> .flex p` rule shrank
+                    both lines to 9px, printing the company smaller than the title beneath it. */}
+                <div className="doc-letterhead flex items-center gap-3">
+                  <img src={companyLogoSrc(state.companyProfile)} alt={state.companyProfile.name} className="doc-logo w-14 h-14 object-contain flex-shrink-0" />
+                  <div className="letterhead-name flex-1 text-center">
                     <p className="text-lg font-bold text-slate-800 dark:text-slate-100">{state.companyProfile.nameKh}</p>
                     <p className="text-sm font-bold tracking-wide text-slate-700 dark:text-slate-200">{state.companyProfile.name.toUpperCase()}</p>
                   </div>
@@ -1078,62 +1191,105 @@ export default function LoanPreview() {
 
           {activeTab === scheduleTabIdx && (
             <div className="space-y-3">
-              <div className="flex flex-wrap justify-end gap-2">
-                <button
-                  onClick={handleDownloadSchedule}
-                  disabled={scheduleDownloading || schedule.length === 0}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  {scheduleDownloading ? 'Preparing…' : 'Download PDF'}
-                </button>
+              {/* Two clusters rather than one row of equal buttons: what the sheet carries
+                  (the payment code) stays a visible toggle on the left, because it reports state
+                  and has to be readable without opening anything. The one-off document actions
+                  sit behind a single menu on the right. */}
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2 mr-auto">
+                  {/* One control for this loan's payment code. Switching it on with nothing on
+                      file binds it from WeBill365 as part of the same action, so there is no
+                      separate step to know about. Disabled while switched off and the provider
+                      is unreachable — there would be nothing to bind — but never while switched
+                      on, so a code already on a schedule can always be taken back off. */}
+                  {/* Brand blue for the on state, not emerald: everywhere else in this app
+                      emerald means "good" (StatusBadge Active/Approved) while blue means
+                      "selected" — which is what a toggle actually is. */}
+                  <button
+                    onClick={handleKhqrToggle}
+                    // Only ever disabled while it is working. It used to be disabled whenever it
+                    // could not bind, which made a connection missing its Merchant ID look like a
+                    // broken button — and the tooltip then blamed the connection. It now always
+                    // responds and explains in a toast when it cannot do the thing.
+                    disabled={khqrBusy}
+                    aria-pressed={!!loan.khqrEnabled}
+                    title={loan.khqrEnabled
+                      ? 'KHQR is shown on this schedule — click to hide it'
+                      : khqrCanBind
+                        ? `Generate a new KHQR for this loan from ${webill365?.name || 'WeBill365'} and show it`
+                        : hasKhqr && loan.khqrSource === 'uploaded'
+                          ? 'Show the uploaded KHQR on file for this loan'
+                          : hasKhqr
+                            ? `The KHQR on file came from ${webill365?.name || 'WeBill365'}, which is disconnected — reconnect it, or upload a code`
+                            : `Connect ${webill365?.name || 'WeBill365'} to generate a KHQR, or use Upload KHQR to supply one`}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                      loan.khqrEnabled
+                        ? 'border-brand-200 bg-brand-50 text-brand-700 hover:bg-brand-100 dark:border-brand-800 dark:bg-brand-900/25 dark:text-brand-300'
+                        : 'border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700'
+                    }`}
+                  >
+                    <QrCode className="w-3.5 h-3.5" />
+                    {/* What pressing it actually does while switched off — bind from WeBill365 —
+                        is carried by the tooltip and the busy label rather than the resting one,
+                        which stays a plain on/off. */}
+                    {khqrBusy
+                      ? 'Binding from WeBill365…'
+                      : loan.khqrEnabled
+                        ? 'KHQR On'
+                        : 'KHQR Off'}
+                  </button>
 
-                {/* One control for this loan's payment code. Switching it on with nothing on
-                    file binds it from WeBill365 as part of the same action, so there is no
-                    separate step to know about. Disabled while switched off and the provider
-                    is unreachable — there would be nothing to bind — but never while switched
-                    on, so a code already on a schedule can always be taken back off. */}
-                <button
-                  onClick={handleKhqrToggle}
-                  disabled={khqrBusy || (!loan.khqrEnabled && !khqrCanBind)}
-                  aria-pressed={!!loan.khqrEnabled}
-                  title={loan.khqrEnabled
-                    ? 'KHQR is shown on this schedule — click to hide it'
-                    : khqrCanBind
-                      ? `Bind this loan’s KHQR from ${webill365?.name || 'WeBill365'} and show it`
-                      : `${webill365?.name || 'WeBill365'} is not connected — connect it, or use Replace KHQR to supply the code by hand`}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
-                    loan.khqrEnabled
-                      ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-900/25 dark:text-emerald-400'
-                      : 'border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700'
-                  }`}
-                >
-                  <QrCode className="w-3.5 h-3.5" />
-                  {/* What pressing it actually does while switched off — bind from WeBill365 —
-                      is carried by the tooltip and the busy label rather than the resting one,
-                      which stays a plain on/off. */}
-                  {khqrBusy
-                    ? 'Binding from WeBill365…'
-                    : loan.khqrEnabled
-                      ? 'KHQR On'
-                      : 'KHQR Off'}
-                </button>
-                <input ref={khqrFileRef} type="file" accept="image/*" onChange={handleKhqrFile} className="hidden" />
-                <button
-                  onClick={() => khqrFileRef.current?.click()}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
-                >
-                  <Upload className="w-3.5 h-3.5" />
-                  {hasKhqr ? 'Replace KHQR' : 'Upload KHQR'}
-                </button>
+                  <input ref={khqrFileRef} type="file" accept="image/*" onChange={handleKhqrFile} className="hidden" />
+                </div>
 
-                <button
-                  onClick={() => window.print()}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
-                >
-                  <Printer className="w-3.5 h-3.5" />
-                  Print Schedule
-                </button>
+                {/* Download, print and replacing the code are one-off document actions, so they
+                    collapse into a single menu and leave the toggle — the only control that
+                    reflects state — reading on its own. The trigger keeps the solid fill because
+                    the menu holds what this tab is for; the items themselves stay plain. */}
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      disabled={scheduleDownloading}
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg bg-brand-600 hover:bg-brand-700 text-white shadow-sm transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {scheduleDownloading ? 'Preparing…' : 'Actions'}
+                      <ChevronDown className="w-3.5 h-3.5" />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-52 rounded-xl dark:bg-slate-800 dark:border-slate-700">
+                    <DropdownMenuItem
+                      onSelect={handleDownloadSchedule}
+                      disabled={scheduleDownloading || schedule.length === 0}
+                      className="flex items-center gap-2 text-xs font-semibold cursor-pointer"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      Download PDF
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onSelect={() => {
+                        logActivity('Repayment Schedule', 'Schedule printed',
+                          `${schedule.length} installments${khqrImage ? ' · with KHQR' : ''}`)
+                        window.print()
+                      }}
+                      disabled={schedule.length === 0}
+                      className="flex items-center gap-2 text-xs font-semibold cursor-pointer"
+                    >
+                      <Printer className="w-3.5 h-3.5" />
+                      Print Schedule
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator className="dark:bg-slate-700" />
+                    <DropdownMenuItem
+                      // The file dialog has to be opened after the menu has closed and handed
+                      // focus back — firing it inline from onSelect lands mid-teardown and the
+                      // picker never appears.
+                      onSelect={() => { setTimeout(() => khqrFileRef.current?.click(), 0) }}
+                      className="flex items-center gap-2 text-xs font-semibold cursor-pointer"
+                    >
+                      <Upload className="w-3.5 h-3.5" />
+                      {hasKhqr ? 'Replace KHQR' : 'Upload KHQR'}
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
               </div>
 
               {/* `schedule-sheet` opts this document out of the generic print rules written
@@ -1146,14 +1302,22 @@ export default function LoanPreview() {
                 style={{ fontFamily: "'Kantumruy Pro', 'Outfit', sans-serif" }}
               >
                 {/* Header. Both outer slots are the same width so the company name stays
-                    optically centred whether or not this loan carries a KHQR. */}
-                <div className="doc-letterhead flex items-start gap-3">
+                    optically centred whether or not this loan carries a KHQR.
+                    The document title lives inside the centre column rather than under the whole
+                    row: the KHQR card is much taller than two lines of company name, so a title
+                    placed after the row sat below the card's full height and left a band of dead
+                    space between the two. Inside the column it fills that space instead, and the
+                    header closes up to the same height with or without a code. */}
+                <div className="doc-letterhead flex items-start gap-3 mb-4">
                   <div className="w-32 flex-shrink-0 flex items-start justify-start">
                     <img src={companyLogoSrc(state.companyProfile)} alt={state.companyProfile.name} className="doc-logo w-[77px] h-[77px] object-contain" />
                   </div>
-                  <div className="letterhead-name flex-1 text-center pt-1">
-                    <p className="text-lg font-bold text-slate-800 dark:text-slate-100">{state.companyProfile.nameKh}</p>
-                    <p className="text-sm font-bold tracking-wide text-slate-700 dark:text-slate-200">{state.companyProfile.name.toUpperCase()}</p>
+                  <div className="flex-1 text-center pt-1">
+                    <div className="letterhead-name">
+                      <p className="text-lg font-bold text-slate-800 dark:text-slate-100">{state.companyProfile.nameKh}</p>
+                      <p className="text-sm font-bold tracking-wide text-slate-700 dark:text-slate-200">{state.companyProfile.name.toUpperCase()}</p>
+                    </div>
+                    <p className="doc-title text-base font-bold text-slate-800 dark:text-slate-100 mt-3">តារាងកាលវិភាគសងប្រាក់</p>
                   </div>
                   <div className="w-32 flex-shrink-0 flex flex-col items-end">
                     {khqrImage && (
@@ -1163,8 +1327,6 @@ export default function LoanPreview() {
                         // The borrower, not the company — the code is issued per loan, so the
                         // name on it should say who is paying against it.
                         payeeName={loan.customerName}
-                        // What the code encodes, not what the sheet is currently displayed in.
-                        currency={loan.khqrCurrency || loan.currency || currency}
                         reference={loan.ref}
                         // An uploaded image is already a complete KHQR card; framing it again
                         // stacked a second banner and payee on top of the one in the picture.
@@ -1173,7 +1335,6 @@ export default function LoanPreview() {
                     )}
                   </div>
                 </div>
-                <p className="text-center text-base font-bold text-slate-800 dark:text-slate-100 mt-1 mb-5">តារាងកាលវិភាគសងប្រាក់</p>
 
                 {/* Borrower / loan info */}
                 <div className="flex flex-col sm:flex-row gap-x-8 gap-y-1.5 text-xs mb-3">
@@ -1364,25 +1525,42 @@ export default function LoanPreview() {
                           <tr className="bg-slate-50 dark:bg-slate-900/50 border-b border-slate-200 dark:border-slate-700">
                             <th className="px-3 py-3 text-left font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap">Date</th>
                             <th className="px-3 py-3 text-left font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap">Time</th>
+                            <th className="px-3 py-3 text-left font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap">Section</th>
                             <th className="px-3 py-3 text-left font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide">Action</th>
                             <th className="px-3 py-3 text-left font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide">User</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
-                          {approvalHistory.length === 0 ? (
+                          {auditEntries.length === 0 ? (
                             <tr>
-                              <td colSpan={4} className="px-3 py-10 text-center text-slate-400 dark:text-slate-500">
+                              <td colSpan={5} className="px-3 py-10 text-center text-slate-400 dark:text-slate-500">
                                 No audit log entries recorded for this loan.
                               </td>
                             </tr>
-                          ) : approvalHistory.map((log, i) => {
+                          ) : auditEntries.map((log, i) => {
                             const { date, time } = splitTimestamp(log.timestamp)
                             return (
-                            <tr key={i} className="hover:bg-slate-50 dark:hover:bg-slate-700/30 transition-colors">
+                            <tr key={i} className="hover:bg-slate-50 dark:hover:bg-slate-700/30 transition-colors align-top">
                               <td className="px-3 py-3 font-mono text-slate-500 dark:text-slate-400 whitespace-nowrap">{date}</td>
                               <td className="px-3 py-3 font-mono text-slate-500 dark:text-slate-400 whitespace-nowrap">{time}</td>
-                              <td className="px-3 py-3 font-semibold text-slate-700 dark:text-slate-200">{log.action || '—'}</td>
-                              <td className="px-3 py-3 text-slate-600 dark:text-slate-300">{log.user || '—'}</td>
+                              <td className="px-3 py-3 whitespace-nowrap">
+                                {/* Which tab the action came from. Approval entries are the
+                                    workflow itself, so they carry the brand colour the timeline
+                                    uses; everything else is a neutral tag. */}
+                                <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                  log.section === 'Approval'
+                                    ? 'bg-blue-50 text-[#0047ab] dark:bg-blue-900/30 dark:text-blue-400'
+                                    : 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300'
+                                }`}>
+                                  {log.section}
+                                </span>
+                              </td>
+                              <td className="px-3 py-3">
+                                <span className="font-semibold text-slate-700 dark:text-slate-200">{log.action || '—'}</span>
+                                {/* What actually changed, so the row says more than that something did */}
+                                {log.detail && <span className="block text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">{log.detail}</span>}
+                              </td>
+                              <td className="px-3 py-3 text-slate-600 dark:text-slate-300 whitespace-nowrap">{log.user || '—'}</td>
                             </tr>
                             )
                           })}
@@ -1540,6 +1718,28 @@ export default function LoanPreview() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Reschedule / refinance. The plan shown in the dialog is the plan dispatched, so what
+          the officer approved is what is applied — see RestructureModal. */}
+      {restructureMode && (
+        <RestructureModal
+          mode={restructureMode}
+          loan={loan}
+          currency={currency}
+          onClose={() => setRestructureMode(null)}
+          onConfirm={(plan, reason) => {
+            if (!plan) return
+            if (restructureMode === 'refinance') {
+              dispatch({ type: 'REFINANCE_LOAN', ref: loan.ref, plan, reason })
+              showToast(`${loan.ref} refinanced — ${formatVal(plan.netToBorrower, currency, 1)} released`, 'success')
+            } else {
+              dispatch({ type: 'RESCHEDULE_LOAN', ref: loan.ref, plan, reason })
+              showToast(`${loan.ref} rescheduled over ${plan.installments} months`, 'success')
+            }
+            setRestructureMode(null)
+          }}
+        />
       )}
 
       {/* Crop step for an uploaded KHQR — handles its own Escape, see KhqrCropModal. */}

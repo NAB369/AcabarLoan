@@ -5,8 +5,11 @@ import html2canvas from 'html2canvas'
 // its table scrolls sideways, so the capture is taken at the full paper width instead of
 // whatever the viewport happens to be showing.
 const SHEET_WIDTH_PX = 794
-// Head and foot margin on every page; the sheet carries its own inner padding, so the
-// sides are left alone.
+// Margin on every edge of every page. The sides used to be left to the sheet's own inner
+// padding, which meant the image was drawn at the full paper width: content ran to within a
+// few points of the paper edge horizontally while the top and bottom sat 24pt in, so nothing
+// lined up and the sheet read as though it had been cropped. The image is now inset by this on
+// all four sides and scaled to the column between them.
 const MARGIN_PT = 24
 
 // A sheet is a paper document; dark mode restyles it (the theme remaps bg-white and the
@@ -92,7 +95,12 @@ export async function downloadSheetPdf(element, filename, { keepWhole = 'tbody t
     const pdf = new jsPDF('p', 'pt', 'a4')
     const pageWidth = pdf.internal.pageSize.getWidth()
     const pageHeight = pdf.internal.pageSize.getHeight()
-    const pxPerPt = canvas.width / pageWidth
+    // The sheet is scaled to the column between the side margins, not to the whole page, so
+    // the conversion every page cut is measured in has to be taken against that column too —
+    // deriving it from the full width would make each slice slightly taller than the space it
+    // is drawn into, and the overflow would creep down the page as the document went on.
+    const contentWidth = pageWidth - MARGIN_PT * 2
+    const pxPerPt = canvas.width / contentWidth
     const pageHeightPx = Math.floor((pageHeight - MARGIN_PT * 2) * pxPerPt)
 
     for (const [offset, end] of pageCuts(element, canvas, pageHeightPx, keepWhole)) {
@@ -107,7 +115,7 @@ export async function downloadSheetPdf(element, filename, { keepWhole = 'tbody t
       ctx.fillRect(0, 0, slice.width, sliceHeight)
       ctx.drawImage(canvas, 0, offset, canvas.width, sliceHeight, 0, 0, canvas.width, sliceHeight)
       if (offset > 0) pdf.addPage()
-      pdf.addImage(slice.toDataURL('image/jpeg', 0.95), 'JPEG', 0, MARGIN_PT, pageWidth, sliceHeight / pxPerPt)
+      pdf.addImage(slice.toDataURL('image/jpeg', 0.95), 'JPEG', MARGIN_PT, MARGIN_PT, contentWidth, sliceHeight / pxPerPt)
     }
 
     pdf.save(filename.endsWith('.pdf') ? filename : `${filename}.pdf`)

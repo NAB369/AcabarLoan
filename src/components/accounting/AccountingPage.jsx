@@ -9,7 +9,7 @@ import {
   Settings, Pencil, Search, Eye, LayoutDashboard, BookOpen, Check, CheckCheck, Trash2, History,
   Download, Columns3, ExternalLink, CornerDownRight,
 } from 'lucide-react'
-import { useApp, canFundExpense, expenseFundingAccount } from '../../context/AppContext'
+import { useApp, canFundExpense, expenseFundingAccount, nextRecId } from '../../context/AppContext'
 import { formatVal } from '../../utils/format'
 import { BRANCHES } from '../../data/constants'
 import StatusBadge from '../shared/StatusBadge'
@@ -396,30 +396,54 @@ function TransactionModal({ type, count, accounts, realBankAccounts, onClose, on
 }
 
 // ─── Modal: Cash Transfer ─────────────────────────────────────────────────────
-function CashTransferModal({ accounts, onClose, onSubmit }) {
+function CashTransferModal({ accounts, transfers = [], onClose, onSubmit }) {
   const [form, setForm] = useState({
     fromCode: accounts[0]?.code || '',
     toCode: accounts[1]?.code || accounts[0]?.code || '',
     date: todayStr(),
     ref: randRef('CT'),
+    trnRef: '',
     amount: '',
+    exchangeRate: '1',
     description: '',
   })
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
+  // What the stamper will assign on save, held from open so it does not shift under the operator.
+  const [recId] = useState(() => nextRecId(transfers))
+
+  const fromAccount = accounts.find(a => a.code === form.fromCode)
+  const toAccount = accounts.find(a => a.code === form.toCode)
+  const fromCurrency = fromAccount?.currency || 'USD'
+  const toCurrency = toAccount?.currency || 'USD'
+  const crossCurrency = fromCurrency !== toCurrency
+
+  // Same currency both sides means one unit buys one unit — the field is shown but pinned, so a
+  // stray rate cannot quietly multiply a like-for-like transfer.
+  const rate = crossCurrency ? (Number(form.exchangeRate) || 0) : 1
+  const credited = Number(form.amount) > 0 && rate > 0
+    ? Math.round(Number(form.amount) * rate * 100) / 100
+    : 0
 
   function handleSubmit(e) {
     e.preventDefault()
-    const from = accounts.find(a => a.code === form.fromCode)
-    const to = accounts.find(a => a.code === form.toCode)
-    if (!from || !to || from.code === to.code) return
+    if (!fromAccount || !toAccount || fromAccount.code === toAccount.code) return
+    // A cross-currency transfer with no rate would post the same number into an account held in
+    // another currency, so it is refused rather than defaulted to 1.
+    if (crossCurrency && !(rate > 0)) return
     onSubmit({
+      recId,
       ref: form.ref,
+      trnRef: form.trnRef.trim(),
       date: form.date,
-      fromCode: from.code,
-      fromName: from.name,
-      toCode: to.code,
-      toName: to.name,
+      fromCode: fromAccount.code,
+      fromName: fromAccount.name,
+      fromCurrency,
+      toCode: toAccount.code,
+      toName: toAccount.name,
+      toCurrency,
       amount: Number(form.amount),
+      exchangeRate: rate,
+      creditedAmount: credited,
       description: form.description,
     })
   }
@@ -434,37 +458,78 @@ function CashTransferModal({ accounts, onClose, onSubmit }) {
         <form onSubmit={handleSubmit} className="p-4 sm:p-6 space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
-              <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">From Account</label>
+              <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">From GL Account</label>
               <select value={form.fromCode} onChange={e => set('fromCode', e.target.value)}
                 className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500">
-                {accounts.map(a => <option key={a.code} value={a.code}>{a.code} — {a.name}</option>)}
+                {accounts.map(a => <option key={a.code} value={a.code}>{a.code} — {a.name} ({a.currency || 'USD'})</option>)}
               </select>
             </div>
             <div>
-              <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">To Account</label>
+              <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">To GL Account</label>
               <select value={form.toCode} onChange={e => set('toCode', e.target.value)}
                 className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500">
-                {accounts.map(a => <option key={a.code} value={a.code}>{a.code} — {a.name}</option>)}
+                {accounts.map(a => <option key={a.code} value={a.code}>{a.code} — {a.name} ({a.currency || 'USD'})</option>)}
               </select>
             </div>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div>
+              {/* System-assigned, like the journal's — see stampRecIds in AppContext. */}
+              <Label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">RECID No</Label>
+              <Input value={recId} readOnly tabIndex={-1} title="Assigned by the system when the transfer is saved"
+                className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2 text-sm font-mono bg-slate-50 dark:bg-slate-900/40 text-slate-500 dark:text-slate-400 cursor-default" />
+            </div>
+            <div>
+              <Label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">Transaction No</Label>
+              <Input value={form.ref} onChange={e => set('ref', e.target.value)}
+                className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2 text-sm font-mono bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500" />
+            </div>
+            <div>
+              <Label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">Trn Ref #</Label>
+              <Input value={form.trnRef} onChange={e => set('trnRef', e.target.value)} placeholder="Bank advice no."
+                className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2 text-sm font-mono bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500" />
+            </div>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div>
               <Label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">Date</Label>
               <Input type="date" value={form.date} onChange={e => set('date', e.target.value)}
                 className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500" />
             </div>
             <div>
-              <Label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">Trn No</Label>
-              <Input value={form.ref} onChange={e => set('ref', e.target.value)}
-                className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2 text-sm font-mono bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500" />
+              {/* Stated in the source account's currency, which is what leaves it. */}
+              <Label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">Amount ({fromCurrency})</Label>
+              <Input type="number" min="0" step="0.01" placeholder="0.00" required value={form.amount} onChange={e => set('amount', e.target.value)}
+                className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500" />
+            </div>
+            <div>
+              <Label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                Exchange Rate{crossCurrency ? ' *' : ''}
+              </Label>
+              <Input
+                type="number" min="0" step="0.0001"
+                value={crossCurrency ? form.exchangeRate : '1'}
+                onChange={e => set('exchangeRate', e.target.value)}
+                readOnly={!crossCurrency}
+                required={crossCurrency}
+                title={crossCurrency ? `${fromCurrency} → ${toCurrency}` : 'Both accounts are held in the same currency'}
+                className={`w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-500 ${
+                  crossCurrency
+                    ? 'bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100'
+                    : 'bg-slate-50 dark:bg-slate-900/40 text-slate-500 dark:text-slate-400 cursor-default'
+                }`}
+              />
             </div>
           </div>
-          <div>
-            <Label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">Amount (USD)</Label>
-            <Input type="number" min="0" step="0.01" placeholder="0.00" required value={form.amount} onChange={e => set('amount', e.target.value)}
-              className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500" />
-          </div>
+          {/* What the destination will actually receive. Shown only when it differs from what
+              left, so a rate typed the wrong way round is visible before it is committed. */}
+          {crossCurrency && (
+            <p className={`text-[11px] font-semibold ${rate > 0 ? 'text-slate-600 dark:text-slate-300' : 'text-rose-600 dark:text-rose-400'}`}>
+              {rate > 0
+                ? `${Number(form.amount) || 0} ${fromCurrency} → ${credited.toLocaleString()} ${toCurrency} at ${rate}`
+                : `Enter a rate to convert ${fromCurrency} into ${toCurrency}.`}
+            </p>
+          )}
           <div>
             <Label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">Description</Label>
             <Textarea rows={2} value={form.description} onChange={e => set('description', e.target.value)} placeholder="Optional..."
@@ -616,8 +681,14 @@ const GL_COLUMNS = [
 // Journal entry columns — same contract as GL_COLUMNS. Entries carry their own amount
 // except the older ones, where it is the sum of the debit side.
 const JE_COLUMNS = [
+  // The ledger's own record number, assigned once and never reused — see stampRecIds.
+  { id: 'recId', label: 'RECID No', text: j => j.recId || '—', render: j => j.recId || '—', cellClass: 'font-mono text-slate-500 dark:text-slate-400' },
   { id: 'date', label: 'Date', text: j => j.date || '', render: j => j.date },
   { id: 'transactionNo', label: 'Transaction No', text: j => j.transactionNo || '', render: j => j.transactionNo, cellClass: 'font-mono text-slate-500 dark:text-slate-400' },
+  // The reference the posting arrived on. Entries written before the field existed, and the
+  // system's own postings (disbursement, repayment, batches), carry none — shown as a dash
+  // rather than left blank so an empty cell reads as "no reference", not as a missing column.
+  { id: 'trnRef', label: 'Trn Ref #', text: j => j.trnRef || '—', render: j => j.trnRef || '—', cellClass: 'font-mono text-slate-500 dark:text-slate-400' },
   { id: 'entryType', label: 'Type', text: j => j.entryType || '', render: j => j.entryType || '—' },
   { id: 'memo', label: 'Memo', text: j => j.memo || '—', render: j => j.memo || '—', cellClass: 'text-slate-700 dark:text-slate-200 max-w-[240px] truncate' },
   { id: 'accounts', label: 'Accounts', text: j => j.accountsLabel || '—', render: j => j.accountsLabel || '—' },
@@ -683,10 +754,23 @@ const EXP_COLUMNS = [
 // Cash transfer columns. A transfer has no type of its own, so the tab's first filter is
 // the account it touches on either side.
 const CT_COLUMNS = [
+  // Its own record series — see stampRecIds; cash transfers are a separate register from the journal.
+  { id: 'recId', label: 'RECID No', text: t => t.recId || '—', render: t => t.recId || '—', cellClass: 'font-mono text-slate-500 dark:text-slate-400' },
   { id: 'date', label: 'Date', text: t => t.date || '', render: t => t.date },
-  { id: 'ref', label: 'Ref', text: t => t.ref || '', render: t => t.ref, cellClass: 'font-mono text-slate-500 dark:text-slate-400' },
-  { id: 'from', label: 'From', text: t => t.fromName || t.fromCode || '', render: t => t.fromName || t.fromCode, cellClass: 'text-slate-700 dark:text-slate-200' },
-  { id: 'to', label: 'To', text: t => t.toName || t.toCode || '', render: t => t.toName || t.toCode, cellClass: 'text-slate-700 dark:text-slate-200' },
+  { id: 'ref', label: 'Transaction No', text: t => t.ref || '', render: t => t.ref, cellClass: 'font-mono text-slate-500 dark:text-slate-400' },
+  // The reference the transfer came in on. Seeded rows and anything saved before the field
+  // existed carry none, shown as a dash rather than an empty cell.
+  { id: 'trnRef', label: 'Trn Ref #', text: t => t.trnRef || '—', render: t => t.trnRef || '—', cellClass: 'font-mono text-slate-500 dark:text-slate-400' },
+  { id: 'from', label: 'From GL Account', text: t => t.fromName || t.fromCode || '', render: t => t.fromName || t.fromCode, cellClass: 'text-slate-700 dark:text-slate-200' },
+  { id: 'to', label: 'To GL Account', text: t => t.toName || t.toCode || '', render: t => t.toName || t.toCode, cellClass: 'text-slate-700 dark:text-slate-200' },
+  {
+    // 1 on a same-currency transfer, which is most of them — shown so a converted row is
+    // distinguishable from one that moved like for like.
+    id: 'exchangeRate', label: 'Exchange Rate', right: true,
+    text: t => String(t.exchangeRate ?? 1),
+    render: t => String(t.exchangeRate ?? 1),
+    cellClass: 'font-mono text-slate-500 dark:text-slate-400',
+  },
   { id: 'description', label: 'Description', text: t => t.description || '—', render: t => t.description || '—', cellClass: 'max-w-[260px] truncate' },
   {
     id: 'amount', label: 'Amount', right: true,
@@ -765,6 +849,17 @@ const COA_COLUMNS = [
     text: a => a.normalBalance ? sentenceCase(a.normalBalance) : '—',
     render: a => a.normalBalance ? sentenceCase(a.normalBalance) : '—',
     cellClass: 'text-slate-600 dark:text-slate-300',
+  },
+  {
+    // Which currency the account is denominated in. Two accounts can otherwise look
+    // identical in this table while postings route to only one of them.
+    id: 'currency', label: 'Currency',
+    text: a => a.currency || 'USD',
+    render: a => (
+      <span className="inline-block px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-700 text-[10px] font-bold text-slate-600 dark:text-slate-300">
+        {a.currency || 'USD'}
+      </span>
+    ),
   },
   { id: 'description', label: 'Description', text: a => a.description || '—', render: a => a.description || '—', cellClass: 'text-slate-600 dark:text-slate-300 max-w-[220px] truncate' },
   {
@@ -1026,13 +1121,25 @@ function ChartOfAccountModal({ account, onClose, onSubmit }) {
               className="w-full bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-2 text-sm" />
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div>
               <label className="block text-xs font-bold text-slate-700 dark:text-slate-200 mb-1">Normal Balance</label>
               <select value={formData.normalBalance} onChange={e => setFormData({...formData, normalBalance: e.target.value})}
                 className="w-full bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-2 text-sm">
                 <option value="DEBIT">DEBIT</option>
                 <option value="CREDIT">CREDIT</option>
+              </select>
+            </div>
+            <div>
+              {/* An account holds one currency. Disbursement and repayment pick the account to
+                  post against by matching this field against the loan's own currency (see
+                  fundingGLCode), so an account created without it silently becomes a dollar
+                  account — which is why the form asks rather than defaulting quietly. */}
+              <label className="block text-xs font-bold text-slate-700 dark:text-slate-200 mb-1">Currency *</label>
+              <select required value={formData.currency || 'USD'} onChange={e => setFormData({...formData, currency: e.target.value})}
+                className="w-full bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-2 text-sm">
+                <option value="USD">USD — US Dollar</option>
+                <option value="KHR">KHR — Khmer Riel</option>
               </select>
             </div>
             <div>
@@ -4089,6 +4196,8 @@ export default function AccountingPage() {
       {journalEntryModalOpen && (
         <JournalEntryModal
           accounts={chartOfAccounts}
+          // Needed to propose the next number in the series and to refuse a duplicate.
+          entries={journalEntries}
           onClose={() => setJournalEntryModalOpen(false)}
           onSubmit={(entry) => {
             dispatch({ type: 'ADD_JOURNAL_ENTRY', entry })
@@ -4135,6 +4244,8 @@ export default function AccountingPage() {
       {cashTransferModalOpen && (
         <CashTransferModal
           accounts={chartOfAccounts}
+          // Needed to show the record number the stamper will assign on save.
+          transfers={cashTransfers}
           onClose={() => dispatch({ type: 'CLOSE_CASH_TRANSFER_MODAL' })}
           onSubmit={handleAddTransfer}
         />

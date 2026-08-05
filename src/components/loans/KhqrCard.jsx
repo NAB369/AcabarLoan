@@ -15,15 +15,11 @@ import { cn } from '@/lib/utils'
 export default function KhqrCard({
   image,
   payeeName,
-  currency = 'USD',
   reference,
   className = '',
   framed = true,
 }) {
   if (!image) return null
-
-  // Riel and dollar codes carry their own symbol, matching what the payer's bank app shows.
-  const symbol = currency === 'KHR' ? '៛' : '$'
 
   const referenceLine = reference
     ? <p className="khqr-ref text-[8px] font-semibold text-slate-600 text-center leading-tight truncate">{reference}</p>
@@ -49,20 +45,15 @@ export default function KhqrCard({
       </div>
       <div className="khqr-card-body px-2 pt-1.5 pb-1.5">
         <p className="khqr-payee text-[10px] font-semibold text-slate-800 truncate leading-tight">{payeeName}</p>
-        <div className="khqr-code-wrap relative mt-1.5">
+        {/* No badge overlay here: a generated code carries its currency badge inside the image
+            (see renderKhqrImage), so screen, print and PDF all show identical pixels. An
+            uploaded image keeps whatever its issuer put in the middle. */}
+        <div className="khqr-code-wrap mt-1.5">
           <img
             src={image}
             alt={reference ? `KHQR payment code for ${reference}` : 'KHQR payment code'}
             className="khqr-code w-full h-auto block"
           />
-          {/* Only over a code generated here, whose error correction is set to 'H' to carry
-              it. An uploaded image's recovery budget is unknown and is left alone. */}
-          <span
-            className="khqr-badge absolute left-1/2 top-1/2 w-[24%] aspect-square -translate-x-1/2 -translate-y-1/2 rounded-full bg-black text-white font-bold flex items-center justify-center text-[11px] leading-none"
-            aria-hidden="true"
-          >
-            {symbol}
-          </span>
         </div>
         {referenceLine && <div className="mt-1">{referenceLine}</div>}
       </div>

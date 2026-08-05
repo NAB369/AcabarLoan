@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Label } from '@/components/ui/label'
+import { nextRecId } from '../../context/AppContext'
 
 const fieldCls = 'w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500'
 const fieldLabelCls = 'block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1'
@@ -26,10 +27,34 @@ function ModalShell({ title, onClose, children, wide }) {
   )
 }
 
+// The next readable journal number, continuing the JE-000001 series the seeded entries use.
+// Auto-generated numbers used to be `JE-${Date.now()}`, so an install may hold a 13-digit epoch
+// in that field — those are ignored when finding the highest, or one of them would push the
+// whole series into the trillions and every number after it would be unreadable.
+const MAX_SANE_SEQUENCE = 999999
+export function nextJournalNo(entries) {
+  const highest = (entries || []).reduce((max, entry) => {
+    const match = /^JE-(\d+)$/.exec(entry?.transactionNo || '')
+    if (!match) return max
+    const value = parseInt(match[1], 10)
+    return value <= MAX_SANE_SEQUENCE ? Math.max(max, value) : max
+  }, 0)
+  return `JE-${String(highest + 1).padStart(6, '0')}`
+}
+
 // ─── Journal Entry: balanced multi-line debit/credit posting ─────────────────
-export function JournalEntryModal({ accounts, onClose, onSubmit }) {
+export function JournalEntryModal({ accounts, entries = [], onClose, onSubmit }) {
   const [date, setDate] = useState(todayStr())
   const [memo, setMemo] = useState('')
+  // Proposed rather than fixed: the number is what the entry is referred to afterwards, and an
+  // office running its own numbering has to be able to type theirs in.
+  const [transactionNo, setTransactionNo] = useState(() => nextJournalNo(entries))
+  // What the stamper will assign on save, worked out the same way it does. Held from open so it
+  // does not shift under the operator while they fill the rest of the form in.
+  const [recId] = useState(() => nextRecId(entries))
+  // The reference this posting came in on — a bank advice, a voucher, an invoice. Free text
+  // because it belongs to whoever issued it, not to this system.
+  const [trnRef, setTrnRef] = useState('')
   const [rows, setRows] = useState([
     { accountCode: accounts[0]?.code || '', debit: '', credit: '' },
     { accountCode: accounts[1]?.code || accounts[0]?.code || '', debit: '', credit: '' },
@@ -52,6 +77,14 @@ export function JournalEntryModal({ accounts, onClose, onSubmit }) {
   function handleSubmit(e) {
     e.preventDefault()
     setError('')
+    const txnNo = transactionNo.trim()
+    if (!txnNo) { setError('Enter a transaction number.'); return }
+    // The number is what every later reference to this entry resolves on, so two entries
+    // carrying the same one would make the trail ambiguous.
+    if ((entries || []).some(x => (x?.transactionNo || '').trim().toLowerCase() === txnNo.toLowerCase())) {
+      setError(`Transaction number ${txnNo} is already used by another entry.`)
+      return
+    }
     const lines = rows.filter(r => r.accountCode && ((Number(r.debit) || 0) > 0 || (Number(r.credit) || 0) > 0))
     if (lines.length < 2) { setError('Add at least two lines.'); return }
     if (totalDebit <= 0 || totalDebit !== totalCredit) { setError('Total debits must equal total credits and be greater than zero.'); return }
@@ -59,8 +92,11 @@ export function JournalEntryModal({ accounts, onClose, onSubmit }) {
       id: `je-${Date.now()}`,
       entryType: 'Journal Entry',
       date,
-      transactionNo: `JE-${Date.now()}`,
+      transactionNo: txnNo,
+      trnRef: trnRef.trim(),
       memo,
+      // Taken from the lines, never typed: the entry's amount IS its balanced total, and a
+      // figure entered separately could disagree with the postings underneath it.
       amount: totalDebit,
       lines: lines.map(r => ({ accountCode: r.accountCode, debit: Number(r.debit) || 0, credit: Number(r.credit) || 0, memo })),
       createdAt: new Date().toISOString(),
@@ -70,15 +106,45 @@ export function JournalEntryModal({ accounts, onClose, onSubmit }) {
   return (
     <ModalShell title="New Journal Entry" onClose={onClose} wide>
       <form onSubmit={handleSubmit} className="p-4 sm:p-6 space-y-4">
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
           <div>
-            <Label className={fieldLabelCls}>Date</Label>
-            <Input type="date" value={date} onChange={e => setDate(e.target.value)} className={fieldCls} />
+            {/* System-assigned and not editable: a record number identifies the row for the life
+                of the ledger, so it is handed out by the stamper in AppContext rather than typed.
+                Shown here so the officer knows the number before committing. */}
+            <Label className={fieldLabelCls} htmlFor="je-rec-id">RECID No</Label>
+            <Input
+              id="je-rec-id" value={recId} readOnly tabIndex={-1}
+              title="Assigned by the system when the entry is saved"
+              className={`${fieldCls} font-mono bg-slate-50 dark:bg-slate-900/40 text-slate-500 dark:text-slate-400 cursor-default`}
+            />
           </div>
           <div>
-            <Label className={fieldLabelCls}>Memo</Label>
-            <Input value={memo} onChange={e => setMemo(e.target.value)} placeholder="Optional description" className={fieldCls} />
+            <Label className={fieldLabelCls} htmlFor="je-txn-no">Transaction No *</Label>
+            <Input
+              id="je-txn-no" required value={transactionNo}
+              onChange={e => setTransactionNo(e.target.value)}
+              placeholder="JE-000001"
+              className={`${fieldCls} font-mono`}
+            />
           </div>
+          <div>
+            <Label className={fieldLabelCls} htmlFor="je-trn-ref">Trn Ref #</Label>
+            <Input
+              id="je-trn-ref" value={trnRef}
+              onChange={e => setTrnRef(e.target.value)}
+              placeholder="Bank advice / voucher no."
+              className={`${fieldCls} font-mono`}
+            />
+          </div>
+          <div>
+            <Label className={fieldLabelCls} htmlFor="je-date">Date</Label>
+            <Input id="je-date" type="date" value={date} onChange={e => setDate(e.target.value)} className={fieldCls} />
+          </div>
+        </div>
+
+        <div>
+          <Label className={fieldLabelCls} htmlFor="je-memo">Memo</Label>
+          <Input id="je-memo" value={memo} onChange={e => setMemo(e.target.value)} placeholder="Optional description" className={fieldCls} />
         </div>
 
         <div className="space-y-2">
@@ -99,9 +165,17 @@ export function JournalEntryModal({ accounts, onClose, onSubmit }) {
           </Button>
         </div>
 
-        <div className="flex items-center justify-end gap-6 text-xs font-semibold text-slate-500 dark:text-slate-400 border-t border-slate-100 dark:border-slate-700 pt-3">
+        <div className="flex items-center justify-end gap-6 text-xs font-semibold text-slate-500 dark:text-slate-400 border-t border-slate-100 dark:border-slate-700 pt-3 flex-wrap">
           <span>Total Debit: <span className={totalDebit !== totalCredit ? 'text-rose-600 dark:text-rose-400' : 'text-slate-800 dark:text-slate-100'}>{totalDebit.toFixed(2)}</span></span>
           <span>Total Credit: <span className={totalDebit !== totalCredit ? 'text-rose-600 dark:text-rose-400' : 'text-slate-800 dark:text-slate-100'}>{totalCredit.toFixed(2)}</span></span>
+          {/* Shown, not entered — the entry's amount is its balanced total, so it reads off the
+              lines and only settles once the two sides agree. */}
+          <span className="border-l border-slate-200 dark:border-slate-600 pl-6">
+            Transaction Amount:{' '}
+            <span className={totalDebit !== totalCredit || totalDebit <= 0 ? 'text-slate-400 dark:text-slate-500' : 'text-slate-800 dark:text-slate-100'}>
+              {totalDebit === totalCredit && totalDebit > 0 ? totalDebit.toFixed(2) : '—'}
+            </span>
+          </span>
         </div>
 
         {error && <p className="text-[11px] font-semibold text-rose-600 dark:text-rose-400">{error}</p>}
