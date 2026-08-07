@@ -153,6 +153,7 @@ function loadPersistedState() {
         })
       : null
     const repaired = repairRepaymentEntries(p.journalEntries, p.chartOfAccounts)
+    const renumbered = renumberFeeIncome(repaired.chartOfAccounts, repaired.entries)
     return {
       customers: p.customers || null,
       // Income verification reads the monthly figures off the bank statement, which loans
@@ -166,15 +167,19 @@ function loadPersistedState() {
       feeSettings,
       loanProducts,
       activeStatement: p.activeStatement || null,
-      chartOfAccounts: repaired.chartOfAccounts || null,
+      chartOfAccounts: renumbered.chartOfAccounts || null,
       realBankAccounts,
-      journalEntries: repaired.entries || null,
+      journalEntries: renumbered.journalEntries || null,
       employees: p.employees || null,
       payrollRuns: p.payrollRuns || null,
       auditLogs: p.auditLogs || null,
       systemUsers: p.systemUsers || null,
       integrations: p.integrations || null,
       customGeo: p.customGeo || null,
+      // Column visibility per register. Additive — an install saved before the column picker
+      // existed has neither, and falls back to showing every column.
+      customerVisibleColumns: p.customerVisibleColumns || null,
+      loanVisibleColumns: p.loanVisibleColumns || null,
       // Which business day is open (or was last closed) and the batch history behind it.
       // Both are additive — an install saved before System Operations existed has neither,
       // and falls back to a closed day with no history rather than needing a key bump.
@@ -182,6 +187,36 @@ function loadPersistedState() {
       batchRuns: p.batchRuns || null,
     }
   } catch { return {} }
+}
+
+// v6 shipped loan fee income at 5030/5031, in the 5000 income band alongside interest. The
+// chart now bands fee income at 4010/4011 so a fee-heavy book reads apart from an interest-heavy
+// one in the P&L. An install that already posted a restructuring fee carries the old code on its
+// saved accounts and on the journal lines that reference them, so both are rewritten together —
+// renaming only the account would leave those lines pointing at a code no longer in the chart.
+const FEE_CODE_MOVES = { '5030': '4010', '5031': '4011' }
+
+function renumberFeeIncome(chartOfAccounts, journalEntries) {
+  const moved = code => FEE_CODE_MOVES[code] || code
+  const touchesChart = (chartOfAccounts || []).some(a => FEE_CODE_MOVES[a.code])
+  const touchesEntries = (journalEntries || []).some(e => (e.lines || []).some(l => FEE_CODE_MOVES[l.accountCode]))
+  if (!touchesChart && !touchesEntries) return { chartOfAccounts, journalEntries }
+
+  return {
+    // A saved 5030 becomes 4010 and keeps its balance. If the install somehow holds both, the
+    // old row is dropped rather than duplicating the account under two codes.
+    chartOfAccounts: chartOfAccounts && (() => {
+      const seen = new Set()
+      return chartOfAccounts
+        .map(a => (FEE_CODE_MOVES[a.code] ? { ...a, code: moved(a.code) } : a))
+        .filter(a => (seen.has(a.code) ? false : seen.add(a.code)))
+    })(),
+    journalEntries: journalEntries && journalEntries.map(e => (
+      (e.lines || []).some(l => FEE_CODE_MOVES[l.accountCode])
+        ? { ...e, lines: e.lines.map(l => ({ ...l, accountCode: moved(l.accountCode) })) }
+        : e
+    )),
+  }
 }
 
 const persisted = loadPersistedState()
@@ -194,7 +229,20 @@ function mergeSeededAccounts(saved) {
   if (!saved?.length) return INITIAL_CHART_OF_ACCOUNTS
   const codes = new Set(saved.map(a => a.code))
   const missing = INITIAL_CHART_OF_ACCOUNTS.filter(a => !codes.has(a.code))
-  return missing.length ? [...saved, ...missing] : saved
+  const merged = missing.length ? [...saved, ...missing] : saved
+
+  // The chart used to be flat: every account was filed at the root with no parentCode, so the
+  // configuration tree drew one long run of codes with no band above them. The seed now files
+  // each account under its band (1010 under 1000 Asset, and so on). An install that saved the
+  // flat version keeps its own copies, which would still draw flat — so a saved account with
+  // NO parent takes the seed's. One the operator has deliberately re-parented is left alone:
+  // an empty parentCode is the only thing read as "never filed", not as a choice.
+  const seededParent = new Map(INITIAL_CHART_OF_ACCOUNTS.map(a => [a.code, a.parentCode]))
+  return merged.map(a => (
+    (a.parentCode || '').trim() || !seededParent.get(a.code)
+      ? a
+      : { ...a, parentCode: seededParent.get(a.code) }
+  ))
 }
 
 // Same idea for the real bank accounts: a saved install keeps the cards it has (renames,
@@ -260,53 +308,6 @@ const INITIAL_LOAN_PRODUCTS = [
   { name: 'Vehicle Loan',      rate: 13, maxAmount: 30000 },
 ]
 
-// Every posted record carries a stable record number. It is stamped in one place rather than at
-// each of the routes that write one — the manual forms, disbursement, repayment, the remainder,
-// sales invoices, the EOD and EOM batches, refinance and cash transfers — because a route added
-// later would otherwise have to remember to set one, and the first that forgot would leave a gap
-// nobody notices until an auditor asks.
-//
-// Numbers follow the order records were created, so the walk direction has to match how the
-// register is ordered: the journal is newest-first and is walked from the back, while cash
-// transfers are appended and so are walked from the front. Getting that backwards would hand the
-// newest record the lowest number.
-// A number already assigned is never rewritten — a record's id has to survive across sessions.
-//
-// Declared above INITIAL_STATE on purpose: INITIAL_STATE calls stampRecIds while the module is
-// still evaluating. The function itself hoists, but REC_ID_MAX is a const its body reads, and a
-// const declared further down is in the temporal dead zone at that moment — which threw on load
-// and took the whole app with it before anything rendered.
-const REC_ID_MAX = 999999
-
-function highestRecId(entries) {
-  return (entries || []).reduce((max, e) => {
-    const match = /^REC-(\d+)$/.exec(e?.recId || '')
-    const value = match ? parseInt(match[1], 10) : 0
-    return value <= REC_ID_MAX ? Math.max(max, value) : max
-  }, 0)
-}
-
-export function stampRecIds(entries, { oldestFirst = false } = {}) {
-  const list = entries || []
-  if (!list.some(e => e && !e.recId)) return list
-  let highest = highestRecId(list)
-  const stamped = [...list]
-  const order = [...stamped.keys()]
-  if (!oldestFirst) order.reverse()
-  for (const i of order) {
-    if (stamped[i] && !stamped[i].recId) {
-      highest += 1
-      stamped[i] = { ...stamped[i], recId: `REC-${String(highest).padStart(6, '0')}` }
-    }
-  }
-  return stamped
-}
-
-// The next number the stamper will hand out, for a form that wants to show it before saving.
-export function nextRecId(entries) {
-  return `REC-${String(highestRecId(entries) + 1).padStart(6, '0')}`
-}
-
 const INITIAL_STATE = {
   // navigation
   activeTab: 'dashboard',
@@ -328,6 +329,10 @@ const INITIAL_STATE = {
   customerPageSize: 12,
   customerSearch: '',
   customerDateFilter: '',
+  // Which columns the operator left visible in the customer register. Persisted, and kept out
+  // of SET_TAB's reset list, because a column hidden on purpose reappearing on the next visit
+  // reads as the filter being broken. null = show every column.
+  customerVisibleColumns: persisted.customerVisibleColumns || null,
   // loan
   loanWizardOpen: false,
   loanWizardStep: 1,
@@ -342,6 +347,8 @@ const INITIAL_STATE = {
   loanPreviewTab: 'Overview',
   loanQuickPreviewOpen: false,
   loanQuickPreviewTab: 'Repayment Reminder',
+  // Same as customerVisibleColumns, for the loan application register.
+  loanVisibleColumns: persisted.loanVisibleColumns || null,
   // accounting
   activeStatement: persisted.activeStatement || 'pl',
   // null = no section expanded; the Accounting page shows just its section cards
@@ -367,10 +374,7 @@ const INITIAL_STATE = {
   notifications: persisted.notifications || [],
   // Same length check as journalEntries — an install that never made a transfer gets the
   // seeded ones, one that did keeps its own.
-  // Stamped like the journal is. Cash transfers are their own register, so the series runs
-  // independently of the journal's — a record number is unique within the file it belongs to,
-  // and sharing one counter across two separate arrays would need a counter neither of them owns.
-  cashTransfers: stampRecIds(persisted.cashTransfers?.length ? persisted.cashTransfers : INITIAL_CASH_TRANSFERS, { oldestFirst: true }),
+  cashTransfers: persisted.cashTransfers?.length ? persisted.cashTransfers : INITIAL_CASH_TRANSFERS,
   accounts: persisted.accounts || INITIAL_ACCOUNTS,
   // Sign-in accounts, editable in Settings → User Management → User Accounts. Kept across
   // reloads for the same reason the audit trail is: an account added here would otherwise be
@@ -404,9 +408,7 @@ const INITIAL_STATE = {
   // An install that has never posted a journal entry gets the seeded ones; anything it did
   // post is kept. Checked on length, not existence — earlier versions saved an empty array,
   // and `[] || seed` would keep that empty array forever.
-  // Stamped on the way in, so the seeded entries and anything an older install saved before the
-  // field existed both arrive already numbered rather than waiting for the first dispatch.
-  journalEntries: stampRecIds(persisted.journalEntries?.length ? persisted.journalEntries : INITIAL_JOURNAL_ENTRIES),
+  journalEntries: persisted.journalEntries?.length ? persisted.journalEntries : INITIAL_JOURNAL_ENTRIES,
   // Payroll staff register — the Employee Information page of Payroll Management. Checked
   // on length for the same reason as journalEntries: an install that saved an empty list
   // once would otherwise never see the seed again.
@@ -660,11 +662,13 @@ function reducer(state, action) {
     }
     case 'OPEN_CUSTOMER_PREVIEW': return { ...state, previewCustomerCode: action.code }
     case 'CLOSE_CUSTOMER_PREVIEW': return { ...state, previewCustomerCode: null }
+    case 'SET_CUSTOMER_COLUMNS': return { ...state, customerVisibleColumns: action.ids }
     case 'SET_CUSTOMER_PAGE': return { ...state, customerPage: action.page }
     case 'SET_CUSTOMER_SEARCH': return { ...state, customerSearch: action.q, customerPage: 1 }
     case 'SET_CUSTOMER_DATE_FILTER': return { ...state, customerDateFilter: action.date, customerPage: 1 }
 
     // Loans
+    case 'SET_LOAN_COLUMNS': return { ...state, loanVisibleColumns: action.ids }
     case 'OPEN_LOAN_WIZARD': return { ...state, loanWizardOpen: true, loanWizardStep: 1, editingLoanRef: action.ref || null, loanWizardPrefillCustomerCode: action.customerCode || null }
     case 'CLOSE_LOAN_WIZARD': return { ...state, loanWizardOpen: false, editingLoanRef: null, loanWizardPrefillCustomerCode: null }
     case 'SET_LOAN_WIZARD_STEP': return { ...state, loanWizardStep: action.step }
@@ -1153,7 +1157,7 @@ function reducer(state, action) {
       const round2 = n => Math.round(n * 100) / 100
       const runAt = auditStamp()
       const today = new Date().toISOString().split('T')[0]
-      const feeGL = currency === 'KHR' ? '5031' : '5030'
+      const feeGL = currency === 'KHR' ? '4011' : '4010'
 
       // Same rule as the loan wizard's own getNextLoanRef — highest number on file, plus one.
       const nextNum = state.loanApplications.reduce((max, l) => {
@@ -1813,25 +1817,8 @@ function reducer(state, action) {
 
 const AppContext = createContext(null)
 
-// Wraps the reducer so a record number is assigned wherever a journal entry came from. Only
-// runs when the journal actually changed, and stampRecIds itself returns the same array when
-// nothing is missing a number — so the common case costs one identity check.
-function reducerWithRecIds(state, action) {
-  const next = reducer(state, action)
-  let out = next
-  if (next.journalEntries !== state.journalEntries) {
-    const stamped = stampRecIds(next.journalEntries)
-    if (stamped !== next.journalEntries) out = { ...out, journalEntries: stamped }
-  }
-  if (next.cashTransfers !== state.cashTransfers) {
-    const stamped = stampRecIds(next.cashTransfers, { oldestFirst: true })
-    if (stamped !== next.cashTransfers) out = { ...out, cashTransfers: stamped }
-  }
-  return out
-}
-
 export function AppProvider({ children }) {
-  const [state, dispatch] = useReducer(reducerWithRecIds, INITIAL_STATE)
+  const [state, dispatch] = useReducer(reducer, INITIAL_STATE)
 
   // Persist key data
   useEffect(() => {
@@ -1859,9 +1846,11 @@ export function AppProvider({ children }) {
         businessDay: state.businessDay,
         batchRuns: state.batchRuns,
         customGeo: state.customGeo,
+        customerVisibleColumns: state.customerVisibleColumns,
+        loanVisibleColumns: state.loanVisibleColumns,
       }))
     } catch {}
-  }, [state.systemUsers, state.auditLogs, state.integrations, state.payrollRuns, state.customers, state.loanApplications, state.incomes, state.expenses, state.notifications, state.cashTransfers, state.accounts, state.feeSettings, state.loanProducts, state.activeStatement, state.chartOfAccounts, state.realBankAccounts, state.journalEntries, state.companyProfile, state.employees, state.businessDay, state.batchRuns, state.customGeo])
+  }, [state.customerVisibleColumns, state.loanVisibleColumns, state.systemUsers, state.auditLogs, state.integrations, state.payrollRuns, state.customers, state.loanApplications, state.incomes, state.expenses, state.notifications, state.cashTransfers, state.accounts, state.feeSettings, state.loanProducts, state.activeStatement, state.chartOfAccounts, state.realBankAccounts, state.journalEntries, state.companyProfile, state.employees, state.businessDay, state.batchRuns, state.customGeo])
 
   // Dark mode
   useEffect(() => {

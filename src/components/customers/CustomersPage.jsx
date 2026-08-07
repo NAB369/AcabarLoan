@@ -1,9 +1,10 @@
 import { useState } from 'react'
 import { Plus, Trash2, X } from 'lucide-react'
 import { useApp } from '../../context/AppContext'
-import CustomerTable from './CustomerTable'
+import CustomerTable, { CUSTOMER_COLUMNS } from './CustomerTable'
 import CustomerWizard from './CustomerWizard'
 import CustomerPreview from './CustomerPreview'
+import { useTableColumns, ColumnPicker } from '../shared/DataTableTools'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -19,6 +20,10 @@ import {
 
 export default function CustomersPage() {
   const { state, dispatch, showToast, can } = useApp()
+  const { visible, visibleIds, toggle } = useTableColumns(CUSTOMER_COLUMNS, {
+    value: state.customerVisibleColumns,
+    onChange: ids => dispatch({ type: 'SET_CUSTOMER_COLUMNS', ids }),
+  })
 
   const pendingCustomer = state.deletePendingCode
     ? state.customers.find(c => c.code === state.deletePendingCode)
@@ -73,22 +78,30 @@ export default function CustomersPage() {
             className="px-3 py-2 text-xs rounded-xl border border-slate-200 bg-white dark:bg-slate-800 dark:border-slate-700 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500/40 focus:border-brand-400 transition"
           />
         </div>
-        {/* The page's one primary action, so it sits on this row with the filters but keeps
-            the solid fill that sets it apart, pushed to the far end. */}
-        <Button
-          onClick={handleOpenCustomerWizard}
-          title={can('add_customer') ? undefined : `${state.currentRole} cannot create customers`}
-          className={`h-auto flex items-center justify-center gap-1.5 px-3 py-2 text-white text-xs font-semibold rounded-xl shadow-sm transition-colors flex-shrink-0 sm:ml-auto ${
-            can('add_customer') ? 'bg-brand-600 hover:bg-brand-700' : 'bg-slate-300 dark:bg-slate-600 cursor-not-allowed'
-          }`}
-        >
-          <Plus className="w-3.5 h-3.5" />
-          Open New Customer
-        </Button>
+        {/* The column picker rides with the primary action at the far end of the row rather
+            than sitting above the table, so every control on this bar is in one place. */}
+        <div className="flex items-center gap-2 flex-shrink-0 sm:ml-auto">
+          {/* Desktop only — the mobile view is a card list with no columns to hide. */}
+          <div className="hidden md:block">
+            <ColumnPicker columns={CUSTOMER_COLUMNS} visibleIds={visibleIds} onToggle={toggle} iconOnly />
+          </div>
+          {/* The page's one primary action, so it sits on this row with the filters but keeps
+              the solid fill that sets it apart. */}
+          <Button
+            onClick={handleOpenCustomerWizard}
+            title={can('add_customer') ? undefined : `${state.currentRole} cannot create customers`}
+            className={`h-auto flex items-center justify-center gap-1.5 px-3 py-2 text-white text-xs font-semibold rounded-xl shadow-sm transition-colors flex-shrink-0 ${
+              can('add_customer') ? 'bg-brand-600 hover:bg-brand-700' : 'bg-slate-300 dark:bg-slate-600 cursor-not-allowed'
+            }`}
+          >
+            <Plus className="w-3.5 h-3.5" />
+            Open New Customer
+          </Button>
+        </div>
       </div>
 
       {/* Table */}
-      <CustomerTable />
+      <CustomerTable visible={visible} />
     </div>
 
       {/* Wizard Modal */}

@@ -7,9 +7,9 @@ import {
   FileText, ChevronDown,
   Banknote, Users, Zap, Receipt, ArrowUpCircle, ArrowDownCircle, HandCoins, Landmark, ChevronRight, ChevronLeft,
   Settings, Pencil, Search, Eye, LayoutDashboard, BookOpen, Check, CheckCheck, Trash2, History,
-  Download, Columns3, ExternalLink, CornerDownRight,
+  Download, Columns3, ExternalLink, CornerDownRight, Folder,
 } from 'lucide-react'
-import { useApp, canFundExpense, expenseFundingAccount, nextRecId } from '../../context/AppContext'
+import { useApp, canFundExpense, expenseFundingAccount } from '../../context/AppContext'
 import { formatVal } from '../../utils/format'
 import { BRANCHES } from '../../data/constants'
 import StatusBadge from '../shared/StatusBadge'
@@ -26,6 +26,7 @@ import {
 import EmployeeInformation from '../payroll/EmployeeInformation'
 import PayrollRunModal from '../payroll/PayrollRunModal'
 import { periodLabel } from '../../utils/employee'
+import ChartOfAccountsConfig from './ChartOfAccountsConfig'
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 const INCOME_CATEGORIES = [
@@ -396,10 +397,16 @@ function TransactionModal({ type, count, accounts, realBankAccounts, onClose, on
 }
 
 // ─── Modal: Cash Transfer ─────────────────────────────────────────────────────
-function CashTransferModal({ accounts, transfers = [], onClose, onSubmit }) {
+function CashTransferModal({ accounts, onClose, onSubmit }) {
+  // Both sides are restricted to the cash floats. This screen moves physical money between the
+  // tills — a riel/dollar exchange over the counter — and offering the whole chart invited a
+  // "transfer" between two ledger accounts, which is a journal entry's job, not this one.
+  // Matched on the cash codes plus the account name, so a float added later (a second branch
+  // till, say) is picked up without editing a code list. See isLoanGlAccount for the same idea.
+  const cashAccounts = useMemo(() => accounts.filter(isCashGlAccount), [accounts])
   const [form, setForm] = useState({
-    fromCode: accounts[0]?.code || '',
-    toCode: accounts[1]?.code || accounts[0]?.code || '',
+    fromCode: cashAccounts[0]?.code || '',
+    toCode: cashAccounts[1]?.code || cashAccounts[0]?.code || '',
     date: todayStr(),
     ref: randRef('CT'),
     trnRef: '',
@@ -408,11 +415,9 @@ function CashTransferModal({ accounts, transfers = [], onClose, onSubmit }) {
     description: '',
   })
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
-  // What the stamper will assign on save, held from open so it does not shift under the operator.
-  const [recId] = useState(() => nextRecId(transfers))
 
-  const fromAccount = accounts.find(a => a.code === form.fromCode)
-  const toAccount = accounts.find(a => a.code === form.toCode)
+  const fromAccount = cashAccounts.find(a => a.code === form.fromCode)
+  const toAccount = cashAccounts.find(a => a.code === form.toCode)
   const fromCurrency = fromAccount?.currency || 'USD'
   const toCurrency = toAccount?.currency || 'USD'
   const crossCurrency = fromCurrency !== toCurrency
@@ -431,7 +436,6 @@ function CashTransferModal({ accounts, transfers = [], onClose, onSubmit }) {
     // another currency, so it is refused rather than defaulted to 1.
     if (crossCurrency && !(rate > 0)) return
     onSubmit({
-      recId,
       ref: form.ref,
       trnRef: form.trnRef.trim(),
       date: form.date,
@@ -461,24 +465,18 @@ function CashTransferModal({ accounts, transfers = [], onClose, onSubmit }) {
               <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">From GL Account</label>
               <select value={form.fromCode} onChange={e => set('fromCode', e.target.value)}
                 className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500">
-                {accounts.map(a => <option key={a.code} value={a.code}>{a.code} — {a.name} ({a.currency || 'USD'})</option>)}
+                {cashAccounts.map(a => <option key={a.code} value={a.code}>{a.code} — {a.name} ({a.currency || 'USD'})</option>)}
               </select>
             </div>
             <div>
               <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">To GL Account</label>
               <select value={form.toCode} onChange={e => set('toCode', e.target.value)}
                 className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500">
-                {accounts.map(a => <option key={a.code} value={a.code}>{a.code} — {a.name} ({a.currency || 'USD'})</option>)}
+                {cashAccounts.map(a => <option key={a.code} value={a.code}>{a.code} — {a.name} ({a.currency || 'USD'})</option>)}
               </select>
             </div>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <div>
-              {/* System-assigned, like the journal's — see stampRecIds in AppContext. */}
-              <Label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">RECID No</Label>
-              <Input value={recId} readOnly tabIndex={-1} title="Assigned by the system when the transfer is saved"
-                className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2 text-sm font-mono bg-slate-50 dark:bg-slate-900/40 text-slate-500 dark:text-slate-400 cursor-default" />
-            </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <Label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">Transaction No</Label>
               <Input value={form.ref} onChange={e => set('ref', e.target.value)}
@@ -681,8 +679,6 @@ const GL_COLUMNS = [
 // Journal entry columns — same contract as GL_COLUMNS. Entries carry their own amount
 // except the older ones, where it is the sum of the debit side.
 const JE_COLUMNS = [
-  // The ledger's own record number, assigned once and never reused — see stampRecIds.
-  { id: 'recId', label: 'RECID No', text: j => j.recId || '—', render: j => j.recId || '—', cellClass: 'font-mono text-slate-500 dark:text-slate-400' },
   { id: 'date', label: 'Date', text: j => j.date || '', render: j => j.date },
   { id: 'transactionNo', label: 'Transaction No', text: j => j.transactionNo || '', render: j => j.transactionNo, cellClass: 'font-mono text-slate-500 dark:text-slate-400' },
   // The reference the posting arrived on. Entries written before the field existed, and the
@@ -754,8 +750,6 @@ const EXP_COLUMNS = [
 // Cash transfer columns. A transfer has no type of its own, so the tab's first filter is
 // the account it touches on either side.
 const CT_COLUMNS = [
-  // Its own record series — see stampRecIds; cash transfers are a separate register from the journal.
-  { id: 'recId', label: 'RECID No', text: t => t.recId || '—', render: t => t.recId || '—', cellClass: 'font-mono text-slate-500 dark:text-slate-400' },
   { id: 'date', label: 'Date', text: t => t.date || '', render: t => t.date },
   { id: 'ref', label: 'Transaction No', text: t => t.ref || '', render: t => t.ref, cellClass: 'font-mono text-slate-500 dark:text-slate-400' },
   // The reference the transfer came in on. Seeded rows and anything saved before the field
@@ -1049,6 +1043,14 @@ function bankTxDetailRows(t, currency, formatVal) {
 // receivables and their loss allowances, accrued loan interest, and the release /
 // repayment accounts that disbursement and repayment postings land in. Accounts a user
 // adds later are classified by name so the split keeps holding without a code list edit.
+// The physical cash floats — what the Cash Transfer screen is allowed to move between. Name
+// matching lets a float added later be recognised without touching this list.
+const CASH_GL_CODES = new Set(['1010', '1011'])
+function isCashGlAccount(account) {
+  if (CASH_GL_CODES.has(account.code)) return true
+  return /cash on hand/i.test(account.name || '')
+}
+
 const LOAN_GL_CODES = new Set(['1100', '1101', '1102', '1103', '1110', '1111', '1112', '1113', '1120', AR_LOAN_CODE, AP_LOAN_CODE, '5010', '6010'])
 function isLoanGlAccount(account) {
   if (LOAN_GL_CODES.has(account.code)) return true
@@ -1066,109 +1068,6 @@ function approvalDateISO(loan) {
   if (parts) return `${parts[3]}-${parts[2]}-${parts[1]}`
   return (loan.submittedAt || '').split('T')[0]
 }
-
-// ─── Modal: Chart of Account ──────────────────────────────────────────────────
-function ChartOfAccountModal({ account, onClose, onSubmit }) {
-  const [formData, setFormData] = useState(account || {
-    code: '', type: 'Asset', name: '', nameKhmer: '',
-    normalBalance: 'DEBIT', parentCode: '', description: '', status: 'ACTIVE',
-    currency: 'USD', balance: 0
-  })
-
-  const handleSubmit = (e) => {
-    e.preventDefault()
-    onSubmit(formData)
-  }
-
-  return (
-    <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={onClose}>
-      <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl w-full max-w-xl flex flex-col" onClick={e => e.stopPropagation()}>
-        <div className="flex items-center justify-between px-4 sm:px-6 py-4 border-b border-slate-100 dark:border-slate-700">
-          <h2 className="text-lg font-bold text-slate-800 dark:text-slate-100">
-            {account ? 'Edit Account' : 'Add New Account'}
-          </h2>
-          <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-600"><X className="w-4 h-4" /></button>
-        </div>
-        <form onSubmit={handleSubmit} className="p-4 sm:p-6 space-y-4">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs font-bold text-slate-700 dark:text-slate-200 mb-1">Account Code *</label>
-              <input required type="text" value={formData.code} onChange={e => setFormData({...formData, code: e.target.value})} placeholder="e.g. 10100" disabled={!!account}
-                className="w-full bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-2 text-sm disabled:opacity-50" />
-            </div>
-            <div>
-              <label className="block text-xs font-bold text-slate-700 dark:text-slate-200 mb-1">Account Type *</label>
-              <select required value={formData.type} onChange={e => setFormData({...formData, type: e.target.value})}
-                className="w-full bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-2 text-sm">
-                <option value="Asset">ASSET</option>
-                <option value="Liability">LIABILITY</option>
-                <option value="Equity">EQUITY</option>
-                <option value="Income">REVENUE</option>
-                <option value="Expense">EXPENSE</option>
-              </select>
-            </div>
-          </div>
-
-          <div>
-            <label className="block text-xs font-bold text-slate-700 dark:text-slate-200 mb-1">Account Name (English) *</label>
-            <input required type="text" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} placeholder="e.g. Cash Vault"
-              className="w-full bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-2 text-sm" />
-          </div>
-
-          <div>
-            <label className="block text-xs font-bold text-slate-700 dark:text-slate-200 mb-1">Account Name (Khmer)</label>
-            <input type="text" value={formData.nameKhmer} onChange={e => setFormData({...formData, nameKhmer: e.target.value})} placeholder="ឈ្មោះគណនី"
-              className="w-full bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-2 text-sm" />
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <div>
-              <label className="block text-xs font-bold text-slate-700 dark:text-slate-200 mb-1">Normal Balance</label>
-              <select value={formData.normalBalance} onChange={e => setFormData({...formData, normalBalance: e.target.value})}
-                className="w-full bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-2 text-sm">
-                <option value="DEBIT">DEBIT</option>
-                <option value="CREDIT">CREDIT</option>
-              </select>
-            </div>
-            <div>
-              {/* An account holds one currency. Disbursement and repayment pick the account to
-                  post against by matching this field against the loan's own currency (see
-                  fundingGLCode), so an account created without it silently becomes a dollar
-                  account — which is why the form asks rather than defaulting quietly. */}
-              <label className="block text-xs font-bold text-slate-700 dark:text-slate-200 mb-1">Currency *</label>
-              <select required value={formData.currency || 'USD'} onChange={e => setFormData({...formData, currency: e.target.value})}
-                className="w-full bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-2 text-sm">
-                <option value="USD">USD — US Dollar</option>
-                <option value="KHR">KHR — Khmer Riel</option>
-              </select>
-            </div>
-            <div>
-              <label className="block text-xs font-bold text-slate-700 dark:text-slate-200 mb-1">Parent Account Code</label>
-              <input type="text" value={formData.parentCode} onChange={e => setFormData({...formData, parentCode: e.target.value})} placeholder="Optional"
-                className="w-full bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-2 text-sm" />
-            </div>
-          </div>
-
-          <div>
-            <label className="block text-xs font-bold text-slate-700 dark:text-slate-200 mb-1">Description</label>
-            <textarea value={formData.description} onChange={e => setFormData({...formData, description: e.target.value})} placeholder="Optional description" rows={2}
-              className="w-full bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-2 text-sm" />
-          </div>
-
-          <div className="flex justify-end gap-3 pt-4 border-t border-slate-100 dark:border-slate-700">
-            <button type="button" onClick={onClose} className="px-4 py-2 text-sm font-semibold text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-600 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-700">Cancel</button>
-            <button type="submit" className="px-4 py-2 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg">
-              {account ? 'Save Changes' : 'Create Account'}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  )
-}
-
-// ─── Table: GL accounts (shared by the two account-management panels) ─────────
-const ACCOUNT_TH = 'px-4 py-3 text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide bg-slate-50 dark:bg-slate-700/50 first:rounded-tl-xl last:rounded-tr-xl text-left'
 
 function GlAccountTable({ accounts, currency, emptyMessage }) {
   return (
@@ -1318,13 +1217,10 @@ export default function AccountingPage() {
   const [seViewOpen, setSeViewOpen] = useState(false)
   const [seColumns, setSeColumns] = useState(() => SE_COLUMNS.map(c => c.id))
 
-  const [coaFilter, setCoaFilter] = useState('ALL')
-  const [coaViewOpen, setCoaViewOpen] = useState(false)
-  const [coaColumns, setCoaColumns] = useState(() => COA_COLUMNS.map(c => c.id))
   const [coaSearch, setCoaSearch] = useState('')
-  const [coaModalOpen, setCoaModalOpen] = useState(false)
-  const [editingCoa, setEditingCoa] = useState(null)
   const [deletingCoa, setDeletingCoa] = useState(null)
+  // Which account the configuration tree has open.
+  const [coaSelectedCode, setCoaSelectedCode] = useState('')
   // Account Setting — the standing setup behind the module, kept in a modal off the header
   // rather than as a tab beside the working views. The modal opens on its first section.
   const [accountSettingOpen, setAccountSettingOpen] = useState(false)
@@ -1351,7 +1247,6 @@ export default function AccountingPage() {
       else if (plModalOpen) setPlModalOpen(false)
       else if (balanceSheetModalOpen) setBalanceSheetModalOpen(false)
       else if (bankAccountModalOpen) setBankAccountModalOpen(false)
-      else if (coaModalOpen) setCoaModalOpen(false)
       else if (deletingCoa) setDeletingCoa(null)
       else if (approvingExpense) setApprovingExpense(null)
       else if (payrollRunOpen) setPayrollRunOpen(false)
@@ -1364,7 +1259,7 @@ export default function AccountingPage() {
   }, [
     journalEntryModalOpen, singleEntryModalOpen,
     trialBalanceModalOpen, plModalOpen, balanceSheetModalOpen,
-    bankAccountModalOpen, coaModalOpen, deletingCoa, approvingExpense, payrollRunOpen,
+    bankAccountModalOpen, deletingCoa, approvingExpense, payrollRunOpen,
     transactionModalOpen, cashTransferModalOpen, accountHistoryCode, dispatch,
   ])
 
@@ -1791,12 +1686,13 @@ export default function AccountingPage() {
     return out
   }, [chartOfAccounts])
 
-  // Chart of accounts, grouped by type and filtered by the panel's own controls. Groups
-  // with nothing left after filtering drop out rather than printing an empty band.
+  // Chart of accounts grouped by type — what the PDF export prints. The tree is what the
+  // screen shows; this keeps the exported sheet grouped the way an accountant reads it, and
+  // honours the search box so the export matches what was on screen. Empty groups drop out
+  // rather than printing a band with nothing under it.
   const coaGroups = useMemo(() => {
     const term = coaSearch.trim().toLowerCase()
     return COA_TYPE_GROUPS
-      .filter(g => coaFilter === 'ALL' || coaFilter === g.typeDisplay)
       .map(g => ({
         ...g,
         accounts: chartOfAccounts
@@ -1805,9 +1701,7 @@ export default function AccountingPage() {
           .sort((a, b) => (a.code || '').localeCompare(b.code || '')),
       }))
       .filter(g => g.accounts.length > 0)
-  }, [chartOfAccounts, coaFilter, coaSearch])
-
-  const visibleCoaColumns = useMemo(() => COA_COLUMNS.filter(c => coaColumns.includes(c.id)), [coaColumns])
+  }, [chartOfAccounts, coaSearch])
 
   const visibleGlColumns = useMemo(() => GL_COLUMNS.filter(c => glColumns.includes(c.id)), [glColumns])
   // "Totals" spans every visible column that is not an amount column.
@@ -2226,7 +2120,7 @@ export default function AccountingPage() {
   // column, which is nothing but buttons on paper.
   function handleDownloadChartPdf() {
     if (coaGroups.length === 0) return
-    const cols = visibleCoaColumns.filter(c => c.id !== 'actions')
+    const cols = COA_COLUMNS.filter(c => c.id !== 'actions')
     if (cols.length === 0) return
     const doc = new jsPDF({ orientation: 'landscape' })
     doc.setFontSize(13)
@@ -2238,7 +2132,7 @@ export default function AccountingPage() {
     doc.setFontSize(8)
     const total = coaGroups.reduce((s, g) => s + g.accounts.length, 0)
     doc.text([
-      coaFilter === 'ALL' ? 'All types' : sentenceCase(coaFilter),
+      'All types',
       coaSearch.trim() ? `search "${coaSearch.trim()}"` : null,
       `${total} account${total === 1 ? '' : 's'}`,
     ].filter(Boolean).join(' · '), 14, 26)
@@ -2269,12 +2163,6 @@ export default function AccountingPage() {
   const expenseRowActions = { onApprove: handleApproveExpense }
 
   // Handed to the Actions column so its buttons stay with the column definition.
-  const coaRowActions = {
-    onEdit: acct => { setEditingCoa(acct); setCoaModalOpen(true) },
-    onView: viewAccountHistory,
-    onDelete: setDeletingCoa,
-  }
-
   function handleApproveExpense(code) {
     if (!can('manage_accounting')) {
       showToast(`${state.currentRole} does not have permission to manage income & expense.`, 'error')
@@ -4059,83 +3947,28 @@ export default function AccountingPage() {
                 </div>
               )}
 
-            {/* Section: Chart of Accounts. Only the table prints — the modal frame, its menu
+            {/* Section: Chart of Accounts — the chart as a tree, with the selected account's
+                record beside it. Only the tree and the record print; the modal frame, its menu
                 and the toolbar are screen furniture. */}
             {accountSettingMenu === 'chart-of-accounts' && (
             <div className="printable-area flex-1 min-h-0 flex flex-col overflow-hidden">
               <div className="print:hidden px-5 py-4 border-b border-slate-100 dark:border-slate-700 flex items-center gap-2 flex-wrap">
-                <div className="relative">
-                  <select
-                    value={coaFilter}
-                    onChange={e => setCoaFilter(e.target.value)}
-                    className="appearance-none border border-slate-200 dark:border-slate-600 rounded-lg pl-3 pr-7 py-1.5 text-xs font-medium bg-white dark:bg-slate-700 text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-500"
-                  >
-                    <option value="ALL">All Types</option>
-                    <option value="ASSET">Asset</option>
-                    <option value="LIABILITY">Liability</option>
-                    <option value="EQUITY">Equity</option>
-                    <option value="REVENUE">Revenue</option>
-                    <option value="EXPENSE">Expense</option>
-                  </select>
-                  <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400 pointer-events-none" />
+                <div className="flex items-center gap-2 min-w-0">
+                  <Folder className="w-4 h-4 text-brand-600 dark:text-brand-400 flex-shrink-0" aria-hidden="true" />
+                  <p className="text-sm font-bold text-slate-800 dark:text-slate-100 truncate">Chart of Account Configuration</p>
                 </div>
-
-                <div className="relative w-64">
-                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
+                {/* Search stays: 30-odd accounts is more than anyone scrolls blind, and the
+                    tree keeps a matched sub-account's parent so the hit is never orphaned. */}
+                <div className="relative w-56">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
                   <input
-                    type="text"
                     value={coaSearch}
                     onChange={e => setCoaSearch(e.target.value)}
                     placeholder="Search…"
                     className="w-full border border-slate-200 dark:border-slate-600 rounded-lg pl-8 pr-3 py-1.5 text-xs bg-white dark:bg-slate-700 text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-500"
                   />
                 </div>
-
                 <div className="flex items-center gap-2 flex-shrink-0 ml-auto">
-                  <button
-                    onClick={() => { setEditingCoa(null); setCoaModalOpen(true) }}
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-brand-600 hover:bg-brand-700 text-white text-xs font-bold rounded-lg shadow-sm transition-colors"
-                  >
-                    <Plus className="w-3.5 h-3.5" /> Add Account
-                  </button>
-                  {/* View settings — which columns the table carries */}
-                  <div className="relative">
-                    <button
-                      onClick={() => setCoaViewOpen(o => !o)}
-                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
-                    >
-                      <Columns3 className="w-3.5 h-3.5" /> View
-                    </button>
-                    {coaViewOpen && (
-                      <>
-                        <div className="fixed inset-0 z-20" onClick={() => setCoaViewOpen(false)} />
-                        <div className="absolute right-0 mt-1 z-30 w-52 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl shadow-lg p-2">
-                          <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400 dark:text-slate-500 px-2 py-1">Columns</p>
-                          {COA_COLUMNS.map(col => {
-                            const shown = coaColumns.includes(col.id)
-                            const lastOne = shown && coaColumns.length === 1
-                            return (
-                              <label
-                                key={col.id}
-                                className={`flex items-center gap-2.5 px-2 py-1.5 rounded-lg text-xs text-slate-600 dark:text-slate-300 ${lastOne ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-700/50'}`}
-                              >
-                                <input
-                                  type="checkbox"
-                                  checked={shown}
-                                  disabled={lastOne}
-                                  onChange={() => setCoaColumns(cols =>
-                                    cols.includes(col.id) ? cols.filter(c => c !== col.id) : COA_COLUMNS.filter(c => cols.includes(c.id) || c.id === col.id).map(c => c.id)
-                                  )}
-                                  className="w-3.5 h-3.5 rounded border-slate-300 dark:border-slate-600 text-[#0047ab] focus:ring-blue-500/40"
-                                />
-                                {col.label}
-                              </label>
-                            )
-                          })}
-                        </div>
-                      </>
-                    )}
-                  </div>
                   <button
                     onClick={handleDownloadChartPdf}
                     disabled={coaGroups.length === 0}
@@ -4146,46 +3979,22 @@ export default function AccountingPage() {
                 </div>
               </div>
 
-              <div className="flex-1 min-h-0 overflow-x-auto overflow-y-auto">
-                <table className="w-full text-left">
-                  <thead className="sticky top-0 z-10">
-                    <tr>
-                      {visibleCoaColumns.map(col => <Th key={col.id}>{col.label}</Th>)}
-                    </tr>
-                  </thead>
-                  {coaGroups.length === 0 && (
-                    <tbody>
-                      <EmptyState message="No accounts match this filter." />
-                    </tbody>
-                  )}
-                  {coaGroups.map(({ type, typeDisplay, accounts: groupAccounts, styles }) => (
-                    <tbody key={type} className="divide-y divide-slate-100 dark:divide-slate-700">
-                      {/* Section band reads like the ledger's header row — same size, weight
-                          and casing — with a colour dot as the only nod to the type. */}
-                      <tr>
-                        <td colSpan={visibleCoaColumns.length} className="px-4 py-3 bg-slate-50 dark:bg-slate-700/50 border-y border-slate-200/60 dark:border-slate-700">
-                          <div className="flex items-center justify-between gap-3">
-                            <div className="flex items-center gap-2">
-                              <span className={`w-2 h-2 rounded-full flex-shrink-0 ${styles.dot}`} />
-                              <span className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">{typeDisplay}</span>
-                            </div>
-                            <span className="text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">{groupAccounts.length} accounts</span>
-                          </div>
-                        </td>
-                      </tr>
-                      {groupAccounts.map(acct => (
-                        <tr key={acct.code} className="hover:bg-slate-50 dark:hover:bg-white/5 transition-colors group">
-                          {visibleCoaColumns.map(col => (
-                            <td key={col.id} className={`px-4 py-3 text-xs ${col.cellClass || 'text-slate-600 dark:text-slate-300'}`} title={col.id === 'description' ? acct.description : undefined}>
-                              {col.render(acct, coaRowActions)}
-                            </td>
-                          ))}
-                        </tr>
-                      ))}
-                    </tbody>
-                  ))}
-                </table>
-              </div>
+              <ChartOfAccountsConfig
+                accounts={chartOfAccounts}
+                search={coaSearch}
+                selectedCode={coaSelectedCode}
+                onSelect={setCoaSelectedCode}
+                onAdd={account => {
+                  dispatch({ type: 'ADD_CHART_OF_ACCOUNT', account })
+                  showToast(`Account ${account.code} added`, 'success')
+                }}
+                onUpdate={account => {
+                  dispatch({ type: 'UPDATE_CHART_OF_ACCOUNT', account })
+                  showToast(`Account ${account.code} updated`, 'success')
+                }}
+                onDelete={account => setDeletingCoa(account)}
+                onError={message => showToast(message, 'error')}
+              />
             </div>
             )}
             </div>
@@ -4244,8 +4053,6 @@ export default function AccountingPage() {
       {cashTransferModalOpen && (
         <CashTransferModal
           accounts={chartOfAccounts}
-          // Needed to show the record number the stamper will assign on save.
-          transfers={cashTransfers}
           onClose={() => dispatch({ type: 'CLOSE_CASH_TRANSFER_MODAL' })}
           onSubmit={handleAddTransfer}
         />
@@ -4278,21 +4085,6 @@ export default function AccountingPage() {
         />
       )}
 
-      {coaModalOpen && (
-        <ChartOfAccountModal
-          account={editingCoa}
-          onClose={() => {
-            setCoaModalOpen(false)
-            setEditingCoa(null)
-          }}
-          onSubmit={(acct) => {
-            dispatch({ type: editingCoa ? 'UPDATE_CHART_OF_ACCOUNT' : 'ADD_CHART_OF_ACCOUNT', account: acct })
-            setCoaModalOpen(false)
-            setEditingCoa(null)
-            showToast(`Account ${editingCoa ? 'updated' : 'created'} successfully`, 'success')
-          }}
-        />
-      )}
 
       {deletingCoa && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setDeletingCoa(null)}>

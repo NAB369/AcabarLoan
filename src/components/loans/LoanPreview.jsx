@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from 'react'
-import { DollarSign, TrendingUp, Calculator, FileText, Building, Briefcase, Calendar, X, Check, Printer, Download, Bell, Phone, ShieldAlert, CheckCircle, Clock, AlertCircle, ChevronRight, ChevronDown, QrCode, Upload, CalendarClock, RefreshCw } from 'lucide-react'
+import { DollarSign, TrendingUp, Calculator, FileText, Building, Briefcase, Calendar, X, Check, Printer, Download, Bell, Phone, ShieldAlert, CheckCircle, Clock, AlertCircle, ChevronRight, ChevronDown, QrCode, Upload, CalendarClock } from 'lucide-react'
 import { useApp, hasFundingAccount } from '../../context/AppContext'
 import {
   DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator,
@@ -119,7 +119,7 @@ export default function LoanPreview() {
   const [showCancelModal, setShowCancelModal] = useState(false)
   const [cancelReason, setCancelReason] = useState('')
   const [scheduleDownloading, setScheduleDownloading] = useState(false)
-  const [restructureMode, setRestructureMode] = useState(null)
+  const [restructureOpen, setRestructureOpen] = useState(false)
   const [khqrBusy, setKhqrBusy] = useState(false)
   const [khqrCropFile, setKhqrCropFile] = useState(null)
   const khqrFileRef = useRef(null)
@@ -136,18 +136,18 @@ export default function LoanPreview() {
   // Without this, Escape would bounce the officer out of the whole loan record instead
   // of just backing out of the disburse/cancel confirmation.
   useEffect(() => {
-    if (!(showDisburseModal || showCancelModal || lightbox || restructureMode)) return
+    if (!(showDisburseModal || showCancelModal || lightbox || restructureOpen)) return
     const handleEscape = (e) => {
       if (e.key !== 'Escape') return
       e.stopPropagation()
       if (lightbox) setLightbox(null)
-      else if (restructureMode) setRestructureMode(null)
+      else if (restructureOpen) setRestructureOpen(false)
       else if (showDisburseModal) setShowDisburseModal(false)
       else if (showCancelModal) setShowCancelModal(false)
     }
     document.addEventListener('keydown', handleEscape, true)
     return () => document.removeEventListener('keydown', handleEscape, true)
-  }, [showDisburseModal, showCancelModal, lightbox, restructureMode])
+  }, [showDisburseModal, showCancelModal, lightbox, restructureOpen])
 
   if (!loan) return null
 
@@ -427,6 +427,16 @@ export default function LoanPreview() {
     setShowDisburseModal(true)
   }
 
+  // Same shape as the other gated actions on this screen: the button stays visible so the
+  // operator knows the action exists, and says who may take it rather than vanishing.
+  function handleRestructure() {
+    if (!can('request_restructure')) {
+      showToast(`${state.currentRole} does not have permission to request a loan restructure.`, 'error')
+      return
+    }
+    setRestructureOpen(true)
+  }
+
   function handleDisburse() {
     if (!customer?.accountNumber || !disburseConfirmed) return
     if (!can('disburse_loan')) {
@@ -574,24 +584,22 @@ export default function LoanPreview() {
           </div>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{loan.ref} · {loan.product} · {loan.customerName}</p>
         </div>
-        {/* A live loan can be restructured. Reschedule only rewrites the schedule; refinance
-            settles this loan with a new one and moves money, so it carries the heavier
-            treatment of the two. */}
+        {/* A live loan can be restructured: the outstanding principal is spread over new terms.
+            Nothing is posted to the ledger — only the schedule changes. Gated on
+            request_restructure, since it rewrites the contract the borrower signed. */}
         {isDisbursed && (
           <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
             <button
-              onClick={() => setRestructureMode('reschedule')}
-              className="flex items-center justify-center gap-2 px-4 py-2 border border-slate-200 dark:border-slate-600 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 text-sm font-semibold rounded-xl transition-colors flex-shrink-0 w-full sm:w-auto"
+              onClick={handleRestructure}
+              title={can('request_restructure') ? undefined : `${state.currentRole} cannot request a restructure`}
+              className={`flex items-center justify-center gap-2 px-4 py-2 text-sm font-semibold rounded-xl transition-colors flex-shrink-0 w-full sm:w-auto ${
+                can('request_restructure')
+                  ? 'border border-slate-200 dark:border-slate-600 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700'
+                  : 'border border-slate-200 dark:border-slate-700 text-slate-400 dark:text-slate-500 cursor-not-allowed'
+              }`}
             >
               <CalendarClock className="w-4 h-4" />
-              Reschedule
-            </button>
-            <button
-              onClick={() => setRestructureMode('refinance')}
-              className="flex items-center justify-center gap-2 px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white text-sm font-semibold rounded-xl shadow-sm transition-colors flex-shrink-0 w-full sm:w-auto"
-            >
-              <RefreshCw className="w-4 h-4" />
-              Refinance
+              Restructure
             </button>
           </div>
         )}
@@ -1720,24 +1728,18 @@ export default function LoanPreview() {
         </div>
       )}
 
-      {/* Reschedule / refinance. The plan shown in the dialog is the plan dispatched, so what
-          the officer approved is what is applied — see RestructureModal. */}
-      {restructureMode && (
+      {/* The plan shown in the dialog is the plan dispatched, so what the officer approved is
+          what is applied — see RestructureModal. */}
+      {restructureOpen && (
         <RestructureModal
-          mode={restructureMode}
           loan={loan}
           currency={currency}
-          onClose={() => setRestructureMode(null)}
+          onClose={() => setRestructureOpen(false)}
           onConfirm={(plan, reason) => {
             if (!plan) return
-            if (restructureMode === 'refinance') {
-              dispatch({ type: 'REFINANCE_LOAN', ref: loan.ref, plan, reason })
-              showToast(`${loan.ref} refinanced — ${formatVal(plan.netToBorrower, currency, 1)} released`, 'success')
-            } else {
-              dispatch({ type: 'RESCHEDULE_LOAN', ref: loan.ref, plan, reason })
-              showToast(`${loan.ref} rescheduled over ${plan.installments} months`, 'success')
-            }
-            setRestructureMode(null)
+            dispatch({ type: 'RESCHEDULE_LOAN', ref: loan.ref, plan, reason })
+            showToast(`${loan.ref} restructured over ${plan.installments} months`, 'success')
+            setRestructureOpen(false)
           }}
         />
       )}

@@ -154,12 +154,13 @@ function UserAccountsPanel({ users, roleMatrix, dispatch, showToast }) {
       return
     }
     if (adding) {
-      // Only what this panel collects. The seeded accounts also carry a department and a
-      // status, but nothing reads either any more, so a new account doesn't invent values
-      // for them. Last Login stays empty until the account is actually used.
+      // Only what this panel collects, plus an explicit Active status: the loan wizard picks
+      // its Credit Officer list off `status`, so an account created without one was invisible
+      // there. Department is genuinely unread and stays unset. Last Login stays empty until
+      // the account is actually used.
       dispatch({
         type: 'ADD_SYSTEM_USER',
-        user: { username, fullName, role: form.role, branch: form.branch.trim(), lastLogin: '' },
+        user: { username, fullName, role: form.role, branch: form.branch.trim(), lastLogin: '', status: 'Active' },
       })
       showToast(`User "${username}" added`, 'success')
     } else {

@@ -1,196 +1,84 @@
-import { useMemo, useState } from 'react'
-import {
-  Sunrise, Moon, CalendarCheck, CheckCircle2, AlertTriangle, XCircle,
-  ShieldCheck, History, ChevronRight,
-} from 'lucide-react'
+import { Sunrise, Moon, CalendarCheck, Play, History, Download } from 'lucide-react'
+import jsPDF from 'jspdf'
+import autoTable from 'jspdf-autotable'
 import { useApp } from '../../context/AppContext'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
-import { formatVal } from '../../utils/format'
 import { buildBatchPlan, todayISO, SOD, EOD, EOM } from '../../utils/systemOperations'
-
-// Batch amounts are already in the loan's own currency, so formatVal is called with a
-// conversion rate of 1 — its default rate is for showing a USD figure in riel, which would
-// multiply a KHR amount that is already in riel by 4000.
-const money = (amount, currency) => formatVal(amount || 0, currency || 'USD', 1)
 
 const OPERATIONS = [
   {
     kind: SOD,
     icon: Sunrise,
-    title: 'Start of Day (SOD) Batch',
-    description: 'Verifies the ledger is sound and the previous day was closed, then opens the business day for transactions.',
-    action: 'Open Business Day',
+    title: 'Start of Day (SOD)',
+    description: 'Checks the ledger and opens the business day.',
   },
   {
     kind: EOD,
     icon: Moon,
-    title: 'End of Day (EOD) Batch',
-    description: 'Applies the contract penalty to installments that went past due, recognises one day of interest on every active loan, and closes the business day.',
-    action: 'Post & Close Day',
+    title: 'End of Day (EOD)',
+    description: 'Penalises overdue installments, accrues a day of interest, closes the day.',
   },
   {
     kind: EOM,
     icon: CalendarCheck,
-    title: 'End of Month (EOM) Batch',
-    description: 'Re-runs PAR aging across the loan book, posts the movement in the required loan-loss provision, and closes the accounting period.',
-    action: 'Post & Close Period',
+    title: 'End of Month (EOM)',
+    description: 'Re-runs PAR aging, posts the provision movement, closes the period.',
   },
 ]
 
-const CHECK_STYLE = {
-  pass: { Icon: CheckCircle2, cls: 'text-emerald-600 dark:text-emerald-400', label: 'Pass' },
-  warn: { Icon: AlertTriangle, cls: 'text-amber-600 dark:text-amber-400', label: 'Warning' },
-  fail: { Icon: XCircle, cls: 'text-rose-600 dark:text-rose-400', label: 'Failed' },
-}
-
-function CheckRow({ check }) {
-  const { Icon, cls, label } = CHECK_STYLE[check.status] || CHECK_STYLE.warn
-  return (
-    <li className="flex items-start gap-2.5 py-1.5">
-      <Icon className={`w-4 h-4 flex-shrink-0 mt-0.5 ${cls}`} aria-hidden="true" />
-      <div className="min-w-0">
-        <p className="text-xs font-semibold text-slate-700 dark:text-slate-200">
-          {check.label}
-          <span className={`ml-2 font-bold uppercase tracking-wide text-[10px] ${cls}`}>{label}</span>
-        </p>
-        <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">{check.detail}</p>
-      </div>
-    </li>
-  )
-}
-
-// What the batch will write, shown before it is committed — the operator approves these exact
-// figures and the reducer posts the same plan object.
-function PostingPreview({ plan }) {
-  const box = 'rounded-xl border border-slate-200 dark:border-slate-700 p-3 bg-slate-50/60 dark:bg-slate-900/40'
-
-  if (plan.kind === SOD) {
-    return (
-      <div className={box}>
-        <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-relaxed">
-          No ledger entries are posted. The business day <span className="font-bold">{plan.date}</span> will be
-          marked open and recorded in the batch history.
-        </p>
-      </div>
-    )
-  }
-
-  if (plan.kind === EOD) {
-    const movements = plan.accrual?.movements || []
-    const overdue = plan.overdue || []
-    return (
-      <div className={`${box} space-y-3`}>
-        <div>
-          <p className="text-[11px] font-bold text-slate-700 dark:text-slate-200 uppercase tracking-wide">Interest accrual</p>
-          {movements.length === 0 ? (
-            <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-              No active loan accrues interest today — nothing will be posted.
-            </p>
-          ) : (
-            <ul className="mt-1.5 space-y-1">
-              {movements.map(m => (
-                <li key={m.currency} className="text-[11px] text-slate-600 dark:text-slate-300 flex items-center justify-between gap-3">
-                  <span>Debit {m.receivable} · Credit {m.income} ({m.currency})</span>
-                  <span className="font-bold text-slate-800 dark:text-slate-100">{money(m.amount, m.currency)}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-          <p className="text-[10px] text-slate-400 dark:text-slate-500 mt-1.5">
-            Across {plan.accrual?.lines?.length || 0} active loan{(plan.accrual?.lines?.length || 0) === 1 ? '' : 's'}.
-          </p>
-        </div>
-        <div className="border-t border-slate-200 dark:border-slate-700 pt-2.5">
-          <p className="text-[11px] font-bold text-slate-700 dark:text-slate-200 uppercase tracking-wide">Overdue penalties</p>
-          {overdue.length === 0 ? (
-            <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-              No installment is past due without a penalty already applied.
-            </p>
-          ) : (
-            <ul className="mt-1.5 space-y-1 max-h-28 overflow-y-auto">
-              {overdue.map(o => (
-                <li key={`${o.ref}-${o.idx}`} className="text-[11px] text-slate-600 dark:text-slate-300 flex items-center justify-between gap-3">
-                  <span className="truncate">{o.ref} · #{o.num} · {o.daysLate}d late</span>
-                  <span className="font-bold text-slate-800 dark:text-slate-100 flex-shrink-0">{money(o.fee, o.currency)}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-          <p className="text-[10px] text-slate-400 dark:text-slate-500 mt-1.5">
-            Penalties are stamped on the repayment schedule. They become income only when collected.
-          </p>
-        </div>
-      </div>
-    )
-  }
-
-  const buckets = plan.provision?.buckets || []
-  const movements = plan.provision?.movements || []
-  return (
-    <div className={`${box} space-y-3`}>
-      <div>
-        <p className="text-[11px] font-bold text-slate-700 dark:text-slate-200 uppercase tracking-wide">
-          PAR aging — period {plan.period}
-        </p>
-        {buckets.length === 0 ? (
-          <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">No active loans to provision against.</p>
-        ) : (
-          <ul className="mt-1.5 space-y-1">
-            {buckets.map(b => (
-              <li key={b.id} className="text-[11px] text-slate-600 dark:text-slate-300 flex items-center justify-between gap-3">
-                <span>{b.label} · {b.count} loan{b.count === 1 ? '' : 's'} @ {b.rate}%</span>
-                <span className="font-bold text-slate-800 dark:text-slate-100">{money(b.required, 'USD')}</span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-      <div className="border-t border-slate-200 dark:border-slate-700 pt-2.5">
-        <p className="text-[11px] font-bold text-slate-700 dark:text-slate-200 uppercase tracking-wide">Provision movement</p>
-        {movements.length === 0 ? (
-          <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-            The allowance already carries the required amount — nothing will be posted.
-          </p>
-        ) : (
-          <ul className="mt-1.5 space-y-1">
-            {movements.map(m => (
-              <li key={m.currency} className="text-[11px] text-slate-600 dark:text-slate-300 flex items-center justify-between gap-3">
-                <span>
-                  {m.delta > 0 ? `Debit ${m.expense} · Credit ${m.allowance}` : `Debit ${m.allowance} · Credit ${m.expense}`} ({m.currency})
-                </span>
-                <span className="font-bold text-slate-800 dark:text-slate-100">{money(Math.abs(m.delta), m.currency)}</span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-    </div>
-  )
+// One row per batch ever run, with what it checked and what it posted. The panel shows the
+// last five; this is the whole record, which is what someone reconciling a month against the
+// ledger actually needs — the transaction numbers here are the ones to look the postings up by.
+function batchLogRows(runs) {
+  return runs.map(r => {
+    const checks = r.checks || []
+    const tally = ['pass', 'warn', 'fail']
+      .map(st => [checks.filter(c => c.status === st).length, st])
+      .filter(([n]) => n > 0)
+      .map(([n, st]) => `${n} ${st}`)
+      .join(', ')
+    const postings = (r.postings || [])
+      .map(pst => `${pst.transactionNo} ${pst.currency} ${Number(pst.amount || 0).toFixed(2)}`)
+      .join('; ')
+    return [
+      r.runAt || '',
+      r.kind || '',
+      r.kind === 'EOM' ? (r.period || '') : (r.date || ''),
+      r.runBy || '',
+      tally || 'no checks recorded',
+      postings || 'none',
+      r.summary || '',
+    ]
+  })
 }
 
 export default function SystemOperationsModal() {
   const { state, dispatch, showToast } = useApp()
-  const [selected, setSelected] = useState(null)
-
-  const today = todayISO()
-  // Recomputed on every state change, so the figures shown are the figures dispatched —
-  // a plan can never go stale between opening the panel and confirming it.
-  const plan = useMemo(
-    () => (selected ? buildBatchPlan(state, selected, today) : null),
-    [state, selected, today]
-  )
 
   const day = state.businessDay || {}
   const dayOpen = day.status === 'open'
 
   function close() {
-    setSelected(null)
     dispatch({ type: 'CLOSE_SYSTEM_OPS' })
   }
 
+  // One click: the plan is built, checked and posted in the same action. The checks still run
+  // and a failing one still stops the posting — what changed is that their detail is no longer
+  // read on screen first, it is read afterwards in the downloaded log, step by step.
   function run(kind) {
-    if (!plan || plan.blocked) return
+    const plan = buildBatchPlan(state, kind, todayISO())
+    if (!plan) return
+
+    if (plan.blocked) {
+      const failed = (plan.checks || []).filter(c => c.status === 'fail')
+      showToast(
+        `${kind} stopped — ${failed.length} check${failed.length === 1 ? '' : 's'} failed: ${failed.map(c => c.label).join(', ')}. Nothing was posted.`,
+        'error'
+      )
+      return
+    }
+
     dispatch({ type: `RUN_${kind}`, plan })
     dispatch({
       type: 'ADD_AUDIT_LOG',
@@ -202,11 +90,81 @@ export default function SystemOperationsModal() {
         : `End of Month complete — period ${plan.period} closed`,
       'success'
     )
-    setSelected(null)
     dispatch({ type: 'CLOSE_SYSTEM_OPS' })
   }
 
-  const failures = (plan?.checks || []).filter(c => c.status === 'fail')
+  // The log is where the detail lives now that the panel does not show it: an index of every
+  // run, then a section per run listing each check step with its verdict and reason, and every
+  // ledger entry it posted. Landscape, because transaction numbers and check reasons wrap into
+  // uselessness on portrait A4.
+  function downloadLog() {
+    const runs = state.batchRuns || []
+    if (runs.length === 0) return
+
+    const doc = new jsPDF({ orientation: 'landscape' })
+    const pageHeight = doc.internal.pageSize.getHeight()
+    const bottom = () => doc.lastAutoTable?.finalY ?? 31
+
+    doc.setFontSize(13)
+    doc.setFont(undefined, 'bold')
+    doc.text(state.companyProfile?.name || 'Batch Run Log', 14, 15)
+    doc.setFontSize(10)
+    doc.setFont(undefined, 'normal')
+    doc.text('Batch Run Log — System Operations', 14, 21)
+    doc.text(`${runs.length} run${runs.length === 1 ? '' : 's'} · exported ${new Date().toLocaleString()}`, 14, 26)
+
+    autoTable(doc, {
+      startY: 31,
+      head: [['Run At', 'Batch', 'Business Date / Period', 'Run By', 'Checks', 'Postings', 'Summary']],
+      body: batchLogRows(runs),
+      styles: { fontSize: 7, cellWidth: 'wrap' },
+      headStyles: { fillColor: [0, 71, 171] },
+      columnStyles: { 5: { cellWidth: 55 }, 6: { cellWidth: 60 } },
+    })
+
+    // A heading, then the steps, then what they let through — repeated for every run.
+    runs.forEach((r, i) => {
+      let y = bottom() + 12
+      if (y > pageHeight - 40) { doc.addPage(); y = 20 }
+
+      doc.setFontSize(10)
+      doc.setFont(undefined, 'bold')
+      doc.text(
+        `${i + 1}. ${r.kind} — ${r.kind === 'EOM' ? `period ${r.period || '—'}` : `business day ${r.date || '—'}`}`,
+        14, y,
+      )
+      doc.setFontSize(8)
+      doc.setFont(undefined, 'normal')
+      doc.text(`Run ${r.runAt || '—'} by ${r.runBy || '—'} · ${r.summary || ''}`, 14, y + 5)
+
+      autoTable(doc, {
+        startY: y + 9,
+        head: [['#', 'Check step', 'Result', 'Detail']],
+        body: (r.checks || []).length
+          ? r.checks.map((c, n) => [n + 1, c.label || c.id || '', (c.status || '').toUpperCase(), c.detail || ''])
+          : [['—', 'No checks recorded for this run', '—', '']],
+        styles: { fontSize: 7, cellWidth: 'wrap' },
+        headStyles: { fillColor: [71, 85, 105] },
+        columnStyles: { 0: { cellWidth: 8 }, 1: { cellWidth: 60 }, 2: { cellWidth: 16 }, 3: { cellWidth: 150 } },
+        margin: { left: 14 },
+      })
+
+      autoTable(doc, {
+        startY: bottom() + 3,
+        head: [['Ledger entries posted', 'Currency', 'Amount']],
+        body: (r.postings || []).length
+          ? r.postings.map(pst => [pst.transactionNo || '—', pst.currency || '', Number(pst.amount || 0).toFixed(2)])
+          : [['None — this batch posted no ledger entry', '', '']],
+        styles: { fontSize: 7 },
+        headStyles: { fillColor: [71, 85, 105] },
+        columnStyles: { 0: { cellWidth: 90 }, 1: { cellWidth: 20 }, 2: { cellWidth: 28, halign: 'right' } },
+        margin: { left: 14 },
+      })
+    })
+
+    doc.save(`batch-run-log-${todayISO()}.pdf`)
+    showToast(`Batch run log downloaded — ${runs.length} run${runs.length === 1 ? '' : 's'}`, 'success')
+  }
 
   return (
     <Dialog open={state.systemOpsOpen} onOpenChange={open => { if (!open) close() }}>
@@ -214,8 +172,7 @@ export default function SystemOperationsModal() {
         <DialogHeader>
           <DialogTitle className="text-slate-800 dark:text-slate-100">System Operations</DialogTitle>
           <DialogDescription className="dark:text-slate-400">
-            Each batch verifies the ledger against live data before it posts anything. Review the checks and the
-            entries below, then commit.
+            One click runs the batch. Every check it made and every entry it posted is in the downloadable log.
           </DialogDescription>
         </DialogHeader>
 
@@ -242,78 +199,23 @@ export default function SystemOperationsModal() {
 
         <div className="space-y-3">
           {OPERATIONS.map(op => {
-            const isSelected = selected === op.kind
             const Icon = op.icon
             return (
-              <div
-                key={op.kind}
-                className={`rounded-xl border p-3.5 transition-colors ${
-                  isSelected
-                    ? 'border-brand-300 bg-brand-50/40 dark:border-brand-700 dark:bg-brand-900/10'
-                    : 'border-slate-200 dark:border-slate-700'
-                }`}
-              >
-                <div className="flex items-start gap-3">
-                  <Icon className="w-4 h-4 mt-0.5 text-slate-500 dark:text-slate-400 flex-shrink-0" aria-hidden="true" />
+              <div key={op.kind} className="rounded-xl border border-slate-200 dark:border-slate-700 p-3.5">
+                <div className="flex items-center gap-3">
+                  <Icon className="w-4 h-4 text-slate-500 dark:text-slate-400 flex-shrink-0" aria-hidden="true" />
                   <div className="min-w-0 flex-1">
                     <p className="text-xs font-bold text-slate-800 dark:text-slate-100">{op.title}</p>
-                    <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1 leading-relaxed">{op.description}</p>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 leading-relaxed">{op.description}</p>
                   </div>
-                  {!isSelected && (
-                    <Button
-                      variant="outline"
-                      onClick={() => setSelected(op.kind)}
-                      className="flex-shrink-0 h-auto px-3 py-1.5 rounded-xl text-[11px] font-bold gap-1.5 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-700"
-                    >
-                      <ShieldCheck className="w-3.5 h-3.5" />
-                      Verify
-                    </Button>
-                  )}
+                  <Button
+                    onClick={() => run(op.kind)}
+                    className="flex-shrink-0 h-auto px-3.5 py-2 rounded-xl text-[11px] font-bold gap-1.5"
+                  >
+                    <Play className="w-3.5 h-3.5" />
+                    Run {op.kind}
+                  </Button>
                 </div>
-
-                {isSelected && plan && (
-                  <div className="mt-3 space-y-3">
-                    <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-3">
-                      <p className="text-[11px] font-bold text-slate-700 dark:text-slate-200 uppercase tracking-wide">
-                        Verification — {plan.checks.length} checks against live data
-                      </p>
-                      <ul className="mt-1 divide-y divide-slate-100 dark:divide-slate-700/60">
-                        {plan.checks.map(c => <CheckRow key={c.id} check={c} />)}
-                      </ul>
-                    </div>
-
-                    <PostingPreview plan={plan} />
-
-                    {plan.blocked && (
-                      <div className="rounded-xl border border-rose-200 bg-rose-50 dark:border-rose-800 dark:bg-rose-900/20 p-3">
-                        <p className="text-[11px] font-bold text-rose-700 dark:text-rose-400">
-                          Blocked — {failures.length} check{failures.length === 1 ? '' : 's'} failed
-                        </p>
-                        <p className="text-[10px] text-rose-600 dark:text-rose-400/90 mt-1 leading-relaxed">
-                          Resolve the failures above and verify again. Nothing has been posted.
-                        </p>
-                      </div>
-                    )}
-
-                    <div className="flex items-center justify-end gap-2">
-                      <Button
-                        variant="ghost"
-                        onClick={() => setSelected(null)}
-                        className="h-auto px-3 py-2 rounded-xl text-[11px] font-bold text-slate-600 dark:text-slate-300 dark:hover:bg-slate-700"
-                      >
-                        Cancel
-                      </Button>
-                      <Button
-                        onClick={() => run(op.kind)}
-                        disabled={plan.blocked}
-                        className="h-auto px-4 py-2 rounded-xl text-[11px] font-bold gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        {op.action}
-                        <ChevronRight className="w-3.5 h-3.5" />
-                      </Button>
-                    </div>
-                  </div>
-                )}
               </div>
             )
           })}
@@ -321,10 +223,24 @@ export default function SystemOperationsModal() {
 
         {/* Batch history */}
         <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-3.5">
-          <p className="text-[11px] font-bold text-slate-700 dark:text-slate-200 uppercase tracking-wide flex items-center gap-1.5">
-            <History className="w-3.5 h-3.5" aria-hidden="true" />
-            Recent batch runs
-          </p>
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-[11px] font-bold text-slate-700 dark:text-slate-200 uppercase tracking-wide flex items-center gap-1.5">
+              <History className="w-3.5 h-3.5" aria-hidden="true" />
+              Recent batch runs
+            </p>
+            {/* The list shows five; the download is every run on this install. */}
+            {state.batchRuns.length > 0 && (
+              <Button
+                variant="outline"
+                onClick={downloadLog}
+                title="Download the full batch run log as a PDF"
+                className="flex-shrink-0 h-auto px-2.5 py-1 rounded-lg text-[10px] font-bold gap-1.5 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-700"
+              >
+                <Download className="w-3 h-3" />
+                Download log
+              </Button>
+            )}
+          </div>
           {state.batchRuns.length === 0 ? (
             <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-2">
               No batch has been run on this install yet.
@@ -342,12 +258,9 @@ export default function SystemOperationsModal() {
           )}
         </div>
 
-        <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700/50 rounded-xl p-3">
-          <p className="text-[10px] font-semibold text-amber-700 dark:text-amber-400 leading-relaxed">
-            Note: Batch postings are irreversible. Ensure all daily transactions have been posted before running EOD.
-            Contact your system administrator before running EOM.
-          </p>
-        </div>
+        <p className="text-[10px] font-semibold text-amber-700 dark:text-amber-400">
+          Batch postings are irreversible — post the day's transactions before running EOD.
+        </p>
       </DialogContent>
     </Dialog>
   )

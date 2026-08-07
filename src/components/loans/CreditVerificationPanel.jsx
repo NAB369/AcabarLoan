@@ -1,7 +1,9 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { ShieldCheck, ShieldAlert, AlertTriangle, CheckCircle2, XCircle, HelpCircle } from 'lucide-react'
 import { formatVal } from '../../utils/format'
 import { recommendCredit, VERIFICATION, RISK, RECOMMENDATION, DTI_LIMIT_PCT } from '../../utils/creditVerification'
+import { partyName } from '../../utils/loanParties'
+import PartyTabs from './PartyTabs'
 
 // The credit committee's view: one status, confidence, risk and recommended action per party,
 // the household's affordability ratios, and — deliberately — the list of checks the system did
@@ -32,48 +34,22 @@ export default function CreditVerificationPanel({ loan, currency }) {
   const ratio = v => (v === null || v === undefined ? '—' : `${v}%`)
   const rec = RECOMMENDATION_STYLE[report.recommendation]
 
+  // Which party's assessment is on screen. Derived against the report rather than trusted, so a
+  // co-borrower removed while their tab is open falls back to the borrower instead of leaving
+  // the panel pointed at a party the report no longer covers.
+  const [partyTarget, setPartyTarget] = useState('borrower')
+  const activeParty = report.parties.find(p => p.target === partyTarget) || report.parties[0] || null
+
   return (
     <div className="space-y-4">
-      {/* Verdict */}
-      <div className={`rounded-2xl border p-4 ${rec.cls}`}>
-        <div className="flex items-start justify-between gap-4 flex-wrap">
-          <div className="flex items-start gap-3 min-w-0">
-            <rec.Icon className="w-5 h-5 flex-shrink-0 mt-0.5" />
-            <div className="min-w-0">
-              <p className="text-sm font-bold">{report.recommendation}</p>
-              <p className="text-[11px] opacity-90 mt-0.5">
-                {report.blockers.length
-                  ? `${report.blockers.length} blocking finding${report.blockers.length === 1 ? '' : 's'}`
-                  : report.cautions.length
-                    ? `${report.cautions.length} item${report.cautions.length === 1 ? '' : 's'} to clear before approval`
-                    : 'Evidence supports the declared position'}
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-4 flex-shrink-0">
-            <Score label="Overall" value={report.overall} />
-            <Score label="Income" value={report.incomeScore} />
-            <Score label="Expense" value={report.expenseScore} />
-          </div>
-        </div>
-
-        {(report.blockers.length > 0 || report.cautions.length > 0) && (
-          <ul className="mt-3 space-y-1 border-t border-current/15 pt-3">
-            {report.blockers.map((b, i) => (
-              <li key={`b${i}`} className="text-[11px] font-semibold flex items-start gap-1.5">
-                <XCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" aria-hidden="true" />{b}
-              </li>
-            ))}
-            {report.cautions.map((c, i) => (
-              <li key={`c${i}`} className="text-[11px] flex items-start gap-1.5 opacity-90">
-                <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" aria-hidden="true" />{c}
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-
-      {/* Affordability — assessable figures, not declared ones */}
+      {/* The figures on the left, the verdict they produce on the right, starting at the same
+          height — the recommendation is only readable against the affordability it came from,
+          and stacked full width the two were a scroll apart. `items-start` keeps each card its
+          own height rather than stretching the short one to match. Stacked below lg, where two
+          columns would leave neither readable. */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
+      {/* Affordability — assessable figures, not declared ones. First in the row, and first in
+          reading order: the figures are what the verdict beside them is derived from. */}
       <div className="rounded-2xl border border-slate-200 dark:border-slate-700 p-4">
         <p className="text-xs font-bold text-slate-700 dark:text-slate-200 uppercase tracking-wide">Affordability</p>
         <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5 mb-3">
@@ -82,7 +58,9 @@ export default function CreditVerificationPanel({ loan, currency }) {
             <> Declared income {money(report.declaredIncome)} was capped to {money(report.income)}.</>
           )}
         </p>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {/* Two across, not four: this card is half the panel's width now, and four ratio tiles
+            in that space wrap their own labels. Four only at xl, where there is room. */}
+        <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
           <Metric
             label="Debt-to-income"
             value={ratio(report.dti)}
@@ -143,35 +121,99 @@ export default function CreditVerificationPanel({ loan, currency }) {
         )}
       </div>
 
-      {/* Per party */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {report.parties.map(p => {
-          const style = STATUS_STYLE[p.status] || STATUS_STYLE[VERIFICATION.unverified]
-          return (
-            <div key={p.target} className="rounded-2xl border border-slate-200 dark:border-slate-700 p-4">
+      {/* Verdict */}
+      <div className={`rounded-2xl border p-4 ${rec.cls}`}>
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div className="flex items-start gap-3 min-w-0">
+            <rec.Icon className="w-5 h-5 flex-shrink-0 mt-0.5" />
+            <div className="min-w-0">
+              <p className="text-sm font-bold">{report.recommendation}</p>
+              <p className="text-[11px] opacity-90 mt-0.5">
+                {report.blockers.length
+                  ? `${report.blockers.length} blocking finding${report.blockers.length === 1 ? '' : 's'}`
+                  : report.cautions.length
+                    ? `${report.cautions.length} item${report.cautions.length === 1 ? '' : 's'} to clear before approval`
+                    : 'Evidence supports the declared position'}
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-4 flex-shrink-0">
+            <Score label="Overall" value={report.overall} />
+            <Score label="Income" value={report.incomeScore} />
+            <Score label="Expense" value={report.expenseScore} />
+          </div>
+        </div>
+
+        {(report.blockers.length > 0 || report.cautions.length > 0) && (
+          <ul className="mt-3 space-y-1 border-t border-current/15 pt-3">
+            {report.blockers.map((b, i) => (
+              <li key={`b${i}`} className="text-[11px] font-semibold flex items-start gap-1.5">
+                <XCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" aria-hidden="true" />{b}
+              </li>
+            ))}
+            {report.cautions.map((c, i) => (
+              <li key={`c${i}`} className="text-[11px] flex items-start gap-1.5 opacity-90">
+                <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" aria-hidden="true" />{c}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      </div>
+
+      {/* Per party, on the same tab bar the CBC tab uses — the parties used to sit side by side
+          in a two-column grid, which put two different people's verdicts at the same weight and
+          left neither with room to be read. */}
+      {activeParty && (() => {
+        const style = STATUS_STYLE[activeParty.status] || STATUS_STYLE[VERIFICATION.unverified]
+        return (
+          <div className="space-y-4">
+            <PartyTabs
+              idPrefix="suggestion"
+              ariaLabel="Assessment by party"
+              activeId={activeParty.target}
+              onSelect={setPartyTarget}
+              items={report.parties.map(p => {
+                const s = STATUS_STYLE[p.status] || STATUS_STYLE[VERIFICATION.unverified]
+                return {
+                  id: p.target,
+                  label: p.label,
+                  subtitle: partyName(loan, p.target),
+                  // The verdict is what the tab is for, so it is the pill rather than a count.
+                  pill: <span className={`px-2 py-0.5 rounded-full border text-[10px] font-bold flex-shrink-0 ${s.chip}`}>{p.status}</span>,
+                }
+              })}
+            />
+
+            <div
+              role="tabpanel"
+              id={`suggestion-panel-${activeParty.target}`}
+              aria-labelledby={`suggestion-tab-${activeParty.target}`}
+              className="rounded-2xl border border-slate-200 dark:border-slate-700 p-4"
+            >
               <div className="flex items-start justify-between gap-3 flex-wrap">
                 <div className="flex items-center gap-2 min-w-0">
                   <style.Icon className={`w-4 h-4 flex-shrink-0 ${style.cls}`} aria-hidden="true" />
-                  <p className="text-sm font-bold text-slate-800 dark:text-slate-100">{p.label}</p>
+                  <p className="text-sm font-bold text-slate-800 dark:text-slate-100">{activeParty.label}</p>
                 </div>
                 <div className="flex items-center gap-1.5 flex-shrink-0">
-                  <span className={`px-2 py-0.5 rounded-full border text-[10px] font-bold ${style.chip}`}>{p.status}</span>
-                  <span className={`px-2 py-0.5 rounded-full border text-[10px] font-bold ${RISK_CHIP[p.risk]}`}>{p.risk} risk</span>
-                  <span className="px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-700 text-[10px] font-bold text-slate-600 dark:text-slate-300">{p.confidence}%</span>
+                  <span className={`px-2 py-0.5 rounded-full border text-[10px] font-bold ${style.chip}`}>{activeParty.status}</span>
+                  <span className={`px-2 py-0.5 rounded-full border text-[10px] font-bold ${RISK_CHIP[activeParty.risk]}`}>{activeParty.risk} risk</span>
+                  <span className="px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-700 text-[10px] font-bold text-slate-600 dark:text-slate-300">{activeParty.confidence}%</span>
                 </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3 mt-3">
-                <Metric label="Income (assessed)" value={money(p.income.assessable)} />
-                <Metric label="Expense (assessed)" value={money(p.expense.assessable)} />
+                <Metric label="Income (assessed)" value={money(activeParty.income.assessable)} />
+                <Metric label="Expense (assessed)" value={money(activeParty.expense.assessable)} />
               </div>
 
               {/* Every declared source, with what its own documents demonstrate */}
-              {p.income.sources.length > 0 && (
+              {activeParty.income.sources.length > 0 && (
                 <div className="mt-3 border-t border-slate-100 dark:border-slate-700 pt-2.5">
                   <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400 dark:text-slate-500 mb-1.5">Income sources</p>
                   <ul className="space-y-1">
-                    {p.income.sources.map(s => (
+                    {activeParty.income.sources.map(s => (
                       <li key={s.index} className="text-[11px] flex items-start justify-between gap-2">
                         <span className="text-slate-600 dark:text-slate-300 min-w-0 truncate">{s.label}</span>
                         <span className="flex-shrink-0 font-semibold text-slate-700 dark:text-slate-200">
@@ -184,11 +226,11 @@ export default function CreditVerificationPanel({ loan, currency }) {
                 </div>
               )}
 
-              {p.findings.length > 0 && (
+              {activeParty.findings.length > 0 && (
                 <div className="mt-3 border-t border-slate-100 dark:border-slate-700 pt-2.5">
                   <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400 dark:text-slate-500 mb-1.5">Findings</p>
                   <ul className="space-y-1">
-                    {p.findings.map((f, i) => (
+                    {activeParty.findings.map((f, i) => (
                       <li key={i} className="text-[11px] text-slate-600 dark:text-slate-300 flex items-start gap-1.5">
                         <AlertTriangle className="w-3 h-3 flex-shrink-0 mt-0.5 text-amber-500" aria-hidden="true" />{f}
                       </li>
@@ -198,12 +240,12 @@ export default function CreditVerificationPanel({ loan, currency }) {
               )}
 
               <p className="mt-3 text-[11px] font-semibold text-slate-700 dark:text-slate-200 border-t border-slate-100 dark:border-slate-700 pt-2.5">
-                Recommended action: <span className="font-medium text-slate-600 dark:text-slate-300">{p.action}</span>
+                Recommended action: <span className="font-medium text-slate-600 dark:text-slate-300">{activeParty.action}</span>
               </p>
             </div>
-          )
-        })}
-      </div>
+          </div>
+        )
+      })()}
 
       {/* What was NOT checked. Present on purpose — see MANUAL_REVIEW_CHECKS. */}
       <div className="rounded-2xl border border-slate-200 dark:border-slate-700 p-4">

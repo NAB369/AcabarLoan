@@ -4,6 +4,7 @@ import { assessStatementExpense, assessableExpense, EXPENSE_STATUS } from './sta
 import { INCOME_FIELD, INCOME_LIST_FIELD, INCOME_LABEL } from './income'
 import { EXPENSE_FIELD } from './expense'
 import { assessCreditRisk } from './riskAssessment'
+import { affordabilityTargets } from './loanParties'
 
 // ── Consolidated credit verification ──────────────────────────────────────────
 // The per-document verdicts already exist (statementIncome / statementExpense read what the
@@ -212,7 +213,11 @@ export function verifyParty(loan, target) {
 // ── Affordability ────────────────────────────────────────────────────────────
 // Household figures, on the assessable side rather than the declared one — capacity has to be
 // measured against what the evidence supports, not what was written on the form.
-export function assessAffordability(loan, targets = ['borrower', 'coBorrower']) {
+// Targets default to the parties the loan actually has. Scoring a co-borrower that was never
+// added produced a party with no income at all — which both showed as an empty Co-Borrower
+// card and tripped the "at least one party has no verified income" blocker in recommendCredit
+// below, pushing a perfectly good single-borrower loan toward Reject.
+export function assessAffordability(loan, targets = affordabilityTargets(loan)) {
   const parties = targets.map(t => verifyParty(loan, t))
   const income = round2(parties.reduce((s, p) => s + p.income.assessable, 0))
   const declaredIncome = round2(parties.reduce((s, p) => s + p.income.declared, 0))
@@ -251,7 +256,7 @@ export function assessAffordability(loan, targets = ['borrower', 'coBorrower']) 
 // Reject is reserved for a position the evidence contradicts or the borrower cannot afford.
 // Everything short of that is Manual Review rather than Approve — an automated pass on thin
 // evidence is the failure mode that costs money.
-export function recommendCredit(loan, targets = ['borrower', 'coBorrower']) {
+export function recommendCredit(loan, targets = affordabilityTargets(loan)) {
   const affordability = assessAffordability(loan, targets)
   const { parties, dti, net } = affordability
 

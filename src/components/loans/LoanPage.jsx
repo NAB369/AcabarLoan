@@ -3,7 +3,8 @@ import { Plus, X, FileText, DollarSign, Calendar, User, ChevronLeft, Settings } 
 import { useApp } from '../../context/AppContext'
 import { formatVal } from '../../utils/format'
 import StatusBadge from '../shared/StatusBadge'
-import LoanList from './LoanList'
+import LoanList, { LOAN_COLUMNS } from './LoanList'
+import { useTableColumns, ColumnPicker } from '../shared/DataTableTools'
 import LoanWizard from './LoanWizard'
 import LoanDetail from './LoanDetail'
 import LoanOverview from './LoanOverview'
@@ -19,6 +20,11 @@ export default function LoanPage() {
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('ALL')
   const [loanSettingsOpen, setLoanSettingsOpen] = useState(false)
+  // Above the early returns below — hooks cannot be called conditionally.
+  const { visible, visibleIds, toggle } = useTableColumns(LOAN_COLUMNS, {
+    value: state.loanVisibleColumns,
+    onChange: ids => dispatch({ type: 'SET_LOAN_COLUMNS', ids }),
+  })
 
   // Local component state, so App.jsx's global Escape handler can't reach it.
   useEffect(() => {
@@ -179,22 +185,30 @@ export default function LoanPage() {
           <Settings className="w-3.5 h-3.5" />
           Loan Setting
         </button>
-        {/* The page's one primary action, so it sits on this row with the other controls but
-            keeps the solid fill that separates it from them — and is pushed to the far end so
-            it does not read as another filter. */}
-        <button
-          onClick={handleNewLoan}
-          title={can('open_loan') ? undefined : `${state.currentRole} cannot open loans`}
-          className={`flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-xl text-white shadow-sm transition-colors flex-shrink-0 sm:ml-auto ${
-            can('open_loan') ? 'bg-[#0047ab] hover:bg-blue-700' : 'bg-slate-300 dark:bg-slate-600 cursor-not-allowed'
-          }`}
-        >
-          <Plus className="w-3.5 h-3.5" />
-          New Application
-        </button>
+        {/* The column picker rides with the primary action at the far end of the row rather
+            than sitting above the table, so every control on this bar is in one place. */}
+        <div className="flex items-center gap-2 flex-shrink-0 sm:ml-auto">
+          {/* Desktop only — the mobile view is a card list with no columns to hide. */}
+          <div className="hidden md:block">
+            <ColumnPicker columns={LOAN_COLUMNS} visibleIds={visibleIds} onToggle={toggle} iconOnly />
+          </div>
+          {/* The page's one primary action, so it sits on this row with the other controls but
+              keeps the solid fill that separates it from them, so it does not read as another
+              filter. */}
+          <button
+            onClick={handleNewLoan}
+            title={can('open_loan') ? undefined : `${state.currentRole} cannot open loans`}
+            className={`flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-xl text-white shadow-sm transition-colors flex-shrink-0 ${
+              can('open_loan') ? 'bg-[#0047ab] hover:bg-blue-700' : 'bg-slate-300 dark:bg-slate-600 cursor-not-allowed'
+            }`}
+          >
+            <Plus className="w-3.5 h-3.5" />
+            New Application
+          </button>
+        </div>
       </div>
 
-      <LoanList search={search} statusFilter={statusFilter} />
+      <LoanList search={search} statusFilter={statusFilter} visible={visible} />
     </div>
 
       {/* Modals */}

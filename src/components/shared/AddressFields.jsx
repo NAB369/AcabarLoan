@@ -16,7 +16,9 @@ function optionsFor(builtIn, added, current) {
     .map(name => ({ value: name, label: name }))
 }
 
-export default function AddressFields({ label, values, onChange }) {
+// `action` is an optional control shown on the heading row, beside the label — a per-block
+// shortcut ("Same as Current Address") belongs with the block it fills in, not floating above it.
+export default function AddressFields({ label, values, onChange, action = null }) {
   const { state, dispatch } = useApp()
   const custom = state.customGeo || {}
 
@@ -59,10 +61,13 @@ export default function AddressFields({ label, values, onChange }) {
 
   return (
     <div className="space-y-3">
-      <p className="flex items-center gap-2 text-xs font-semibold text-slate-600 dark:text-slate-300 uppercase tracking-wide">
-        <MapPin className="w-3.5 h-3.5 text-brand-600 dark:text-brand-400" />
-        {label}
-      </p>
+      <div className="flex items-center justify-between gap-3">
+        <p className="flex items-center gap-2 text-xs font-semibold text-slate-600 dark:text-slate-300 uppercase tracking-wide">
+          <MapPin className="w-3.5 h-3.5 text-brand-600 dark:text-brand-400" />
+          {label}
+        </p>
+        {action}
+      </div>
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
         <div>
           <label className={labelCls}>Province</label>

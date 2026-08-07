@@ -159,6 +159,11 @@ export function getStatusBadgeClass(status) {
     'Approved':        'bg-emerald-50 text-emerald-700 border-emerald-200/50  dark:bg-emerald-900/30 dark:text-emerald-400 dark:border-emerald-800',
     'Waiting Disburse':'bg-brand-50   text-brand-700   border-brand-200/50    dark:bg-brand-900/30   dark:text-brand-400   dark:border-brand-800',
     'Pending':         'bg-amber-50   text-amber-700   border-amber-200/50    dark:bg-amber-900/30   dark:text-amber-400   dark:border-amber-800',
+    // Customer states (see utils/customerStatus.js). 'Registered' is neutral on purpose — it
+    // records that the customer exists, not that anything was approved. 'Incomplete' is amber
+    // because a missing disbursement account blocks any later disbursement.
+    'Registered':      'bg-slate-100  text-slate-600   border-slate-200       dark:bg-slate-700/50    dark:text-slate-300   dark:border-slate-600',
+    'Incomplete':      'bg-amber-50   text-amber-700   border-amber-200/50    dark:bg-amber-900/30   dark:text-amber-400   dark:border-amber-800',
     'Pending Approval':'bg-amber-50   text-amber-700   border-amber-200/60    dark:bg-amber-900/30   dark:text-amber-400   dark:border-amber-800',
     'In Progress':     'bg-amber-50   text-amber-700   border-amber-200/60    dark:bg-amber-900/30   dark:text-amber-400   dark:border-amber-800',
     'Disbursed':       'bg-brand-50   text-brand-700   border-brand-200/60    dark:bg-brand-900/30   dark:text-brand-400   dark:border-brand-800',

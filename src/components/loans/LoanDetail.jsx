@@ -12,7 +12,7 @@ import { KH_PROVINCES, getDistricts, getCommunes } from '../../data/geoData'
 import { EMPTY_ADDRESS, OCCUPATIONS, RELATIONS, IDENTITY_DOC_TYPES, REGISTRATION_STATUSES, LAND_TITLE_TYPES, LAND_USE_TYPES, HOUSE_TYPES, CONSTRUCTION_TYPES, ENCUMBRANCE_STATUSES, getCollateralDocTypes, BRANCHES } from '../../data/constants'
 import TypedDocumentUpload from '../shared/TypedDocumentUpload'
 import PersonInfoGrid from '../shared/PersonInfoGrid'
-import IdentityDocumentsTable from '../shared/IdentityDocumentsTable'
+import IdentityDocumentsTable, { hasUploadedDocs } from '../shared/IdentityDocumentsTable'
 import IncomeVerification from './IncomeVerification'
 import ExpenseVerification from './ExpenseVerification'
 import {
@@ -26,6 +26,8 @@ import {
 import CustomerWizard from '../customers/CustomerWizard'
 import AddressFields from '../shared/AddressFields'
 import CBCReportDocument from './CBCReportA4'
+import PartyTabs from './PartyTabs'
+import AddMenu from './AddMenu'
 import CreditVerificationPanel from './CreditVerificationPanel'
 import StickyHScroll from '../shared/StickyHScroll'
 import { assessLoanRisk } from '../../utils/riskAssessment'
@@ -49,7 +51,6 @@ function withUploadedDocTypes(baseTypes, documents) {
 }
 
 const ghostBtnCls = 'flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-semibold rounded-xl border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors'
-
 // Every empty section reads the same way — an icon tile, what is missing, a line on how to
 // fill it, and the action that does — the shape the income tab set. `bare` drops the card
 // chrome for the places that already sit inside a bordered box (a card body, a table cell),
@@ -77,7 +78,7 @@ const DETAIL_TABS = [
   { label: 'Collateral', icon: Building },
   { label: 'Income Verification', icon: ArrowDownLeft },
   { label: 'Expense Verification', icon: Wallet },
-  { label: 'Loan Assessment', icon: Calculator },
+  { label: 'Loan Suggestion', icon: Calculator },
   { label: 'Risk Assessment', icon: ShieldAlert },
   { label: 'Audit Log', icon: History },
 ]
@@ -291,6 +292,9 @@ export default function LoanDetail() {
   const coBorrowers = loan.coBorrowers || (loan.coBorrower ? [loan.coBorrower] : [])
   const guarantors = loan.guarantors || (loan.guarantor ? [loan.guarantor] : [])
   const collaterals = loan.collaterals || (loan.collateral ? [loan.collateral] : [])
+  // What the Collateral tab lays out: the real ones, or a single blank card standing in for the
+  // first, so an empty tab shows the shape of what is about to be entered rather than a notice.
+  const collateralCards = collaterals.length ? collaterals : [{}]
   const borrowerIncomes = loan.borrowerIncomes || (loan.borrowerIncomeInfo ? [loan.borrowerIncomeInfo] : [])
   const coBorrowerIncomes = loan.coBorrowerIncomes || (loan.coBorrowerIncomeInfo ? [loan.coBorrowerIncomeInfo] : [])
   const guarantorIncomes = loan.guarantorIncomes || (loan.guarantorIncomeInfo ? [loan.guarantorIncomeInfo] : [])
@@ -343,7 +347,7 @@ export default function LoanDetail() {
   const vehicleCollateralCount = Math.max(1, collaterals.filter(c => c.type === 'Vehicle').length)
 
   // Each auto-calculated fee carries the settings key + label of the rate that drives it, plus the
-  // effective rate itself, so the Loan Assessment "Benefit Rate" editor can be derived straight from
+  // effective rate itself, so the Loan Suggestion "Benefit Rate" editor can be derived straight from
   // this list (below) instead of a hand-kept parallel list that drifts out of sync.
   // Effective rate = a per-loan override the officer set here, else the System Settings default.
   const feeRateOverrides = loan.benefitFeeRates || {}
@@ -494,7 +498,7 @@ export default function LoanDetail() {
   const [showLoanInfoModal, setShowLoanInfoModal] = useState(false)
   const [loanInfoForm, setLoanInfoForm] = useState({ product: loan.product, amount: loan.amount?.toString() || '', interestRate: loan.interestRate?.toString() || '', installments: loan.installments?.toString() || '', creditOfficer: loan.creditOfficer || '', branch: loan.branch || 'Phnom Penh HQ' })
 
-  // Loan Assessment tab: inline rate adjustment (left panel), separate from the Edit Loan Info modal
+  // Loan Suggestion tab: inline rate adjustment (left panel), separate from the Edit Loan Info modal
   // so tweaking rates here doesn't get tangled up with amount/term/officer edits.
   const [assessmentRateForm, setAssessmentRateForm] = useState({ interestRate: loan.interestRate?.toString() || '', installments: loan.installments?.toString() || '' })
   const [editingAssessmentRate, setEditingAssessmentRate] = useState(false)
@@ -568,31 +572,44 @@ export default function LoanDetail() {
   // Which party's CBC the tab is showing. The two used to stack down one scroll, so reading
   // the co-borrower's report meant scrolling past the whole of the borrower's A4 sheet.
   const [cbcTarget, setCbcTarget] = useState('borrower')
-  // The co-borrower only has a sub-tab once its section exists. `activeCbcTarget` is derived
-  // rather than corrected in an effect, so removing the co-borrower while its tab is open
-  // falls straight back to the borrower instead of rendering one frame against a party that
-  // no longer has a section.
-  const cbcTargets = ['borrower', ...(showCoBorrowerCbc ? ['coBorrower'] : [])]
+  // The co-borrower only has a sub-tab once one is on the loan — a loan with no co-borrower
+  // should not offer a CBC report for a party that does not exist. A report already on file
+  // still shows regardless: hiding the tab would strand data the operator uploaded (older
+  // loans could carry a co-borrower CBC without a co-borrower record).
+  const hasCoBorrower = coBorrowers.length > 0 || !!loan.coBorrowerCreditHistoryInfo
+  const cbcTargets = ['borrower', ...(hasCoBorrower && showCoBorrowerCbc ? ['coBorrower'] : [])]
   const activeCbcTarget = cbcTargets.includes(cbcTarget) ? cbcTarget : 'borrower'
-  const cbcTabRefs = useRef({})
 
-  // Arrow keys move between the parties and Home/End jump to the ends, which is what a tab
-  // bar is expected to do once it is marked up as one — without it the roving tabindex below
-  // would leave every tab but the active one unreachable from the keyboard.
-  function handleCbcTabKey(e) {
-    const step = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0
-    let next = null
-    if (e.key === 'Home') next = cbcTargets[0]
-    else if (e.key === 'End') next = cbcTargets[cbcTargets.length - 1]
-    else if (step) {
-      const i = cbcTargets.indexOf(activeCbcTarget)
-      next = cbcTargets[(i + step + cbcTargets.length) % cbcTargets.length]
-    }
-    if (!next) return
-    e.preventDefault()
-    setCbcTarget(next)
-    cbcTabRefs.current[next]?.focus()
-  }
+  // Which half of the Loan Suggestion tab is showing: the credit verdict, or the rates and
+  // terms set against it.
+  const [suggestionSection, setSuggestionSection] = useState('assessment')
+
+  // Which collateral the Collateral tab is showing, by position. Derived against the list so
+  // removing the last one falls back to the first instead of pointing past the end.
+  const [collateralTab, setCollateralTab] = useState('0')
+  const activeCollateralId = collateralCards[Number(collateralTab)] ? collateralTab : '0'
+
+  // Which party the Customer tab is showing. Only parties on the loan get a tab; the Add menu
+  // beside them is how the first co-borrower or guarantor is created. Active is derived rather
+  // than stored, so removing the last co-borrower while its tab is open drops back to the
+  // borrower instead of pointing at a tab that no longer exists.
+  const [customerParty, setCustomerParty] = useState('borrower')
+  const customerPartyTabs = [
+    { id: 'borrower', label: 'Borrower', subtitle: customer?.enName || loan.customerName, count: 1 },
+    ...(coBorrowers.length ? [{
+      id: 'coBorrower',
+      label: `Co-Borrower${coBorrowers.length > 1 ? 's' : ''}`,
+      subtitle: coBorrowers.map(c => c.enName).filter(Boolean).join(', '),
+      count: coBorrowers.length,
+    }] : []),
+    ...(guarantors.length ? [{
+      id: 'guarantor',
+      label: `Guarantor${guarantors.length > 1 ? 's' : ''}`,
+      subtitle: guarantors.map(g => g.enName).filter(Boolean).join(', '),
+      count: guarantors.length,
+    }] : []),
+  ]
+  const activeCustomerParty = customerPartyTabs.some(t => t.id === customerParty) ? customerParty : 'borrower'
 
   // All of this screen's modals are local component state, so App.jsx's global Escape
   // handler (which only knows about reducer state) can't reach them — this closes
@@ -699,7 +716,7 @@ export default function LoanDetail() {
       schedule: mergeSchedule(rows, loan.schedule),
     }
     dispatch({ type: 'UPDATE_LOAN', loan: updatedLoan })
-    logActivity('Loan Assessment', 'Installment term applied', `${term} months · EMI ${formatVal(newEmi, currency, 1)}`)
+    logActivity('Loan Suggestion', 'Installment term applied', `${term} months · EMI ${formatVal(newEmi, currency, 1)}`)
     showToast(`Installment term updated to ${term} months`, 'success')
   }
 
@@ -711,7 +728,7 @@ export default function LoanDetail() {
     const { emi: newEmi, rows } = buildAmortizationData(loan.amount, rate, term, loan.firstInstallment)
     const updatedLoan = { ...loan, interestRate: rate, installments: term, termSelected: true, emi: newEmi, schedule: mergeSchedule(rows, loan.schedule) }
     dispatch({ type: 'UPDATE_LOAN', loan: updatedLoan })
-    logActivity('Loan Assessment', 'Interest rate and term changed', `${rate}% p.a. · ${term} months`)
+    logActivity('Loan Suggestion', 'Interest rate and term changed', `${rate}% p.a. · ${term} months`)
     showToast('Loan product rate updated', 'success')
     setEditingAssessmentRate(false)
   }
@@ -728,7 +745,7 @@ export default function LoanDetail() {
       .filter(f => f.name.trim())
       .map(f => ({ name: f.name.trim(), rate: Math.max(0, parseFloat(f.rate) || 0), included: f.included !== false }))
     dispatch({ type: 'UPDATE_LOAN', loan: { ...loan, benefitFeeKeys: ordered, benefitFeeRates: rates, customBenefitFees: custom } })
-    logActivity('Loan Assessment', 'Benefit fees updated',
+    logActivity('Loan Suggestion', 'Benefit fees updated',
       `${ordered.length} built-in fee${ordered.length === 1 ? '' : 's'} applied, ${custom.length} custom`)
     showToast('Benefit fees updated', 'success')
     setEditingBenefitRate(false)
@@ -1725,25 +1742,30 @@ export default function LoanDetail() {
 
         {activeTab === 1 && (
         /* Section 2: Customer (Borrower, Co-Borrower, Guarantor) */
-        <div className="space-y-6">
-          {!isDisbursed && (
-            <div className="sticky top-0 z-10 -mx-6 px-6 py-3 bg-white dark:bg-slate-800 border-b border-slate-100 dark:border-slate-700 flex items-center justify-end gap-2">
-              <button
-                onClick={() => openCoBorrowerModal(null)}
-                className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-semibold rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
-              >
-                Add Co-Borrower
-              </button>
-              <button
-                onClick={() => openGuarantorModal(null)}
-                className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-semibold rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
-              >
-                Add Guarantor
-              </button>
-            </div>
-          )}
+        <div className="space-y-4">
+          {/* Same party tab bar as the CBC tab, but only for parties the loan actually has:
+              the borrower, then a Co-Borrower or Guarantor tab once one exists. Adding either
+              is the single Add menu on the right, which is also what puts their tab here. */}
+          <PartyTabs
+            idPrefix="party"
+            ariaLabel="Loan parties"
+            activeId={activeCustomerParty}
+            onSelect={setCustomerParty}
+            items={customerPartyTabs}
+            actions={!isDisbursed ? (
+              <AddMenu
+                options={[
+                  { id: 'coBorrower', label: 'Co-Borrower', hint: 'Shares the repayment obligation' },
+                  { id: 'guarantor', label: 'Guarantor', hint: 'Backs the loan without borrowing' },
+                ]}
+                onSelect={kind => (kind === 'coBorrower' ? openCoBorrowerModal(null) : openGuarantorModal(null))}
+                iconOnly
+              />
+            ) : null}
+          />
 
-          <div>
+          {activeCustomerParty === 'borrower' && (
+          <div role="tabpanel" id="party-panel-borrower" aria-labelledby="party-tab-borrower">
             <div className="flex items-center justify-between px-4 py-3">
               <div className="flex items-center gap-2">
                 <span className="text-xs font-bold text-slate-700 dark:text-slate-200 uppercase tracking-wide">Borrower</span>
@@ -1768,19 +1790,23 @@ export default function LoanDetail() {
                 contact={{ phone: customer?.phone || loan.customerPhone, email: customer?.email, currentAddress: formatAddress(customer?.currentAddress), permanentAddress: formatAddress(customer?.permanentAddress) }}
                 identification={{ idNo: customer?.idNo, idType: customer?.idType }}
               />
-              <div className="px-4 pb-4 pt-3 border-t border-slate-100 dark:border-slate-700 space-y-2">
-                <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide">Identity Documents</p>
-                <IdentityDocumentsTable docTypes={borrowerDocTypes} documents={customer?.documents} onView={handleViewDoc} />
-              </div>
+              {/* Nothing uploaded, nothing to show — the Edit button above is still the way in
+                  to attach the first document. */}
+              {hasUploadedDocs(customer?.documents) && (
+                <div className="px-4 pb-4 pt-3 border-t border-slate-100 dark:border-slate-700 space-y-2">
+                  <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide">Identity Documents</p>
+                  <IdentityDocumentsTable docTypes={borrowerDocTypes} documents={customer?.documents} onView={handleViewDoc} />
+                </div>
+              )}
             </div>
           </div>
+          )}
 
-          <div className="rounded-xl overflow-hidden border-t border-slate-100 dark:border-slate-700 pt-4">
-            <div className="px-4 py-3">
-              <span className="text-xs font-bold text-slate-700 dark:text-slate-200 uppercase tracking-wide">Co-Borrower{coBorrowers.length > 1 ? 's' : ''}</span>
-            </div>
-            <div className="p-4">
-              {coBorrowers.length > 0 ? (
+          {activeCustomerParty === 'coBorrower' && (
+          <div role="tabpanel" id="party-panel-coBorrower" aria-labelledby="party-tab-coBorrower" className="rounded-xl overflow-hidden">
+            {/* The tab only exists while a co-borrower does, so there is no empty state to
+                show here — the party bar's Add menu is where the first one comes from. */}
+            <div className="p-4 pt-0">
                 <div className="space-y-4">
                   {coBorrowers.map((cb, idx) => (
                     <div key={idx} className="border border-slate-100 dark:border-slate-700 rounded-xl overflow-hidden">
@@ -1814,37 +1840,26 @@ export default function LoanDetail() {
                         identification={{ idNo: cb.idNo }}
                         showIdType={false}
                       />
-                      <div className="p-3 pt-0 space-y-2">
-                        <div className="pt-3 border-t border-slate-100 dark:border-slate-700 space-y-2">
-                          <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide">Identity Documents</p>
-                          <IdentityDocumentsTable docTypes={partyDocTypes} documents={cb.documents} onView={handleViewDoc} />
+                      {hasUploadedDocs(cb.documents) && (
+                        <div className="p-3 pt-0 space-y-2">
+                          <div className="pt-3 border-t border-slate-100 dark:border-slate-700 space-y-2">
+                            <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide">Identity Documents</p>
+                            <IdentityDocumentsTable docTypes={partyDocTypes} documents={cb.documents} onView={handleViewDoc} />
+                          </div>
                         </div>
-                      </div>
+                      )}
                     </div>
                   ))}
                 </div>
-              ) : (
-                <EmptyState
-                  icon={User}
-                  title="No co-borrower on this loan"
-                  hint="A co-borrower shares the repayment obligation — their income and expenses join the assessment."
-                >
-                  {!isDisbursed && (
-                    <button onClick={() => openCoBorrowerModal(null)} className={ghostBtnCls}>
-                      <Plus className="w-3.5 h-3.5" /> Add Co-Borrower
-                    </button>
-                  )}
-                </EmptyState>
-              )}
             </div>
           </div>
+          )}
 
-          <div className="rounded-xl overflow-hidden border-t border-slate-100 dark:border-slate-700 pt-4">
-            <div className="px-4 py-3">
-              <span className="text-xs font-bold text-slate-700 dark:text-slate-200 uppercase tracking-wide">Guarantor{guarantors.length > 1 ? 's' : ''}</span>
-            </div>
-            <div className="p-4">
-              {guarantors.length > 0 ? (
+          {activeCustomerParty === 'guarantor' && (
+          <div role="tabpanel" id="party-panel-guarantor" aria-labelledby="party-tab-guarantor" className="rounded-xl overflow-hidden">
+            {/* Same as the co-borrower panel: no empty state, because no guarantor means no
+                tab to land on. */}
+            <div className="p-4 pt-0">
                 <div className="space-y-4">
                   {guarantors.map((g, idx) => (
                     <div key={idx} className="border border-slate-100 dark:border-slate-700 rounded-xl overflow-hidden">
@@ -1878,104 +1893,54 @@ export default function LoanDetail() {
                         identification={{ idNo: g.idNo }}
                         showIdType={false}
                       />
-                      <div className="p-3 pt-0 space-y-2">
-                        <div className="pt-3 border-t border-slate-100 dark:border-slate-700 space-y-2">
-                          <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide">Identity Documents</p>
-                          <IdentityDocumentsTable docTypes={partyDocTypes} documents={g.documents} onView={handleViewDoc} />
+                      {hasUploadedDocs(g.documents) && (
+                        <div className="p-3 pt-0 space-y-2">
+                          <div className="pt-3 border-t border-slate-100 dark:border-slate-700 space-y-2">
+                            <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide">Identity Documents</p>
+                            <IdentityDocumentsTable docTypes={partyDocTypes} documents={g.documents} onView={handleViewDoc} />
+                          </div>
                         </div>
-                      </div>
+                      )}
                     </div>
                   ))}
                 </div>
-              ) : (
-                <EmptyState
-                  icon={ShieldAlert}
-                  title="No guarantor on this loan"
-                  hint="A guarantor backs the loan without borrowing — add one to record their details and identity documents."
-                >
-                  {!isDisbursed && (
-                    <button onClick={() => openGuarantorModal(null)} className={ghostBtnCls}>
-                      <Plus className="w-3.5 h-3.5" /> Add Guarantor
-                    </button>
-                  )}
-                </EmptyState>
-              )}
             </div>
           </div>
+          )}
         </div>
         )}
 
         {activeTab === 2 && (
         /* Section 3: Credit History & Score (CBC) */
         <div className="space-y-4">
-          {/* One sub-tab per party, marked up as a real tablist so arrow keys move between
-              them and a screen reader announces the relationship to the sheet below. Which
-              tab is active is derived rather than stored, so removing the co-borrower's CBC
-              while its tab is open falls back to the borrower instead of leaving the panel
+          {/* Which tab is active is derived rather than stored, so removing the co-borrower's
+              CBC while its tab is open falls back to the borrower instead of leaving the panel
               pointed at a party that no longer has a section to show. */}
-          <div className="flex items-end justify-between gap-3 flex-wrap border-b border-slate-200 dark:border-slate-700">
-            <div role="tablist" aria-label="CBC report by party" onKeyDown={handleCbcTabKey} className="flex items-end gap-1 flex-wrap">
-              {cbcTargets.map(t => {
-                const count = cbcReportsOf(loan[CREDIT_HISTORY_FIELD[t]]).length
-                const active = t === activeCbcTarget
-                const person = resolveCbcPerson(t)
-                return (
-                  <button
-                    key={t}
-                    id={`cbc-tab-${t}`}
-                    role="tab"
-                    aria-selected={active}
-                    aria-controls={`cbc-panel-${t}`}
-                    // Roving tabindex: Tab reaches the bar, arrows move within it.
-                    tabIndex={active ? 0 : -1}
-                    ref={el => { cbcTabRefs.current[t] = el }}
-                    onClick={() => setCbcTarget(t)}
-                    className={`flex items-center gap-2 px-3.5 py-2 rounded-t-xl border-b-2 -mb-px transition-colors ${
-                      active
-                        ? 'border-[#0047ab] dark:border-blue-400 bg-blue-50/60 dark:bg-blue-900/20'
-                        : 'border-transparent hover:bg-slate-50 dark:hover:bg-slate-700/50'
-                    }`}
-                  >
-                    <div className="text-left min-w-0">
-                      <span className={`block text-xs font-bold leading-tight ${
-                        active ? 'text-[#0047ab] dark:text-blue-400' : 'text-slate-600 dark:text-slate-300'
-                      }`}>
-                        {CREDIT_HISTORY_LABEL[t]}
-                      </span>
-                      {/* Whose report this is. "Borrower" alone means checking somewhere else
-                          to find out which person's credit history is on screen. */}
-                      <span className="block text-[10px] font-medium text-slate-400 dark:text-slate-500 truncate max-w-[9rem] leading-tight">
-                        {person?.enName || 'Not on file'}
-                      </span>
-                    </div>
-                    {/* A bare "0" reads as a score or an amount. Nothing on file is said in
-                        words; a real count gets the pill. */}
-                    {count > 0 ? (
-                      <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold flex-shrink-0 ${
-                        active
-                          ? 'bg-[#0047ab] text-white dark:bg-blue-400 dark:text-slate-900'
-                          : 'bg-slate-100 text-slate-500 dark:bg-slate-700 dark:text-slate-300'
-                      }`}>
-                        {count}
-                      </span>
-                    ) : (
-                      <span className="text-[10px] font-semibold text-slate-400 dark:text-slate-500 flex-shrink-0">None</span>
-                    )}
-                  </button>
-                )
-              })}
-            </div>
-            {/* Adding the co-borrower creates a tab, so the action belongs beside the tabs
-                rather than buried in the borrower's own toolbar where it used to sit. */}
-            {!isDisbursed && !showCoBorrowerCbc && (
-              <button
-                onClick={() => { setShowCoBorrowerCbc(true); setCbcTarget('coBorrower') }}
-                className="flex items-center gap-1 mb-2 px-2.5 py-1.5 text-[11px] font-semibold rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
-              >
-                <Plus className="w-3.5 h-3.5" /> Add Co-Borrower
-              </button>
-            )}
-          </div>
+          <PartyTabs
+            idPrefix="cbc"
+            ariaLabel="CBC report by party"
+            activeId={activeCbcTarget}
+            onSelect={setCbcTarget}
+            items={cbcTargets.map(t => ({
+              id: t,
+              label: CREDIT_HISTORY_LABEL[t],
+              subtitle: resolveCbcPerson(t)?.enName,
+              count: cbcReportsOf(loan[CREDIT_HISTORY_FIELD[t]]).length,
+            }))}
+            actions={
+              /* Adding the co-borrower creates a tab, so the action belongs beside the tabs
+                 rather than buried in the borrower's own toolbar where it used to sit. Offered
+                 only when the loan actually has a co-borrower — one is added on the Customer
+                 tab, not here. */
+              !isDisbursed && hasCoBorrower && !showCoBorrowerCbc ? (
+                <AddMenu
+                  options={[{ id: 'coBorrower', label: 'Co-Borrower' }]}
+                  onSelect={() => { setShowCoBorrowerCbc(true); setCbcTarget('coBorrower') }}
+                  iconOnly
+                />
+              ) : null
+            }
+          />
           {[activeCbcTarget].map(target => {
             const info = loan[CREDIT_HISTORY_FIELD[target]]
             const reports = cbcReportsOf(info)
@@ -2116,24 +2081,31 @@ export default function LoanDetail() {
 
         {activeTab === 3 && (
         /* Section 3: Collateral */
-        <div>
-          {/* With nothing on file the empty state below already offers Add Collateral — a
-              second copy pinned to the top would just repeat it, so the toolbar only appears
-              once there is a collateral to add another alongside. */}
-          {!isDisbursed && collaterals.length > 0 && (
-            <div className="sticky top-0 z-10 -mx-6 px-6 py-3 bg-white dark:bg-slate-800 border-b border-slate-100 dark:border-slate-700 flex items-center justify-end">
-              <button
-                onClick={() => openCollateralModal(null)}
-                className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-semibold rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-600 transition-colors"
-              >
-                Add Collateral
-              </button>
-            </div>
-          )}
-          <div className="p-4">
-            {collaterals.length > 0 ? (
+        <div className="space-y-4 pt-4">
+          {/* One tab per collateral, named by what it is — a loan pledging land and a vehicle
+              says so on the bar rather than in the first row of each card. Nothing on file is
+              one blank tab, "Collateral N/A", holding the same layout the first real one will
+              fill; its Edit opens the add form, as on Income Verification. */}
+          <PartyTabs
+            idPrefix="collateral"
+            ariaLabel="Collateral"
+            activeId={activeCollateralId}
+            onSelect={setCollateralTab}
+            items={collateralCards.map((item, idx) => ({
+              id: String(idx),
+              label: `Collateral ${item.type || 'N/A'}`,
+              subtitle: item.docNo,
+              count: (item.documents || []).length,
+            }))}
+            actions={!isDisbursed ? (
+              <AddMenu options={[{ id: 'collateral', label: 'Collateral' }]} onSelect={() => openCollateralModal(null)} iconOnly />
+            ) : null}
+          />
+          <div>
               <div className="space-y-4">
-                {collaterals.map((item, idx) => {
+                {collateralCards.map((item, idx) => {
+                  if (String(idx) !== activeCollateralId) return null
+                  const blank = collaterals.length === 0
                   const { ownerName, matchesBorrower } = getCollateralOwnerInfo(item)
                   const rows = [
                     { label: 'Type', value: item.type || 'N/A' },
@@ -2186,23 +2158,34 @@ export default function LoanDetail() {
                   }
                   const collateralDocTypes = withUploadedDocTypes(getCollateralDocTypes(item.type), item.documents)
                   return (
-                  <div key={idx} className="border border-slate-100 dark:border-slate-700 rounded-xl overflow-hidden">
+                  <div
+                    key={idx}
+                    role="tabpanel"
+                    id={`collateral-panel-${idx}`}
+                    aria-labelledby={`collateral-tab-${idx}`}
+                    className="border border-slate-100 dark:border-slate-700 rounded-xl overflow-hidden"
+                  >
                     <div className="flex items-center justify-between px-3 py-2 bg-slate-50/70 dark:bg-slate-900/30">
                       <span className="text-xs font-semibold text-slate-700 dark:text-slate-200">{item.type || `Collateral ${idx + 1}`}</span>
+                      {/* On the blank card Edit opens the add form — there is nothing to change
+                          yet, but Edit is where an operator looks to enter it. Remove is left
+                          off: there is no record to remove. */}
                       {!isDisbursed && (
                         <div className="flex items-center gap-1.5">
                           <button
-                            onClick={() => openCollateralModal(idx)}
+                            onClick={() => openCollateralModal(blank ? null : idx)}
                             className="flex items-center gap-1 px-2 py-1 text-[11px] font-semibold rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-600 transition-colors"
                           >
                             <Pencil className="w-3 h-3" /> Edit
                           </button>
-                          <button
-                            onClick={() => handleRemoveCollateral(idx)}
-                            className="flex items-center gap-1 px-2 py-1 text-[11px] font-semibold rounded-lg border border-rose-200 dark:border-rose-800 text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-900/20 transition-colors"
-                          >
-                            <Trash2 className="w-3 h-3" /> Remove
-                          </button>
+                          {!blank && (
+                            <button
+                              onClick={() => handleRemoveCollateral(idx)}
+                              className="flex items-center gap-1 px-2 py-1 text-[11px] font-semibold rounded-lg border border-rose-200 dark:border-rose-800 text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-900/20 transition-colors"
+                            >
+                              <Trash2 className="w-3 h-3" /> Remove
+                            </button>
+                          )}
                         </div>
                       )}
                     </div>
@@ -2230,19 +2213,6 @@ export default function LoanDetail() {
                   )
                 })}
               </div>
-            ) : (
-              <EmptyState
-                icon={Building}
-                title="No collateral recorded for this loan"
-                hint="Add land, a house or a vehicle — its appraised value sets the loan-to-value ratio used in the assessment."
-              >
-                {!isDisbursed && (
-                  <button onClick={() => openCollateralModal(null)} className={ghostBtnCls}>
-                    <Plus className="w-3.5 h-3.5" /> Add Collateral
-                  </button>
-                )}
-              </EmptyState>
-            )}
           </div>
         </div>
         )}
@@ -2277,15 +2247,36 @@ export default function LoanDetail() {
         )}
 
         {activeTab === 6 && (
-        /* Section 6: Loan Assessment — the verification verdict, then rate adjustment (left)
-           and repayment capacity & benefit to the bank (right). The verdict leads because it is
-           what the terms below have to be justified against. */
-        <div className="pt-6">
-          <CreditVerificationPanel loan={loan} currency={currency} />
-        </div>
-        )}
-        {activeTab === 6 && (
-        <div className="grid grid-cols-1 lg:grid-cols-10 gap-4 items-start pt-4">
+        /* Section 6: Loan Suggestion — the verification verdict, and the rates/terms the
+           officer sets against it. The two used to run one under the other on a single very
+           long page; they are now a sub-tab each, on the same bar the CBC tab uses. Credit
+           Assessment leads because it is what the terms have to be justified against. */
+        <div className="pt-6 space-y-4">
+          <PartyTabs
+            idPrefix="suggestion-section"
+            ariaLabel="Loan suggestion sections"
+            activeId={suggestionSection}
+            onSelect={setSuggestionSection}
+            showMeta={false}
+            items={[
+              { id: 'assessment', label: 'Credit Assessment' },
+              { id: 'terms', label: 'Rates & Terms' },
+            ]}
+          />
+
+          {suggestionSection === 'assessment' && (
+            <div role="tabpanel" id="suggestion-section-panel-assessment" aria-labelledby="suggestion-section-tab-assessment">
+              <CreditVerificationPanel loan={loan} currency={currency} />
+            </div>
+          )}
+
+          {suggestionSection === 'terms' && (
+          <div
+            role="tabpanel"
+            id="suggestion-section-panel-terms"
+            aria-labelledby="suggestion-section-tab-terms"
+            className="grid grid-cols-1 lg:grid-cols-10 gap-4 items-start"
+          >
           {/* Left: adjust loan product rate and benefit rate */}
           <div className="lg:col-span-3 space-y-4">
             <div className="rounded-xl overflow-hidden border border-slate-100 dark:border-slate-700">
@@ -2631,6 +2622,8 @@ export default function LoanDetail() {
               </div>
             </div>
           </div>
+          </div>
+          )}
         </div>
         )}
 

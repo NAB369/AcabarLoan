@@ -3,7 +3,7 @@ import { X, Pencil, User } from 'lucide-react'
 import { useApp } from '../../context/AppContext'
 import StatusBadge from '../shared/StatusBadge'
 import PersonInfoGrid from '../shared/PersonInfoGrid'
-import IdentityDocumentsTable from '../shared/IdentityDocumentsTable'
+import IdentityDocumentsTable, { hasUploadedDocs } from '../shared/IdentityDocumentsTable'
 import { formatAddress } from '../../utils/format'
 import { IDENTITY_DOC_TYPES } from '../../data/constants'
 import { getCustomerStatus } from '../../utils/customerStatus'
@@ -43,6 +43,10 @@ export default function CustomerPreview() {
     ? [...IDENTITY_DOC_TYPES.slice(0, -1), 'Marriage Certificate', IDENTITY_DOC_TYPES[IDENTITY_DOC_TYPES.length - 1]]
     : IDENTITY_DOC_TYPES
   ).filter(t => t !== 'Other')
+
+  // Nothing uploaded, nothing to show — the header's Edit button is still the way in to add
+  // the first document.
+  const showDocuments = hasUploadedDocs(customer.documents)
 
   function handleViewDoc(doc, isImage) {
     if (isImage && doc.dataUrl) {
@@ -111,21 +115,23 @@ export default function CustomerPreview() {
             />
           </div>
 
-          <div className="space-y-2">
-            <div className="flex items-center justify-between px-1 gap-2">
-              <div>
-                <span className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide">Identity Documents</span>
-                <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">Documents used to verify the customer's identity.</p>
+          {showDocuments && (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between px-1 gap-2">
+                <div>
+                  <span className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide">Identity Documents</span>
+                  <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">Documents used to verify the customer's identity.</p>
+                </div>
+                <button
+                  onClick={openEdit}
+                  className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-semibold rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors flex-shrink-0"
+                >
+                  Add Document
+                </button>
               </div>
-              <button
-                onClick={openEdit}
-                className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-semibold rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors flex-shrink-0"
-              >
-                Add Document
-              </button>
+              <IdentityDocumentsTable docTypes={docTypes} documents={customer.documents} onView={handleViewDoc} />
             </div>
-            <IdentityDocumentsTable docTypes={docTypes} documents={customer.documents} onView={handleViewDoc} />
-          </div>
+          )}
         </div>
       </div>
     </div>

@@ -1,7 +1,7 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useRef, useLayoutEffect } from 'react'
 import {
   FileText, AlertTriangle, Clock, Landmark, ChevronLeft, Calendar, BarChart3, Activity,
-  ChevronDown, ChevronRight, ArrowRight, Printer, Download,
+  ChevronDown, ChevronRight, Printer, Download,
   Users, Banknote, CheckCircle, ClipboardList, Percent, Wallet, ShieldAlert,
 } from 'lucide-react'
 import jsPDF from 'jspdf'
@@ -16,7 +16,7 @@ import ReportCard from './ReportCard'
 // One definition drives the report selector, the report listing table and the
 // rendered body below — adding a report here puts it in all three at once.
 const REPORT_TABS = [
-  { id: 'listing',            label: 'Report Listing',                 icon: ClipboardList,     category: 'Overview',    description: 'Index of every loan report in this module' },
+  { id: 'listing',            label: 'Report Overview',                icon: ClipboardList,     category: 'Overview',    description: 'Index of every loan report in this module' },
   { id: 'collection-sheet',   label: 'Collection Sheet — Due & Overdue', icon: Clock,           category: 'Operations',  description: 'Installments due and overdue, for field collection' },
   { id: 'transactions',       label: 'Transaction Report',             icon: Activity,          category: 'Operations',  description: 'Repayments and disbursements over a date range' },
   { id: 'arrears',            label: 'Arrears & Portfolio at Risk',    icon: AlertTriangle,     category: 'Credit Risk', description: 'PAR aging and classification, grouped as needed' },
@@ -28,8 +28,9 @@ const REPORT_TABS = [
   { id: 'closed-loans',       label: 'Closed Loans',                   icon: CheckCircle,       category: 'Lifecycle',   description: 'Loans paid off in full or written off' },
 ]
 
-// Selector option groups, in the order they appear in the dropdown.
-const REPORT_CATEGORIES = ['Overview', 'Operations', 'Credit Risk', 'Portfolio', 'Lifecycle']
+// The categories above run Overview → Operations → Credit Risk → Portfolio → Lifecycle, and
+// REPORT_TABS is listed in that order. The tab strip renders it as-is, so keep new reports
+// next to their category rather than appending to the end.
 
 const BREAKDOWN_SORTING_LABELS = {
   gender: 'Gender',
@@ -157,102 +158,162 @@ function KpiCard({ label, value, sub, icon: Icon, iconBg, valueClass = 'text-2xl
   )
 }
 
-// Report selector — replaces the horizontal tab strip. Options are grouped by
-// category so the reports stay scannable in a single dropdown. It sits inside each
-// report's card header alongside that report's own filters (see FilterSelect, whose
-// proportions it matches), so there is only ever one filter row on screen.
-function ReportSelector({ value, onChange }) {
-  const active = REPORT_TABS.find(t => t.id === value) || REPORT_TABS[0]
-  const ActiveIcon = active.icon
+// Report Type — one horizontal row of tabs, with whatever does not fit behind a More menu
+// rather than a sideways scroll. A scrolling strip hides reports off the edge with nothing to
+// say they are there; a More button says how many are hidden and opens them in one click.
+//
+// How many fit is measured, not guessed: a hidden copy of the row is laid out at natural width
+// and its tabs are added up against the space available, reserving room for More itself. Until
+// that measurement lands (and where there is no layout to measure, as on a server render) every
+// tab renders, so nothing is ever unreachable.
+const TAB_GAP_PX = 4
+const MORE_WIDTH_PX = 104
 
-  return (
-    <div className="flex items-center gap-2">
-      <label htmlFor="loan-report-select" className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 whitespace-nowrap">
-        Report Type
-      </label>
-      <div className="relative w-56">
-        <ActiveIcon className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-brand-600 dark:text-brand-400" />
-        <select
-          id="loan-report-select"
-          value={value}
-          onChange={e => onChange(e.target.value)}
-          title={active.description}
-          className="w-full appearance-none pl-8 pr-8 py-1.5 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-500 cursor-pointer"
-        >
-          {REPORT_CATEGORIES.map(cat => {
-            const items = REPORT_TABS.filter(t => t.category === cat)
-            if (items.length === 0) return null
-            return (
-              <optgroup key={cat} label={cat}>
-                {items.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
-              </optgroup>
-            )
-          })}
-        </select>
-        <ChevronDown className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
-      </div>
-    </div>
-  )
+const tabCls = (active) => `px-3.5 py-2 text-xs font-semibold whitespace-nowrap rounded-2xl transition-colors ${
+  active
+    ? 'bg-brand-50 text-brand-600 dark:bg-brand-900/30 dark:text-brand-400'
+    : 'text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-700 hover:text-slate-700 dark:hover:text-slate-200'
+}`
+
+// Which tabs go on the row and which go behind More. The open report is always on the row,
+// never buried in the menu — the one tab that has to be visible is the one saying where you
+// are. It takes the last inline slot, and the tab it displaces drops into More in its declared
+// position rather than at the front, so the menu's order never shuffles as you move around.
+export function splitReportTabs(tabs, fitCount, activeId) {
+  const n = Math.max(1, Math.min(fitCount, tabs.length))
+  const head = tabs.slice(0, n)
+  const tail = tabs.slice(n)
+  if (!tail.some(t => t.id === activeId)) return { visible: head, overflow: tail }
+
+  const active = tail.find(t => t.id === activeId)
+  const displaced = head[head.length - 1]
+  const inTail = new Set(tail)
+  return {
+    visible: [...head.slice(0, -1), active],
+    overflow: tabs.filter(t => t.id !== activeId && (t === displaced || inTail.has(t))),
+  }
 }
 
-// Main report listing — the module's index. Every report is one row, with its
-// category, what it covers and how many records it currently holds.
-function ReportListingTable({ counts, onOpen, selector }) {
-  const rows = REPORT_TABS.filter(t => t.id !== 'listing')
+function ReportTypeTabs({ value, onChange }) {
+  const rowRef = useRef(null)
+  const measureRef = useRef(null)
+  const tabRefs = useRef({})
+  const [fitCount, setFitCount] = useState(REPORT_TABS.length)
+  const [moreOpen, setMoreOpen] = useState(false)
+  const ids = REPORT_TABS.map(t => t.id)
+
+  useLayoutEffect(() => {
+    const row = rowRef.current
+    const measure = measureRef.current
+    if (!row || !measure) return
+
+    function compute() {
+      const available = row.clientWidth
+      const widths = Array.from(measure.children).map(el => el.offsetWidth + TAB_GAP_PX)
+      let used = 0
+      let n = 0
+      for (let i = 0; i < widths.length; i++) {
+        // The last tab needs no room for More — if it fits, there is nothing to overflow.
+        const reserve = i === widths.length - 1 ? 0 : MORE_WIDTH_PX
+        if (used + widths[i] > available - reserve) break
+        used += widths[i]
+        n += 1
+      }
+      setFitCount(Math.max(1, n))
+    }
+
+    compute()
+    if (typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(compute)
+    ro.observe(row)
+    return () => ro.disconnect()
+  }, [])
+
+  const { visible, overflow } = splitReportTabs(REPORT_TABS, fitCount, value)
+
+  function handleKey(e) {
+    const step = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0
+    let next = null
+    if (e.key === 'Home') next = ids[0]
+    else if (e.key === 'End') next = ids[ids.length - 1]
+    else if (step) next = ids[(ids.indexOf(value) + step + ids.length) % ids.length]
+    if (!next) return
+    e.preventDefault()
+    onChange(next)
+    tabRefs.current[next]?.focus()
+  }
+
+  function pick(id) {
+    setMoreOpen(false)
+    onChange(id)
+  }
 
   return (
-    <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/60 dark:border-slate-700 shadow-sm overflow-hidden">
-      <div className="px-5 py-4 border-b border-slate-100 dark:border-slate-700 flex items-center gap-x-4 gap-y-2 flex-wrap">
-        {selector}
+    <div className="relative bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/60 dark:border-slate-700 shadow-sm px-3 py-2.5">
+      {/* Measured, never seen: the same tabs at natural width, so the row above knows what fits. */}
+      <div ref={measureRef} aria-hidden="true" className="absolute invisible pointer-events-none flex gap-1 whitespace-nowrap">
+        {REPORT_TABS.map(t => <span key={t.id} className={tabCls(false)}>{t.label}</span>)}
       </div>
-      {/* `min-w` is what makes the horizontal scroll real — a plain `w-full` table
-          compresses to the container instead of overflowing it. */}
-      <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
-        <table className="w-full min-w-[900px]">
-          <thead className="sticky top-0 z-10">
-            <tr>
-              <Th>No</Th>
-              <Th>Report</Th>
-              <Th>Category</Th>
-              <Th>Description</Th>
-              <Th right>Records</Th>
-              <Th right>Action</Th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
-            {rows.map((t, i) => (
-              <tr key={t.id} className="hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
-                <td className="px-4 py-3 text-xs text-slate-400 dark:text-slate-500">{i + 1}</td>
-                <td className="px-4 py-3">
-                  <div className="flex items-center gap-2.5">
-                    <div className="w-8 h-8 rounded-lg bg-brand-50 dark:bg-brand-900/30 flex items-center justify-center flex-shrink-0">
-                      <t.icon className="w-4 h-4 text-brand-600 dark:text-brand-400" />
-                    </div>
-                    <span className="text-xs font-bold text-slate-700 dark:text-slate-200 whitespace-nowrap">{t.label}</span>
-                  </div>
-                </td>
-                <td className="px-4 py-3">
-                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold border bg-slate-100 text-slate-600 border-slate-200 dark:bg-slate-700/50 dark:text-slate-300 dark:border-slate-600 whitespace-nowrap">
-                    {t.category}
-                  </span>
-                </td>
-                <td className="px-4 py-3 text-xs text-slate-500 dark:text-slate-400">{t.description}</td>
-                <td className="px-4 py-3 text-xs font-semibold text-slate-700 dark:text-slate-200 text-right">
-                  {counts[t.id] ?? '—'}
-                </td>
-                <td className="px-4 py-3 text-right">
-                  <button
-                    onClick={() => onOpen(t.id)}
-                    className="group inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold text-brand-600 dark:text-brand-400 bg-brand-50 dark:bg-brand-900/30 border border-brand-100 dark:border-brand-800 hover:bg-brand-100 dark:hover:bg-brand-900/50 transition-colors whitespace-nowrap"
-                  >
-                    View
-                    <ArrowRight className="w-3 h-3 group-hover:translate-x-0.5 transition-transform" />
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+
+      <div ref={rowRef} className="flex items-center gap-1 min-w-0">
+        <div role="tablist" aria-label="Report type" onKeyDown={handleKey} className="flex items-center gap-1 min-w-0">
+          {visible.map(t => {
+            const active = t.id === value
+            return (
+              <button
+                key={t.id}
+                id={`report-tab-${t.id}`}
+                role="tab"
+                aria-selected={active}
+                aria-controls="report-panel"
+                tabIndex={active ? 0 : -1}
+                ref={el => { tabRefs.current[t.id] = el }}
+                onClick={() => onChange(t.id)}
+                title={t.description}
+                className={tabCls(active)}
+              >
+                {t.label}
+              </button>
+            )
+          })}
+        </div>
+
+        {overflow.length > 0 && (
+          <div className="relative ml-auto flex-shrink-0">
+            <button
+              type="button"
+              onClick={() => setMoreOpen(o => !o)}
+              aria-expanded={moreOpen}
+              aria-haspopup="menu"
+              className={`flex items-center gap-1 ${tabCls(false)}`}
+            >
+              More
+              <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-500 dark:bg-slate-700 dark:text-slate-300">
+                {overflow.length}
+              </span>
+              <ChevronDown className={`w-3 h-3 transition-transform ${moreOpen ? 'rotate-180' : ''}`} />
+            </button>
+            {moreOpen && (
+              <>
+                {/* Catches the outside click. Under the menu, over everything else. */}
+                <div className="fixed inset-0 z-20" onClick={() => setMoreOpen(false)} />
+                <div role="menu" className="absolute right-0 mt-1 z-30 w-64 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl shadow-lg p-1 max-h-80 overflow-y-auto">
+                  {overflow.map(t => (
+                    <button
+                      key={t.id}
+                      role="menuitem"
+                      onClick={() => pick(t.id)}
+                      title={t.description}
+                      className="w-full text-left px-2.5 py-2 rounded-lg text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700/50 transition-colors"
+                    >
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        )}
       </div>
     </div>
   )
@@ -371,7 +432,7 @@ function PrintReportHeader({ title, meta }) {
 // up with the data. `reportTitle` names the sheet on paper and in the PDF; `meta` is the
 // one-line filter summary printed under it.
 function SimpleReportTable({ reportTitle, meta, count, columns, rows, toolbar, totals, emptyMessage = 'No records found.' }) {
-  const { state } = useApp()
+  const { state, showToast } = useApp()
   const { companyProfile } = state
   // Wide reports would clip on portrait A4 — those print and export landscape.
   const landscape = columns.length > 6
@@ -416,6 +477,9 @@ function SimpleReportTable({ reportTitle, meta, count, columns, rows, toolbar, t
     })
 
     doc.save(`${fileSlug(reportTitle)}.pdf`)
+    // A download is otherwise silent — the file lands in the browser's downloads with nothing
+    // on screen to say it worked.
+    showToast(`${reportTitle} downloaded`, 'success')
   }
 
   return (
@@ -732,26 +796,11 @@ export default function ReportsPage() {
     }
   }, [companyBaseRow])
 
-  // Record counts shown in the report listing table, keyed by report id.
-  const reportCounts = useMemo(() => ({
-    'collection-sheet':  COLLECTION_ROWS.length,
-    'transactions':      transactionRows.length,
-    'arrears':           PAR_ROWS.length,
-    'provision':         PAR_ROWS.length,
-    'portfolio-listing': companyBaseRow.accounts,
-    'portfolio-summary': companyBaseRow.accounts,
-    'schedule-maturity': combinedSchedule.length,
-    'disbursement':      disbursementRows.length,
-    'closed-loans':      CLOSED_LOAN_ROWS.length,
-  }), [transactionRows, companyBaseRow, combinedSchedule, disbursementRows])
-
   function openLoanReports() {
     selectTab('listing')
     setView('loan')
   }
 
-  // Rendered inside each report's own card header, ahead of that report's filters.
-  const reportTypeFilter = <ReportSelector value={reportTab} onChange={selectTab} />
 
   // Opening a report from the listing gives way to that report's own page. There the
   // "Loan Report" crumb is the way back, so the back arrow is dropped — it only appears
@@ -781,7 +830,7 @@ export default function ReportsPage() {
             <>
               <button
                 onClick={() => selectTab('listing')}
-                title="Back to Report Listing"
+                title="Back to Report Overview"
                 className="text-lg font-bold text-slate-400 dark:text-slate-500 hover:text-brand-600 dark:hover:text-brand-400 transition-colors flex-shrink-0"
               >
                 Loan Report
@@ -821,9 +870,19 @@ export default function ReportsPage() {
 
       {/* ── Loan Report ────────────────────────────────────────────────────── */}
       {view === 'loan' && (
-        <>
-          {/* KPI Row — the listing is the module's overview, so the KPIs belong to it.
-              A report opened from there is its own page and shows only that report. */}
+        // The tab row across the top, the open report underneath.
+        <div className="space-y-4">
+          <ReportTypeTabs value={reportTab} onChange={selectTab} />
+
+          <div
+            id="report-panel"
+            role="tabpanel"
+            aria-labelledby={`report-tab-${reportTab}`}
+            className="min-w-0 space-y-6"
+          >
+          {/* KPI Row — Report Overview is the module's landing view, and since the index table
+              came out these KPIs are what it shows. A report opened from the strip is its own
+              page and shows only that report. */}
           {!onReportPage && (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
             <KpiCard
@@ -857,11 +916,6 @@ export default function ReportsPage() {
           </div>
           )}
 
-          {/* Report Listing */}
-          {reportTab === 'listing' && (
-            <ReportListingTable counts={reportCounts} onOpen={selectTab} selector={reportTypeFilter} />
-          )}
-
           {/* Collection Sheet — Due & Overdue */}
           {reportTab === 'collection-sheet' && (
             <SimpleReportTable
@@ -869,7 +923,6 @@ export default function ReportsPage() {
               meta={`Status: ${collectionStatus === 'all' ? 'All' : collectionStatus} · Officer: ${collectionOfficer === 'all' ? 'All' : collectionOfficer} · Branch: ${collectionBranch === 'all' ? 'All' : collectionBranch}`}
               count={collectionRows.length}
               toolbar={<>
-                {reportTypeFilter}
                 <FilterSelect
                   label="Status" value={collectionStatus} onChange={setCollectionStatus} width="w-32"
                   options={[
@@ -918,7 +971,6 @@ export default function ReportsPage() {
               meta={`${effectiveTxFrom} to ${effectiveTxTo} · Type: ${txType === 'all' ? 'All' : txType}`}
               count={filteredTransactions.length}
               toolbar={<>
-                {reportTypeFilter}
                 <FilterSelect
                   label="Type" value={txType} onChange={setTxType} width="w-36"
                   options={[
@@ -956,7 +1008,7 @@ export default function ReportsPage() {
               reportTitle="Arrears & Portfolio at Risk"
               meta={`Grouped by ${activeArrearsGroup.label}`}
               count={arrearsRows.length}
-              toolbar={<>{reportTypeFilter}<FilterSelect
+              toolbar={<><FilterSelect
                 label="Group by" value={arrearsGroup} onChange={setArrearsGroup} width="w-40"
                 options={ARREARS_GROUPS.map(g => ({ value: g.value, label: g.label }))}
               /></>}
@@ -998,7 +1050,6 @@ export default function ReportsPage() {
               reportTitle="Loan Loss Provision"
               meta={`As of ${todayLabel}`}
               count={provisionRows.length}
-              toolbar={reportTypeFilter}
               columns={[
                 { key: 'classification', label: 'Classification', render: r => (
                   <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
@@ -1034,7 +1085,6 @@ export default function ReportsPage() {
               meta={`${isListingSummary ? 'Summary' : 'Detail'} by ${listingLabel}${listingFrom || listingTo ? ` · Disbursed ${listingFrom || 'start'} to ${listingTo || todayLabel}` : ''}`}
               count={isListingSummary ? breakdownSummaryRows.length : breakdownDetailRows.length}
               toolbar={<>
-                {reportTypeFilter}
                 <FilterSelect
                   label="Group by" value={listingSort} onChange={setListingSort} width="w-40"
                   options={Object.entries(BREAKDOWN_SORTING_LABELS).map(([value, label]) => ({ value, label }))}
@@ -1082,7 +1132,6 @@ export default function ReportsPage() {
               meta={`Grouped by ${activeSummaryGroup.label}${summaryFrom || summaryTo ? ` · Disbursed ${summaryFrom || 'start'} to ${summaryTo || todayLabel}` : ''}`}
               count={summaryRows.length}
               toolbar={<>
-                {reportTypeFilter}
                 <FilterSelect
                   label="Group by" value={summaryGroup} onChange={setSummaryGroup} width="w-44"
                   options={SUMMARY_GROUPS.map(g => ({ value: g.value, label: g.label }))}
@@ -1120,8 +1169,7 @@ export default function ReportsPage() {
                 reportTitle="Maturity Projection"
                 meta={`Installments falling due from ${todayLabel}`}
                 count={maturityRows.length}
-                toolbar={reportTypeFilter}
-                columns={[
+                  columns={[
                   { key: 'month', label: 'Month', className: 'font-semibold text-slate-700 dark:text-slate-200' },
                   { key: 'installments', label: '# Installments', right: true },
                   { key: 'principal', label: 'Principal', right: true, render: r => formatVal(r.principal, currency) },
@@ -1163,7 +1211,7 @@ export default function ReportsPage() {
               reportTitle="Disbursement Report"
               meta={`Stage: ${disburseStage === 'all' ? 'All' : disburseStage}`}
               count={filteredDisbursements.length}
-              toolbar={<>{reportTypeFilter}<FilterSelect
+              toolbar={<><FilterSelect
                 label="Stage" value={disburseStage} onChange={setDisburseStage} width="w-52"
                 options={[
                   { value: 'all', label: 'All Stages' },
@@ -1198,7 +1246,7 @@ export default function ReportsPage() {
               reportTitle="Closed Loans"
               meta={`Closure: ${closureType === 'all' ? 'All' : closureType}`}
               count={filteredClosures.length}
-              toolbar={<>{reportTypeFilter}<FilterSelect
+              toolbar={<><FilterSelect
                 label="Closure" value={closureType} onChange={setClosureType} width="w-40"
                 options={[
                   { value: 'all', label: 'All Closures' },
@@ -1226,7 +1274,8 @@ export default function ReportsPage() {
               emptyMessage="No closed loans for the selected filter."
             />
           )}
-        </>
+          </div>
+        </div>
       )}
 
       {/* ── Financial Report ──────────────────────────────────────────────── */}

@@ -4,7 +4,6 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Label } from '@/components/ui/label'
-import { nextRecId } from '../../context/AppContext'
 
 const fieldCls = 'w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500'
 const fieldLabelCls = 'block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1'
@@ -49,9 +48,6 @@ export function JournalEntryModal({ accounts, entries = [], onClose, onSubmit })
   // Proposed rather than fixed: the number is what the entry is referred to afterwards, and an
   // office running its own numbering has to be able to type theirs in.
   const [transactionNo, setTransactionNo] = useState(() => nextJournalNo(entries))
-  // What the stamper will assign on save, worked out the same way it does. Held from open so it
-  // does not shift under the operator while they fill the rest of the form in.
-  const [recId] = useState(() => nextRecId(entries))
   // The reference this posting came in on — a bank advice, a voucher, an invoice. Free text
   // because it belongs to whoever issued it, not to this system.
   const [trnRef, setTrnRef] = useState('')
@@ -106,18 +102,7 @@ export function JournalEntryModal({ accounts, entries = [], onClose, onSubmit })
   return (
     <ModalShell title="New Journal Entry" onClose={onClose} wide>
       <form onSubmit={handleSubmit} className="p-4 sm:p-6 space-y-4">
-        <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
-          <div>
-            {/* System-assigned and not editable: a record number identifies the row for the life
-                of the ledger, so it is handed out by the stamper in AppContext rather than typed.
-                Shown here so the officer knows the number before committing. */}
-            <Label className={fieldLabelCls} htmlFor="je-rec-id">RECID No</Label>
-            <Input
-              id="je-rec-id" value={recId} readOnly tabIndex={-1}
-              title="Assigned by the system when the entry is saved"
-              className={`${fieldCls} font-mono bg-slate-50 dark:bg-slate-900/40 text-slate-500 dark:text-slate-400 cursor-default`}
-            />
-          </div>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div>
             <Label className={fieldLabelCls} htmlFor="je-txn-no">Transaction No *</Label>
             <Input

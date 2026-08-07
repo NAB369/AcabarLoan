@@ -265,21 +265,20 @@ export default function CustomerWizard() {
 
             <Separator className="bg-slate-200 dark:bg-slate-700" />
 
-            <div className="flex items-center justify-end">
-              <Button
-                type="button"
-                variant="ghost"
-                onClick={() => setPermanentAddress({ ...currentAddress })}
-                className="h-auto w-auto p-0 text-[11px] font-semibold text-brand-600 dark:text-brand-400 hover:underline hover:bg-transparent"
-              >
-                Same as Current Address
-              </Button>
-            </div>
-
             <AddressFields
               label="Permanent Address"
               values={permanentAddress}
               onChange={setPermanentAddress}
+              action={(
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => setPermanentAddress({ ...currentAddress })}
+                  className="h-auto w-auto p-0 text-[11px] font-semibold text-brand-600 dark:text-brand-400 hover:underline hover:bg-transparent"
+                >
+                  Same as Current Address
+                </Button>
+              )}
             />
 
             <Separator className="bg-slate-200 dark:bg-slate-700" />

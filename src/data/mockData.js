@@ -266,69 +266,105 @@ export const INITIAL_ACCOUNTS = [
   { code:'ACC-EXPENSE',   name:'Expense Account',       balance:0 },
 ]
 
-// NBC-style Chart of Accounts — Asset/Liability/Equity/Income/Expense with parent/child
-// grouping. 5010 (Income) and 6010/6020/6030/6040 (Expense) mirror the operational
+// NBC-style Chart of Accounts, banded:
+//
+//   1000  Asset      — cash, bank, loan portfolio, receivables
+//   2000  Liability  — payables, tax, accumulated depreciation
+//   3000  Equity     — capital and retained earnings
+//   4000  Loan fees  — what the loan itself earns in fees, kept apart from interest
+//   5000  Income     — repayment and interest income
+//   6000  Expense    — disbursement, payroll, provision, and running costs
+//
+// 5010 (Income) and 6010/6020/6030/6040 (Expense) mirror the operational
 // ACC-REPAYMENT/ACC-LOAN/ACC-PAYROLL/ACC-UTILITY/ACC-EXPENSE sub-accounts above so loan
-// disbursement/repayment postings have somewhere to land in the GL.
+// disbursement/repayment postings have somewhere to land in the GL — that mirror is why
+// 6030 and 6040 stay even though no code names them: an expense booked to ACC-UTILITY has
+// nowhere else to sit. The named utilities below hang off 6030 rather than replacing it.
+//
+// An account carrying KHR takes its USD sibling's code + 1 (1010/1011, 5020/5021). Keep that
+// convention: fundingGLCode and the accrual postings pick the pair by currency.
 export const INITIAL_CHART_OF_ACCOUNTS = [
-  { code:'1010', type:'Asset',     name:'Cash on Hand',                nameKhmer:'', normalBalance:'DEBIT',  parentCode:'',     description:'',                                                              status:'ACTIVE', currency:'USD', balance:0 },
-  { code:'1020', type:'Asset',     name:'Bank Account (USD)',          nameKhmer:'', normalBalance:'DEBIT',  parentCode:'',     description:'',                                                              status:'ACTIVE', currency:'USD', balance:0 },
-  { code:'1021', type:'Asset',     name:'Bank Account (KHR)',          nameKhmer:'', normalBalance:'DEBIT',  parentCode:'',     description:'Bank account balance held in Khmer Riel.',                     status:'ACTIVE', currency:'KHR', balance:0 },
-  { code:'1100', type:'Asset',     name:'Loans Receivable',            nameKhmer:'', normalBalance:'DEBIT',  parentCode:'',     description:'Roll-up of all outstanding loan principal across products.',  status:'ACTIVE', currency:'USD', balance:0 },
-  { code:'1101', type:'Asset',     name:'Device Installment Loans',    nameKhmer:'', normalBalance:'DEBIT',  parentCode:'1100', description:'',                                                              status:'ACTIVE', currency:'USD', balance:0 },
-  { code:'1102', type:'Asset',     name:'Auto Loans',                  nameKhmer:'', normalBalance:'DEBIT',  parentCode:'1100', description:'',                                                              status:'ACTIVE', currency:'USD', balance:0 },
-  { code:'1103', type:'Asset',     name:'Land Purchase Loans',         nameKhmer:'', normalBalance:'DEBIT',  parentCode:'1100', description:'',                                                              status:'ACTIVE', currency:'USD', balance:0 },
-  { code:'1110', type:'Asset',     name:'Allowance for Loan Losses',   nameKhmer:'', normalBalance:'CREDIT', parentCode:'',     description:'Contra-asset — offsets Loans Receivable for expected credit losses.', status:'ACTIVE', currency:'USD', balance:0 },
+  // The six bands. Every account below hangs off one of them, so the chart reads as a tree
+  // rather than a run of codes whose grouping the reader has to infer from the first digit.
+  { code:'1000', type:'Asset', name:'Asset', nameKhmer:'', normalBalance:'DEBIT', parentCode:'', description:'Everything the branch owns: cash, bank balances, the loan book and what is owed to it.', status:'ACTIVE', currency:'USD', balance:0, level:'HEADER' },
+  { code:'2000', type:'Liability', name:'Liability', nameKhmer:'', normalBalance:'CREDIT', parentCode:'', description:'Everything the branch owes: payables, tax, and depreciation accumulated against its assets.', status:'ACTIVE', currency:'USD', balance:0, level:'HEADER' },
+  { code:'3000', type:'Equity', name:'Equity', nameKhmer:'', normalBalance:'CREDIT', parentCode:'', description:'Capital put in and profit kept back.', status:'ACTIVE', currency:'USD', balance:0, level:'HEADER' },
+  { code:'4000', type:'Income', name:'Loan Fee', nameKhmer:'', normalBalance:'CREDIT', parentCode:'', description:'What the loan earns in fees, kept apart from interest.', status:'ACTIVE', currency:'USD', balance:0, level:'HEADER' },
+  { code:'5000', type:'Income', name:'Income', nameKhmer:'', normalBalance:'CREDIT', parentCode:'', description:'What the loan book earns: repayment and interest income.', status:'ACTIVE', currency:'USD', balance:0, level:'HEADER' },
+  { code:'6000', type:'Expense', name:'Expense', nameKhmer:'', normalBalance:'DEBIT', parentCode:'', description:'What it costs to run the book and the branch.', status:'ACTIVE', currency:'USD', balance:0, level:'HEADER' },
+  { code:'1010', type:'Asset',     name:'Cash on Hand',                nameKhmer:'', normalBalance:'DEBIT',  parentCode:'1000',     description:'Notes and coins held in the branch, in US dollars.',            status:'ACTIVE', currency:'USD', balance:0 },
+  // The riel side of the cash float. A till holds both currencies physically, and a transfer
+  // between them is exactly the exchange the Cash Transfer screen is for — without this there
+  // was only a dollar cash account, so riel cash had nowhere to sit.
+  { code:'1011', type:'Asset',     name:'Cash on Hand (KHR)',          nameKhmer:'', normalBalance:'DEBIT',  parentCode:'1000',     description:'Notes and coins held in the branch, in Khmer Riel.',            status:'ACTIVE', currency:'KHR', balance:0 },
+  { code:'1020', type:'Asset',     name:'Bank Account (USD)',          nameKhmer:'', normalBalance:'DEBIT',  parentCode:'1000',     description:'',                                                              status:'ACTIVE', currency:'USD', balance:0 },
+  { code:'1021', type:'Asset',     name:'Bank Account (KHR)',          nameKhmer:'', normalBalance:'DEBIT',  parentCode:'1000',     description:'Bank account balance held in Khmer Riel.',                     status:'ACTIVE', currency:'KHR', balance:0 },
+  { code:'1100', type:'Asset',     name:'Loans Receivable',            nameKhmer:'', normalBalance:'DEBIT',  parentCode:'1000',     description:'Roll-up of all outstanding loan principal across products.',  status:'ACTIVE', currency:'USD', balance:0 },
+  { code:'1101', type:'Asset',     name:'Device Installment Loans',    nameKhmer:'', normalBalance:'DEBIT',  parentCode:'1000', description:'',                                                              status:'ACTIVE', currency:'USD', balance:0 },
+  { code:'1102', type:'Asset',     name:'Auto Loans',                  nameKhmer:'', normalBalance:'DEBIT',  parentCode:'1000', description:'',                                                              status:'ACTIVE', currency:'USD', balance:0 },
+  { code:'1103', type:'Asset',     name:'Land Purchase Loans',         nameKhmer:'', normalBalance:'DEBIT',  parentCode:'1000', description:'',                                                              status:'ACTIVE', currency:'USD', balance:0 },
+  { code:'1110', type:'Asset',     name:'Allowance for Loan Losses',   nameKhmer:'', normalBalance:'CREDIT', parentCode:'1000',     description:'Contra-asset — offsets Loans Receivable for expected credit losses.', status:'ACTIVE', currency:'USD', balance:0 },
   { code:'1111', type:'Asset',     name:'Stage 1 Allowance',           nameKhmer:'', normalBalance:'CREDIT', parentCode:'1110', description:'',                                                              status:'ACTIVE', currency:'USD', balance:0 },
   { code:'1112', type:'Asset',     name:'Stage 2 Allowance',           nameKhmer:'', normalBalance:'CREDIT', parentCode:'1110', description:'',                                                              status:'ACTIVE', currency:'USD', balance:0 },
   { code:'1113', type:'Asset',     name:'Stage 3 Allowance',           nameKhmer:'', normalBalance:'CREDIT', parentCode:'1110', description:'',                                                              status:'ACTIVE', currency:'USD', balance:0 },
-  { code:'1120', type:'Asset',     name:'Interest Receivable (Accrued)', nameKhmer:'', normalBalance:'DEBIT', parentCode:'',    description:'Interest earned but not yet collected. Debited by the End of Day accrual, cleared as repayments come in.', status:'ACTIVE', currency:'USD', balance:0 },
+  { code:'1120', type:'Asset',     name:'Interest Receivable (Accrued)', nameKhmer:'', normalBalance:'DEBIT', parentCode:'1000',    description:'Interest earned but not yet collected. Debited by the End of Day accrual, cleared as repayments come in.', status:'ACTIVE', currency:'USD', balance:0 },
   // The riel side of the accrued-interest pair, so a KHR loan's daily accrual posts against
   // an account of its own currency instead of landing in the USD one. Nothing in the loan
   // seed is booked in riel, so it starts at zero — same as 1131/6021.
-  { code:'1121', type:'Asset',     name:'Interest Receivable (Accrued) (KHR)', nameKhmer:'', normalBalance:'DEBIT', parentCode:'', description:'Interest earned but not yet collected on riel loans. Debited by the End of Day accrual.', status:'ACTIVE', currency:'KHR', balance:0 },
+  { code:'1121', type:'Asset',     name:'Interest Receivable (Accrued) (KHR)', nameKhmer:'', normalBalance:'DEBIT', parentCode:'1000', description:'Interest earned but not yet collected on riel loans. Debited by the End of Day accrual.', status:'ACTIVE', currency:'KHR', balance:0 },
   // The two loan-book control accounts. Their balances mirror the Loan Account Management
   // cards: Account Receivable is principal released and not yet collected back, Account
   // Payable is principal approved and not yet released. The seeds below are the totals of
   // INITIAL_LOANS — 1130 is the sum of every active loan's outstanding balance, 2030 the
   // sum of every loan still sitting in 'Waiting Disburse'.
-  { code:'1130', type:'Asset',     name:'Account Receivable — Loan Repayment', nameKhmer:'', normalBalance:'DEBIT', parentCode:'', description:'Principal out with borrowers. Debited when a loan is disbursed, credited by the principal each repayment retires.', status:'ACTIVE', currency:'USD', balance:0 },
+  { code:'1130', type:'Asset',     name:'Account Receivable — Loan Repayment', nameKhmer:'', normalBalance:'DEBIT', parentCode:'1000', description:'Principal out with borrowers. Debited when a loan is disbursed, credited by the principal each repayment retires.', status:'ACTIVE', currency:'USD', balance:0 },
   // The KHR side of the receivable, so the KHR receivable account below has a GL of its own
   // currency to link to. Nothing in the loan seed is booked in riel, so it starts at zero.
-  { code:'1131', type:'Asset',     name:'Account Receivable — Loan Repayment (KHR)', nameKhmer:'', normalBalance:'DEBIT', parentCode:'', description:'Principal out with borrowers on riel loans. Debited on disbursement, credited by the principal each repayment retires.', status:'ACTIVE', currency:'KHR', balance:0 },
+  { code:'1131', type:'Asset',     name:'Account Receivable — Loan Repayment (KHR)', nameKhmer:'', normalBalance:'DEBIT', parentCode:'1000', description:'Principal out with borrowers on riel loans. Debited on disbursement, credited by the principal each repayment retires.', status:'ACTIVE', currency:'KHR', balance:0 },
   // The allowance the End of Month batch provisions against, paired with 1130/1131 rather
   // than the 1110 block above. 1110 and its stage children are a static demo figure for the
   // 1100 "Loans Receivable" roll-up (a 4.85M book) — provisioning the handful of loans this
   // app actually tracks against it would post a six-figure release on the first EOM run.
   // These start at zero so the allowance grows with the book the app really carries.
-  { code:'1132', type:'Asset',     name:'Allowance for Loan Losses — Loan Repayment', nameKhmer:'', normalBalance:'CREDIT', parentCode:'', description:'Contra-asset offsetting 1130. Credited by the End of Month provisioning run as the required allowance rises.', status:'ACTIVE', currency:'USD', balance:0 },
-  { code:'1133', type:'Asset',     name:'Allowance for Loan Losses — Loan Repayment (KHR)', nameKhmer:'', normalBalance:'CREDIT', parentCode:'', description:'Contra-asset offsetting 1131, provisioned at End of Month.', status:'ACTIVE', currency:'KHR', balance:0 },
-  { code:'2010', type:'Liability', name:'Customer Deposits Payable',   nameKhmer:'', normalBalance:'CREDIT', parentCode:'',     description:'',                                                              status:'ACTIVE', currency:'USD', balance:0 },
-  { code:'2020', type:'Liability', name:'Borrowings',                  nameKhmer:'', normalBalance:'CREDIT', parentCode:'',     description:'',                                                              status:'ACTIVE', currency:'USD', balance:0 },
-  { code:'2030', type:'Liability', name:'Account Payable — Loan Disbursement', nameKhmer:'', normalBalance:'CREDIT', parentCode:'', description:'Approved loan principal the company still owes borrowers. Credited on final approval, debited when the loan is disbursed.', status:'ACTIVE', currency:'USD', balance:0 },
-  { code:'3010', type:'Equity',    name:'Share Capital',                nameKhmer:'', normalBalance:'CREDIT', parentCode:'',     description:'',                                                              status:'ACTIVE', currency:'USD', balance:0 },
-  { code:'3020', type:'Equity',    name:'Retained Earnings',            nameKhmer:'', normalBalance:'CREDIT', parentCode:'',     description:'',                                                              status:'ACTIVE', currency:'USD', balance:0 },
-  { code:'5010', type:'Income',    name:'Repayment Account',            nameKhmer:'', normalBalance:'CREDIT', parentCode:'',     description:'Receives all borrower loan repayments.',                       status:'ACTIVE', currency:'USD', balance:0 },
+  { code:'1132', type:'Asset',     name:'Allowance for Loan Losses — Loan Repayment', nameKhmer:'', normalBalance:'CREDIT', parentCode:'1000', description:'Contra-asset offsetting 1130. Credited by the End of Month provisioning run as the required allowance rises.', status:'ACTIVE', currency:'USD', balance:0 },
+  { code:'1133', type:'Asset',     name:'Allowance for Loan Losses — Loan Repayment (KHR)', nameKhmer:'', normalBalance:'CREDIT', parentCode:'1000', description:'Contra-asset offsetting 1131, provisioned at End of Month.', status:'ACTIVE', currency:'KHR', balance:0 },
+  { code:'2010', type:'Liability', name:'Customer Deposits Payable',   nameKhmer:'', normalBalance:'CREDIT', parentCode:'2000',     description:'',                                                              status:'ACTIVE', currency:'USD', balance:0 },
+  { code:'2020', type:'Liability', name:'Borrowings',                  nameKhmer:'', normalBalance:'CREDIT', parentCode:'2000',     description:'',                                                              status:'ACTIVE', currency:'USD', balance:0 },
+  { code:'2030', type:'Liability', name:'Account Payable — Loan Disbursement', nameKhmer:'', normalBalance:'CREDIT', parentCode:'2000', description:'Approved loan principal the company still owes borrowers. Credited on final approval, debited when the loan is disbursed.', status:'ACTIVE', currency:'USD', balance:0 },
+  // Tax withheld or assessed and not yet paid over. Credit-normal, like the payables above it.
+  { code:'2040', type:'Liability', name:'Tax Payable',                 nameKhmer:'', normalBalance:'CREDIT', parentCode:'2000',     description:'Tax assessed or withheld and not yet paid to the authority.', status:'ACTIVE', currency:'USD', balance:0 },
+  { code:'2041', type:'Liability', name:'Tax Payable (KHR)',           nameKhmer:'', normalBalance:'CREDIT', parentCode:'2000',     description:'Tax assessed or withheld and not yet paid, in Khmer Riel.', status:'ACTIVE', currency:'KHR', balance:0 },
+  // Depreciation accumulated against fixed assets. A contra-asset by nature, but credit-normal,
+  // so it is carried with the other credit-normal accounts rather than netted into 1000.
+  { code:'2050', type:'Liability', name:'Accumulated Depreciation',    nameKhmer:'', normalBalance:'CREDIT', parentCode:'2000',     description:'Depreciation accumulated to date against fixed assets.', status:'ACTIVE', currency:'USD', balance:0 },
+  { code:'3010', type:'Equity',    name:'Share Capital',                nameKhmer:'', normalBalance:'CREDIT', parentCode:'3000',     description:'',                                                              status:'ACTIVE', currency:'USD', balance:0 },
+  { code:'3020', type:'Equity',    name:'Retained Earnings',            nameKhmer:'', normalBalance:'CREDIT', parentCode:'3000',     description:'',                                                              status:'ACTIVE', currency:'USD', balance:0 },
+  // What the loan earns in fees, banded away from interest so a fee-heavy book is visible at a
+  // glance in the P&L. Moved here from 5030/5031 — see renumberFeeIncome in AppContext.jsx.
+  { code:'4010', type:'Income',    name:'Loan Fee Income',              nameKhmer:'', normalBalance:'CREDIT', parentCode:'4000',     description:'Fees earned on refinancing and other restructuring.', status:'ACTIVE', currency:'USD', balance:0 },
+  { code:'4011', type:'Income',    name:'Loan Fee Income (KHR)',        nameKhmer:'', normalBalance:'CREDIT', parentCode:'4000',     description:'Restructuring fees earned on riel loans.', status:'ACTIVE', currency:'KHR', balance:0 },
+  { code:'5010', type:'Income',    name:'Repayment Account',            nameKhmer:'', normalBalance:'CREDIT', parentCode:'5000',     description:'Receives all borrower loan repayments.',                       status:'ACTIVE', currency:'USD', balance:0 },
   // Interest the loan book has earned but not yet been paid. Kept apart from 5010 on
   // purpose: 5010 is cash actually collected, this is the accrual the End of Day batch
   // recognises against it. Merging them would make collected and earned indistinguishable.
-  { code:'5020', type:'Income',    name:'Interest Income (Accrued)',    nameKhmer:'', normalBalance:'CREDIT', parentCode:'',     description:'Interest earned on outstanding principal, recognised daily by the End of Day batch.', status:'ACTIVE', currency:'USD', balance:0 },
-  { code:'5021', type:'Income',    name:'Interest Income (Accrued) (KHR)', nameKhmer:'', normalBalance:'CREDIT', parentCode:'',  description:'Interest earned on outstanding riel principal, recognised daily by the End of Day batch.', status:'ACTIVE', currency:'KHR', balance:0 },
+  { code:'5020', type:'Income',    name:'Interest Income (Accrued)',    nameKhmer:'', normalBalance:'CREDIT', parentCode:'5000',     description:'Interest earned on outstanding principal, recognised daily by the End of Day batch.', status:'ACTIVE', currency:'USD', balance:0 },
+  { code:'5021', type:'Income',    name:'Interest Income (Accrued) (KHR)', nameKhmer:'', normalBalance:'CREDIT', parentCode:'5000',  description:'Interest earned on outstanding riel principal, recognised daily by the End of Day batch.', status:'ACTIVE', currency:'KHR', balance:0 },
   // Fees charged on restructuring rather than on lending — the refinance fee lands here, kept
   // out of 5010 because that account is borrower repayments and a fee is not one.
-  { code:'5030', type:'Income',    name:'Loan Fee Income',              nameKhmer:'', normalBalance:'CREDIT', parentCode:'',     description:'Fees earned on refinancing and other restructuring.', status:'ACTIVE', currency:'USD', balance:0 },
-  { code:'5031', type:'Income',    name:'Loan Fee Income (KHR)',        nameKhmer:'', normalBalance:'CREDIT', parentCode:'',     description:'Restructuring fees earned on riel loans.', status:'ACTIVE', currency:'KHR', balance:0 },
-  { code:'6010', type:'Expense',   name:'Loan Release Account',         nameKhmer:'', normalBalance:'DEBIT',  parentCode:'',     description:'Funds loan principal on disbursement.',                        status:'ACTIVE', currency:'USD', balance:0 },
-  { code:'6020', type:'Expense',   name:'Payroll Account',              nameKhmer:'', normalBalance:'DEBIT',  parentCode:'',     description:'Funds staff salaries.',                                        status:'ACTIVE', currency:'USD', balance:0 },
+  { code:'6010', type:'Expense',   name:'Loan Release Account',         nameKhmer:'', normalBalance:'DEBIT',  parentCode:'6000',     description:'Funds loan principal on disbursement.',                        status:'ACTIVE', currency:'USD', balance:0 },
+  { code:'6020', type:'Expense',   name:'Payroll Account',              nameKhmer:'', normalBalance:'DEBIT',  parentCode:'6000',     description:'Funds staff salaries.',                                        status:'ACTIVE', currency:'USD', balance:0 },
   // The KHR side of the payroll account, so the KHR payroll card has a GL of its own
   // currency to link to. Nothing in the seed pays a riel salary, so it starts at zero.
-  { code:'6021', type:'Expense',   name:'Payroll Account (KHR)',        nameKhmer:'', normalBalance:'DEBIT',  parentCode:'',     description:'Funds staff salaries paid in Khmer Riel.',                    status:'ACTIVE', currency:'KHR', balance:0 },
-  { code:'6030', type:'Expense',   name:'Utility Account',              nameKhmer:'', normalBalance:'DEBIT',  parentCode:'',     description:'Funds utility bills.',                                         status:'ACTIVE', currency:'USD', balance:0 },
-  { code:'6040', type:'Expense',   name:'Expense Account',              nameKhmer:'', normalBalance:'DEBIT',  parentCode:'',     description:'Funds general operating expenses.',                           status:'ACTIVE', currency:'USD', balance:0 },
+  { code:'6021', type:'Expense',   name:'Payroll Account (KHR)',        nameKhmer:'', normalBalance:'DEBIT',  parentCode:'6000',     description:'Funds staff salaries paid in Khmer Riel.',                    status:'ACTIVE', currency:'KHR', balance:0 },
+  { code:'6030', type:'Expense',   name:'Utility Account',              nameKhmer:'', normalBalance:'DEBIT',  parentCode:'6000',     description:'Funds utility bills.',                                         status:'ACTIVE', currency:'USD', balance:0 },
+  { code:'6031', type:'Expense',   name:'Water',                        nameKhmer:'', normalBalance:'DEBIT',  parentCode:'6030', description:'Water supply charges for the branch.', status:'ACTIVE', currency:'USD', balance:0 },
+  { code:'6032', type:'Expense',   name:'Electricity',                  nameKhmer:'', normalBalance:'DEBIT',  parentCode:'6030', description:'Electricity charges for the branch.', status:'ACTIVE', currency:'USD', balance:0 },
+  { code:'6033', type:'Expense',   name:'Fuel & Gasoline',              nameKhmer:'', normalBalance:'DEBIT',  parentCode:'6030', description:'Fuel for branch vehicles and field visits.', status:'ACTIVE', currency:'USD', balance:0 },
+  { code:'6040', type:'Expense',   name:'Expense Account',              nameKhmer:'', normalBalance:'DEBIT',  parentCode:'6000',     description:'Funds general operating expenses.',                           status:'ACTIVE', currency:'USD', balance:0 },
   // The charge side of loan-loss provisioning. The End of Month batch debits this by
   // whatever the required allowance moved, crediting 1132 (USD) / 1133 (KHR).
-  { code:'6050', type:'Expense',   name:'Loan Loss Provision Expense',  nameKhmer:'', normalBalance:'DEBIT',  parentCode:'',     description:'Charge recognised when the required loan-loss allowance rises at End of Month.', status:'ACTIVE', currency:'USD', balance:0 },
-  { code:'6051', type:'Expense',   name:'Loan Loss Provision Expense (KHR)', nameKhmer:'', normalBalance:'DEBIT', parentCode:'', description:'Provision charge on riel loans, recognised at End of Month.', status:'ACTIVE', currency:'KHR', balance:0 },
+  { code:'6050', type:'Expense',   name:'Loan Loss Provision Expense',  nameKhmer:'', normalBalance:'DEBIT',  parentCode:'6000',     description:'Charge recognised when the required loan-loss allowance rises at End of Month.', status:'ACTIVE', currency:'USD', balance:0 },
+  { code:'6051', type:'Expense',   name:'Loan Loss Provision Expense (KHR)', nameKhmer:'', normalBalance:'DEBIT', parentCode:'6000', description:'Provision charge on riel loans, recognised at End of Month.', status:'ACTIVE', currency:'KHR', balance:0 },
 ]
 
 // Real-world bank accounts, each linked to a USD and a KHR GL code from the chart above.
@@ -510,13 +546,18 @@ export const INITIAL_PERMISSION_LABELS = {
   disburse_loan:     'Disburse Loan',
   manage_accounting: 'Manage Income & Expense',
   write_off:         'Write Off Loan',
+  request_restructure: 'Request Loan Restructure',
   run_operations:    'Run EOD/EOM Operations',
   view_accounting:   'View Accounting Module',
 }
 
 export const INITIAL_ROLE_MATRIX = {
-  'Admin':          { add_customer:true,  open_loan:true,  review_loan:true,  disburse_loan:true,  manage_accounting:true,  write_off:true,  run_operations:true,  view_accounting:true  },
-  'Credit Officer': { add_customer:true,  open_loan:true,  review_loan:false, disburse_loan:false, manage_accounting:false, write_off:false, run_operations:false, view_accounting:false },
-  'Credit Manager': { add_customer:false, open_loan:false, review_loan:true,  disburse_loan:false, manage_accounting:false, write_off:true,  run_operations:true,  view_accounting:true  },
-  'Accountant':     { add_customer:false, open_loan:false, review_loan:false, disburse_loan:true,  manage_accounting:true,  write_off:false, run_operations:true,  view_accounting:true  },
+  // request_restructure rewrites a live loan's contract terms, so it sits with the other
+  // decisions on an existing loan (review, write-off) rather than with origination: the
+  // manager who owns the credit decision, and Admin. Toggle it per role in
+  // Settings > Roles & Permissions — this matrix is the seed, not a lock.
+  'Admin':          { add_customer:true,  open_loan:true,  review_loan:true,  disburse_loan:true,  manage_accounting:true,  write_off:true,  request_restructure:true,  run_operations:true,  view_accounting:true  },
+  'Credit Officer': { add_customer:true,  open_loan:true,  review_loan:false, disburse_loan:false, manage_accounting:false, write_off:false, request_restructure:false, run_operations:false, view_accounting:false },
+  'Credit Manager': { add_customer:false, open_loan:false, review_loan:true,  disburse_loan:false, manage_accounting:false, write_off:true,  request_restructure:true,  run_operations:true,  view_accounting:true  },
+  'Accountant':     { add_customer:false, open_loan:false, review_loan:false, disburse_loan:true,  manage_accounting:true,  write_off:false, request_restructure:false, run_operations:true,  view_accounting:true  },
 }

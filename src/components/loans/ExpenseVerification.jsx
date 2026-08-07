@@ -1,11 +1,14 @@
 import { useState, useMemo, useEffect } from 'react'
 import {
-  Wallet, Pencil, Trash2, Plus,
+  Wallet, Pencil, Trash2,
   Download, Eye, CheckCircle2, AlertTriangle, Info, Calendar,
 } from 'lucide-react'
 import { formatVal } from '../../utils/format'
 import { VerificationBadge, descriptionToneCls } from '../shared/DocBadges'
 import { EXPENSE_TARGETS, EXPENSE_FIELD, EXPENSE_LABEL, EXPENSE_DOC_TYPES } from '../../utils/expense'
+import { hasParty, partyName } from '../../utils/loanParties'
+import PartyTabs from './PartyTabs'
+import AddMenu from './AddMenu'
 import { combineStatementAnalyses, detectBankFromFileName, formatMonth } from '../../utils/parseBankStatement'
 import {
   assessStatementExpense, deriveStatementExpense, EXPENSE_MONTHS_REQUIRED, EXPENSE_STATUS,
@@ -19,8 +22,6 @@ import {
 
 const cardCls = 'bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl'
 const ghostBtnCls = 'flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-semibold rounded-xl border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors'
-// The Collateral tab's Add button, to the letter — the two tabs share the same sticky bar.
-const addBtnCls = 'flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-semibold rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-600 transition-colors'
 
 function isImageDoc(doc) {
   return !!doc && (doc.mimeType?.startsWith('image/') || /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(doc.name || ''))
@@ -103,12 +104,19 @@ export default function ExpenseVerification({
     .filter(target => loan[EXPENSE_FIELD[target]])
     .map(target => ({ key: target, target, info: loan[EXPENSE_FIELD[target]], label: EXPENSE_LABEL[target] })), [loan])
 
+  // With nothing recorded the tab still renders its real layout against a blank record, rather
+  // than a placeholder card — see IncomeVerification, which this tab matches. `blank` is what
+  // tells the panel there is no record behind it to edit or remove.
+  const BLANK = { key: 'borrower', target: 'borrower', info: {}, label: EXPENSE_LABEL.borrower, blank: true }
+  const tabEntries = entries.length ? entries : [BLANK]
+
   const [activeKey, setActiveKey] = useState(entries[0]?.key || '')
-  const active = entries.find(e => e.key === activeKey) || entries[0] || null
+  const active = tabEntries.find(e => e.key === activeKey) || tabEntries[0]
 
   // A party holds one expense record, so only the parties without one can still be added — the
-  // rest are reached through their own tab's Edit.
-  const addTargets = EXPENSE_TARGETS.filter(t => !loan[EXPENSE_FIELD[t]])
+  // rest are reached through their own tab's Edit. A co-borrower or guarantor the loan does not
+  // have is not offered at all; one is added on the Customer tab, not here.
+  const addTargets = EXPENSE_TARGETS.filter(t => hasParty(loan, t) && !loan[EXPENSE_FIELD[t]])
 
   useEffect(() => {
     if (entries.length && !entries.some(e => e.key === activeKey)) setActiveKey(entries[0].key)
@@ -129,10 +137,10 @@ export default function ExpenseVerification({
 
   // The verdict per party, for the tab pills — computed across every record, so it cannot be
   // taken from the active one alone.
-  const statuses = useMemo(() => new Map(entries.map(e => [
+  const statuses = useMemo(() => new Map(tabEntries.map(e => [
     e.key,
     assessStatementExpense(combineStatementAnalyses(e.info?.documents), e.info?.totalMonthlyExpense || 0).state,
-  ])), [entries])
+  ])), [tabEntries])
 
   const money = amount => formatVal(amount, currency, 1)
 
@@ -191,76 +199,40 @@ export default function ExpenseVerification({
     })),
   ]
 
-  if (entries.length === 0) {
-    return (
-      // Matches the top gap the populated view sets on its root — the shared tab container
-      // runs pt-0.
-      <div className={`${cardCls} mt-4 p-10 flex flex-col items-center gap-3`}>
-        <div className="w-12 h-12 rounded-2xl bg-slate-100 dark:bg-slate-700 flex items-center justify-center">
-          <Wallet className="w-6 h-6 text-slate-400" />
-        </div>
-        <p className="text-sm font-semibold text-slate-600 dark:text-slate-300">No expenses recorded for this loan</p>
-        <p className="text-xs text-slate-400 dark:text-slate-500 text-center max-w-sm">
-          List the monthly expenses by type, then upload {EXPENSE_MONTHS_REQUIRED} months of bank
-          statements — what the borrower really spends is read from the money out.
-        </p>
-        {!isDisbursed && (
-          <div className="flex items-center gap-2 flex-wrap justify-center mt-1">
-            {EXPENSE_TARGETS.map(t => (
-              <button key={t} onClick={() => onAddExpense(t)} className={ghostBtnCls}>
-                <Plus className="w-3.5 h-3.5" /> {EXPENSE_LABEL[t]}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-    )
-  }
-
-  const showAddBar = !isDisbursed && addTargets.length > 0
+  const addAction = !isDisbursed ? (
+    <AddMenu
+      options={addTargets.map(t => ({ id: t, label: `${EXPENSE_LABEL[t]} Expense` }))}
+      onSelect={onAddExpense}
+      iconOnly
+    />
+  ) : null
 
   return (
-    // The shared tab container runs pt-0, so the sticky action bar sits flush against the tab
-    // strip — as it does on Collateral. Without one the top gap is our own.
-    <div className={`space-y-4 ${showAddBar ? '' : 'pt-4'}`}>
-      {/* One Add button per party still without a record, styled like the Collateral tab's —
-          no menu to open, since which party the expense belongs to is the whole of the choice. */}
-      {showAddBar && (
-        <div className="sticky top-0 z-10 -mx-6 px-6 py-3 bg-white dark:bg-slate-800 border-b border-slate-100 dark:border-slate-700 flex flex-wrap items-center justify-end gap-2">
-          {addTargets.map(t => (
-            <button
-              key={t}
-              onClick={() => onAddExpense(t)}
-              className={addBtnCls}
-            >
-              Add {EXPENSE_LABEL[t]} Expense
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* One tab per party with an expense record */}
-      {entries.length > 1 && (
-        <div className="flex items-center gap-1 overflow-x-auto border-b border-slate-200 dark:border-slate-700">
-          {entries.map(e => {
-            const isActive = e.key === active.key
-            return (
-              <button
-                key={e.key}
-                onClick={() => setActiveKey(e.key)}
-                className={`flex items-center gap-1.5 px-3 py-2 text-xs font-semibold whitespace-nowrap border-b-2 -mb-px transition-colors ${
-                  isActive
-                    ? 'border-[#0047ab] text-[#0047ab] dark:border-brand-400 dark:text-brand-400'
-                    : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'
-                }`}
-              >
-                {e.label}
-                <VerificationBadge status={statuses.get(e.key)} title={`Bank statement verdict for the ${e.label.toLowerCase()} expenses`} />
-              </button>
-            )
-          })}
-        </div>
-      )}
+    <div className="space-y-4 pt-4">
+      {/* Same party tab bar as the CBC tab: the party, whose expenses they are, and where the
+          bank-statement check stands. Adding one is the single Add beside the tabs — which
+          party an expense belongs to is the whole of the choice, so it is what the menu lists. */}
+      <PartyTabs
+        idPrefix="expense"
+        ariaLabel="Expenses by party"
+        activeId={active.key}
+        onSelect={setActiveKey}
+        items={tabEntries.map(e => ({
+          id: e.key,
+          label: e.label,
+          subtitle: partyName(loan, e.target),
+          // Nothing on file is said in words. A verdict pill over a blank record would report
+          // on evidence nobody has filed yet.
+          count: 0,
+          pill: e.blank ? undefined : (
+            <VerificationBadge
+              status={statuses.get(e.key)}
+              title={`Bank statement verdict for the ${e.label.toLowerCase()} expenses`}
+            />
+          ),
+        }))}
+        actions={addAction}
+      />
 
       <div className="min-w-0 space-y-4">
         {/* ── What was declared: the expense types, with the amount against each ── */}
@@ -268,13 +240,17 @@ export default function ExpenseVerification({
           <SectionHead
             title="Monthly Expenses"
             subtitle={`${lines.length} expense type${lines.length === 1 ? '' : 's'} declared`}
-            badge={<VerificationBadge status={statuses.get(active.key)} title={verdict.reason} />}
+            badge={active.blank ? null : <VerificationBadge status={statuses.get(active.key)} title={verdict.reason} />}
           >
+            {/* Edit is where an operator looks to put the figures in, so on a blank record it
+                opens the same form the + does rather than being absent. Remove is not there:
+                there is no record to remove yet. */}
             {!isDisbursed && (
               <div className="flex items-center gap-1.5">
                 <button onClick={() => onEditExpense(active.target)} className={ghostBtnCls}>
                   <Pencil className="w-3 h-3" /> Edit
                 </button>
+                {!active.blank && (
                 <button
                   onClick={() => onRemoveExpense(active.target)}
                   title="Remove this expense record"
@@ -282,6 +258,7 @@ export default function ExpenseVerification({
                 >
                   <Trash2 className="w-3 h-3" />
                 </button>
+                )}
               </div>
             )}
           </SectionHead>

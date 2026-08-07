@@ -1,5 +1,12 @@
 import { FileText, Eye, ExternalLink, Download } from 'lucide-react'
 
+// Whether anything was actually uploaded. Callers use it to decide whether to render this
+// table at all: it lists one row per *expected* document type, so a record with nothing on
+// file produces a full table of blank rows that reads as data when it is not.
+export function hasUploadedDocs(documents) {
+  return (documents || []).some(d => d?.dataUrl || d?.name)
+}
+
 // Table view of documents: one row per applicable document type, showing the uploaded
 // file(s) or an empty state when nothing was uploaded for that type. Types that allow
 // more than one file (e.g. multiple Bank Statements) get one row per uploaded file.
