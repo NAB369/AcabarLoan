@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { CalendarDays, Printer, Download, History, TrendingUp, Scale } from 'lucide-react'
 import jsPDF from 'jspdf'
 import autoTable from 'jspdf-autotable'
@@ -6,6 +6,7 @@ import { useApp } from '../../context/AppContext'
 import { formatVal } from '../../utils/format'
 import { companyLogoSrc } from '../../utils/companyLogo'
 import { KH_PROVINCES } from '../../data/geoData'
+import { useTableColumns, ColumnPicker } from '../shared/DataTableTools'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -50,11 +51,12 @@ const EmptyRow = ({ colSpan, message }) => (
 // General Ledger panels. Filters re-run the report as they change, so the table below is
 // always live. The toolbar is print:hidden — a date picker or dropdown means nothing on
 // paper, and printing already drops the buttons.
-const ReportPanel = ({ filters, onPrint, onDownload, children }) => (
+const ReportPanel = ({ filters, columnPicker, onPrint, onDownload, children }) => (
   <div className="rounded-xl border border-slate-100 dark:border-slate-700 overflow-hidden print:overflow-visible print:border-0 flex-1 min-h-0 flex flex-col">
     <div className="print:hidden flex-shrink-0 flex flex-wrap items-end gap-x-8 gap-y-3 px-4 py-3 border-b border-slate-100 dark:border-slate-700">
       {filters}
       <div className="flex items-center gap-2 ml-auto">
+        {columnPicker}
         <Button variant="outline" onClick={onPrint} className={ACTION_BTN_CLS}>
           <Printer className="!w-3.5 !h-3.5" />
           Print
@@ -66,6 +68,90 @@ const ReportPanel = ({ filters, onPrint, onDownload, children }) => (
       </div>
     </div>
     {children}
+  </div>
+)
+
+// Column visibility for one statement, kept in the reducer under the statement's tab id so the
+// view an accountant sets on GL Daily is still there next week. A column is
+// { id, label, right?, cellCls?, text(row), render?(row) } — `text` is what prints and exports,
+// `render` the on-screen cell when it isn't plain text (a badge). The statements each call this
+// once, unconditionally, so the hook order holds however the tabs are switched.
+function useStatementColumns(tableId, columns) {
+  const { state, dispatch } = useApp()
+  const { visibleIds, toggle } = useTableColumns(columns, {
+    value: state.reportColumns?.[tableId] || null,
+    onChange: ids => dispatch({ type: 'SET_REPORT_COLUMNS', table: tableId, ids }),
+  })
+  const visible = useMemo(() => columns.filter(c => visibleIds.includes(c.id)), [columns, visibleIds])
+  const picker = (
+    <ColumnPicker
+      columns={columns}
+      visibleIds={visibleIds}
+      onToggle={toggle}
+      iconOnly
+      className="py-1.5 rounded-lg"
+    />
+  )
+  return { visible, picker }
+}
+
+// Header, body and totals for a statement table, driven by whichever columns are visible.
+const ColumnHead = ({ columns }) => (
+  <TableHeader className="sticky top-0 z-10">
+    <TableRow className="border-0">
+      {columns.map(c => <Th key={c.id} right={c.right}>{c.label}</Th>)}
+    </TableRow>
+  </TableHeader>
+)
+
+const ColumnCells = ({ columns, row }) => columns.map(c => (
+  <TableCell key={c.id} className={`px-4 py-3 text-xs ${c.right ? 'text-right' : ''} ${c.cellCls || ''}`}>
+    {c.render ? c.render(row) : c.text(row)}
+  </TableCell>
+))
+
+// `totals` is keyed by column id. The label cell spans the columns ahead of the first total, so
+// hiding a column narrows the span instead of leaving the totals misaligned under the wrong
+// headings. `cls` colours a total (debits rose, credits emerald) the way each statement wants.
+const TotalsRow = ({ columns, label, totals, cls = {} }) => {
+  const first = columns.findIndex(c => totals[c.id] != null)
+  // Every column hidden but the money ones: drop the label rather than let it take the cell a
+  // total belongs in — the footer's own styling still marks it as the totals row.
+  const span = first < 0 ? columns.length : first
+  return (
+    <TableRow className="border-0 border-t-2 border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700/50 hover:bg-slate-50 dark:hover:bg-slate-700/50">
+      {span > 0 && (
+        <TableCell colSpan={span} className="px-4 py-3 text-xs font-bold text-slate-700 dark:text-slate-200">{label}</TableCell>
+      )}
+      {columns.slice(span).map(c => (
+        <TableCell key={c.id} className={`px-4 py-3 text-xs font-bold text-right ${cls[c.id] || 'text-slate-700 dark:text-slate-200'}`}>
+          {totals[c.id] ?? ''}
+        </TableCell>
+      ))}
+    </TableRow>
+  )
+}
+
+// One Balance Sheet block — Assets, Liabilities and Equity are the same three columns with
+// their own rows and total, so they render from one definition rather than three copies.
+const StatementSection = ({ title, columns, rows, totalLabel, totals, cls }) => (
+  <div>
+    <h4 className="text-xs font-bold text-slate-700 dark:text-slate-200 uppercase tracking-widest mb-3">{title}</h4>
+    <div className="overflow-x-auto rounded-xl border border-slate-100 dark:border-slate-700">
+      <Table className="w-full">
+        <ColumnHead columns={columns} />
+        <TableBody className="divide-y divide-slate-50 dark:divide-slate-700">
+          {rows.map(r => (
+            <TableRow key={r.label} className="border-0 hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
+              <ColumnCells columns={columns} row={r} />
+            </TableRow>
+          ))}
+        </TableBody>
+        <TableFooter>
+          <TotalsRow columns={columns} label={totalLabel} totals={totals} cls={cls} />
+        </TableFooter>
+      </Table>
+    </div>
   </div>
 )
 
@@ -140,7 +226,7 @@ const PrintReportHeader = ({ title, meta }) => {
 
 export default function FinancialReportSection() {
   const { state, dispatch } = useApp()
-  const { incomes, expenses, accounts, activeLoan, currency, companyProfile } = state
+  const { incomes, expenses, accounts, chartOfAccounts, loanApplications, currency, companyProfile } = state
   // A persisted statement id may point at a tab that no longer exists (e.g. a saved
   // "Full Trial Balance" selection), which would render an empty panel — fall back.
   const activeStatement = STATEMENT_TABS.some(t => t.id === state.activeStatement)
@@ -173,11 +259,27 @@ export default function FinancialReportSection() {
   const totalIncome = useMemo(() => incomes.reduce((s, i) => s + i.amount, 0), [incomes])
   const totalOperatingExpense = useMemo(() => operatingExpenses.reduce((s, e) => s + e.amount, 0), [operatingExpenses])
   const netProfit = totalIncome - totalOperatingExpense
-  const portfolioBase = 4850000
-  const loanPortfolio = portfolioBase + (activeLoan ? activeLoan.amount : 0)
+  // Principal actually out with borrowers: what was disbursed on live loans, less the principal
+  // repayments collected against it. A loan with no schedule yet has had no repayments, so its
+  // full amount is still outstanding.
+  const loanPortfolio = useMemo(() => loanApplications
+    .filter(l => l.status === 'Active')
+    .reduce((sum, l) => {
+      const principalPaid = (l.schedule || []).reduce((s, r) => s + (r.principalPaid || 0), 0)
+      return sum + Math.max(Math.round(((l.amount || 0) - principalPaid) * 100) / 100, 0)
+    }, 0), [loanApplications])
   // Grand total of every account — the company's total cash position, used for the
   // Balance Sheet's Cash & Cash Equivalents.
   const mainAccountBalance = useMemo(() => accounts.reduce((s, a) => s + (a.balance || 0), 0), [accounts])
+
+  // Balance-sheet figures the loan book doesn't produce come off the chart of accounts, by
+  // code. Only the USD accounts are summed: every figure in this statement is held in dollars
+  // and converted on the way out (see formatVal), so folding a riel balance in as-is would
+  // overstate it by the exchange rate.
+  const glBalance = useCallback((...codes) => codes.reduce((sum, code) => {
+    const account = chartOfAccounts.find(a => a.code === code)
+    return sum + (account && account.currency === 'USD' ? (account.balance || 0) : 0)
+  }, 0), [chartOfAccounts])
 
   const accountName = (code) => accounts.find(a => a.code === code)?.name || code || '—'
 
@@ -219,6 +321,19 @@ export default function FinancialReportSection() {
   // jsPDF's built-in fonts have no glyph for "→", so it prints as a garbled character —
   // swap it for an ASCII-safe separator only in text bound for PDF export.
   const pdfSafe = (str) => String(str ?? '').replace(/→/g, '->')
+
+  // head/body/foot for autoTable, built from whichever columns are on screen — a column hidden
+  // in the table is hidden in the exported PDF too, which is usually why it was hidden.
+  // `firstHeader` renames the leading column for the statements that head it with the section
+  // name ("Revenue" over the category column) instead of the column's own label.
+  const columnTable = (columns, rows, totals = null, label = 'Totals', firstHeader = null) => ({
+    head: [columns.map((c, i) => (i === 0 && firstHeader ? firstHeader : c.label))],
+    body: rows.map(row => columns.map(c => pdfSafe(c.text(row)))),
+    foot: totals
+      ? [columns.map((c, i) => (totals[c.id] != null ? pdfSafe(totals[c.id]) : (i === 0 ? label : '')))]
+      : undefined,
+    columnStyles: Object.fromEntries(columns.map((c, i) => [i, { halign: c.right ? 'right' : 'left' }])),
+  })
 
   const availableDates = useMemo(() => [...new Set(glAll.map(e => e.date).filter(Boolean))].sort().reverse(), [glAll])
   const effectiveDailyDate = dailyDate || availableDates[0] || new Date().toISOString().split('T')[0]
@@ -291,6 +406,79 @@ export default function FinancialReportSection() {
 
   const netProfitFiltered = plRevenueFiltered.total - plExpensesFiltered.total
 
+  // The two P&L sections as rows, so the table on screen and the PDF read off one list.
+  const plRevenueRows = useMemo(() => [
+    { label: 'Interest Income', val: plRevenueFiltered.interest },
+    { label: 'Fees & Charges', val: plRevenueFiltered.fees },
+    { label: 'Penalties', val: plRevenueFiltered.penalties },
+    { label: 'Other Income', val: plRevenueFiltered.other },
+  ], [plRevenueFiltered])
+  const plExpenseRows = useMemo(() => [
+    { label: 'Salaries & Benefits', val: plExpensesFiltered.salaries },
+    { label: 'Office & Administration', val: plExpensesFiltered.admin },
+    { label: 'Tax & Regulation', val: plExpensesFiltered.tax },
+    { label: 'Loan Loss Provisions', val: plExpensesFiltered.provisions },
+    { label: 'Other Expenses', val: plExpensesFiltered.other },
+  ], [plExpensesFiltered])
+
+  // ── Statement columns ──────────────────────────────────────────────────────
+  const MONO = 'font-mono text-slate-500 dark:text-slate-400 whitespace-nowrap'
+  const PLAIN = 'text-slate-600 dark:text-slate-300'
+  const MONEY = 'font-medium text-slate-700 dark:text-slate-200'
+  const money = (v, cur = currency, rate) => (v > 0 ? formatVal(v, cur, rate) : '—')
+
+  const glDailyColumns = useMemo(() => [
+    { id: 'trnDate',   label: 'Trn Date',   cellCls: `${PLAIN} whitespace-nowrap`, text: r => r.trnDate },
+    { id: 'trnNo',     label: 'Trn No',     cellCls: MONO,  text: r => r.trnNo },
+    { id: 'valueDate', label: 'Value Date', cellCls: `${PLAIN} whitespace-nowrap`, text: r => r.valueDate },
+    { id: 'recId',     label: 'RecID',      cellCls: MONO,  text: r => r.recId },
+    { id: 'accCode',   label: 'Acc Code',   cellCls: MONO,  text: r => r.accCode },
+    { id: 'accName',   label: 'Acc Name',   cellCls: PLAIN, text: r => r.accName },
+    { id: 'memo',      label: 'Memo',       cellCls: 'text-slate-700 dark:text-slate-200', text: r => r.memo },
+    { id: 'debit',     label: 'Debit',  right: true, cellCls: MONEY, text: r => money(r.debit) },
+    { id: 'credit',    label: 'Credit', right: true, cellCls: MONEY, text: r => money(r.credit) },
+    { id: 'bal',       label: 'Bal',    right: true, cellCls: 'font-bold text-slate-700 dark:text-slate-200', text: r => formatVal(r.bal, currency) },
+  ], [currency])
+
+  const glHistoryColumns = useMemo(() => [
+    { id: 'date',        label: 'Date',        cellCls: PLAIN, text: e => e.date },
+    { id: 'ref',         label: 'Ref',         cellCls: 'font-mono text-slate-500 dark:text-slate-400', text: e => e.code },
+    { id: 'description', label: 'Description', cellCls: 'text-slate-700 dark:text-slate-200', text: e => glDescription(e) },
+    { id: 'account',     label: 'Account',     cellCls: PLAIN, text: e => glAccountLabel(e) },
+    { id: 'type',        label: 'Type',        cellCls: '', text: e => e.txType, render: e => <TypeBadge type={e.txType} /> },
+    { id: 'debit',       label: 'Debit',  right: true, cellCls: MONEY, text: e => money(e.debit) },
+    { id: 'credit',      label: 'Credit', right: true, cellCls: MONEY, text: e => money(e.credit) },
+  ], [currency, accounts])
+
+  // Both P&L sections share one column set — hiding a column there hides it on Revenue and on
+  // Operating Expenses together, which is what an accountant reading one statement expects.
+  const plColumns = useMemo(() => [
+    { id: 'category', label: 'Category', cellCls: PLAIN, text: r => r.label },
+    { id: 'amount',   label: 'Amount', right: true, cellCls: MONEY, text: r => formatVal(r.val, plCurrency, plExchangeRate) },
+  ], [plCurrency, plExchangeRate])
+
+  const bsColumns = useMemo(() => [
+    { id: 'description', label: 'Description', cellCls: PLAIN, text: r => r.label },
+    { id: 'debit',       label: 'Debit',  right: true, cellCls: MONEY, text: r => money(r.debit, bsCurrency, bsExchangeRate) },
+    { id: 'credit',      label: 'Credit', right: true, cellCls: MONEY, text: r => money(r.credit, bsCurrency, bsExchangeRate) },
+  ], [bsCurrency, bsExchangeRate])
+
+  const glDaily = useStatementColumns('gl-daily', glDailyColumns)
+  const glHistory = useStatementColumns('gl-history', glHistoryColumns)
+  const pl = useStatementColumns('pl', plColumns)
+  const bs = useStatementColumns('bs', bsColumns)
+
+  const glDailyTotals = {
+    debit: formatVal(glDailyRows.reduce((s, r) => s + r.debit, 0), currency),
+    credit: formatVal(glDailyRows.reduce((s, r) => s + r.credit, 0), currency),
+    bal: glDailyRows.length ? formatVal(glDailyRows[glDailyRows.length - 1].bal, currency) : formatVal(0, currency),
+  }
+  const glHistoryTotals = {
+    debit: formatVal(historyEntries.reduce((s, e) => s + e.debit, 0), currency),
+    credit: formatVal(historyEntries.reduce((s, e) => s + e.credit, 0), currency),
+  }
+  const DEBIT_CREDIT_CLS = { debit: 'text-rose-600', credit: 'text-emerald-600' }
+
   // GL Daily/History have too many columns to fit A4 portrait without clipping,
   // so those two print in landscape; the narrower statements print portrait.
   function handlePrint(orientation = 'portrait') {
@@ -322,20 +510,9 @@ export default function FinancialReportSection() {
     addPdfHeader(doc, 'GL Daily Transaction Listing')
     doc.text(`${effectiveDailyDate} · ${glBranch}`, 14, 26)
 
-    const totalDebit = glDailyRows.reduce((s, r) => s + r.debit, 0)
-    const totalCredit = glDailyRows.reduce((s, r) => s + r.credit, 0)
-    const lastBal = glDailyRows.length ? glDailyRows[glDailyRows.length - 1].bal : 0
-
     autoTable(doc, {
       startY: 31,
-      head: [['Trn Date', 'Trn No', 'Value Date', 'RecID', 'Acc Code', 'Acc Name', 'Memo', 'Debit', 'Credit', 'Bal']],
-      body: glDailyRows.map(r => [
-        r.trnDate, r.trnNo, r.valueDate, r.recId, r.accCode, pdfSafe(r.accName), pdfSafe(r.memo),
-        r.debit > 0 ? formatVal(r.debit, currency) : '—',
-        r.credit > 0 ? formatVal(r.credit, currency) : '—',
-        formatVal(r.bal, currency),
-      ]),
-      foot: [['Totals', '', '', '', '', '', '', formatVal(totalDebit, currency), formatVal(totalCredit, currency), formatVal(lastBal, currency)]],
+      ...columnTable(glDaily.visible, glDailyRows, glDailyTotals),
       styles: { fontSize: 7 },
       headStyles: { fillColor: [0, 71, 171] },
       footStyles: { fillColor: [241, 245, 249], textColor: [30, 41, 59], fontStyle: 'bold' },
@@ -352,18 +529,9 @@ export default function FinancialReportSection() {
       14, 26
     )
 
-    const totalDebit = historyEntries.reduce((s, e) => s + e.debit, 0)
-    const totalCredit = historyEntries.reduce((s, e) => s + e.credit, 0)
-
     autoTable(doc, {
       startY: 31,
-      head: [['Date', 'Ref', 'Description', 'Account', 'Type', 'Debit', 'Credit']],
-      body: historyEntries.map(e => [
-        e.date, e.code, pdfSafe(glDescription(e)), pdfSafe(glAccountLabel(e)), e.txType,
-        e.debit > 0 ? formatVal(e.debit, currency) : '—',
-        e.credit > 0 ? formatVal(e.credit, currency) : '—',
-      ]),
-      foot: [['Totals', '', '', '', '', formatVal(totalDebit, currency), formatVal(totalCredit, currency)]],
+      ...columnTable(glHistory.visible, historyEntries, glHistoryTotals),
       styles: { fontSize: 7 },
       headStyles: { fillColor: [0, 71, 171] },
       footStyles: { fillColor: [241, 245, 249], textColor: [30, 41, 59], fontStyle: 'bold' },
@@ -379,14 +547,11 @@ export default function FinancialReportSection() {
 
     autoTable(doc, {
       startY: 31,
-      head: [['Revenue', 'Amount']],
-      body: [
-        ['Interest Income', formatVal(plRevenueFiltered.interest, plCurrency, plExchangeRate)],
-        ['Fees & Charges', formatVal(plRevenueFiltered.fees, plCurrency, plExchangeRate)],
-        ['Penalties', formatVal(plRevenueFiltered.penalties, plCurrency, plExchangeRate)],
-        ['Other Income', formatVal(plRevenueFiltered.other, plCurrency, plExchangeRate)],
-      ],
-      foot: [['Total Revenue', formatVal(plRevenueFiltered.total, plCurrency, plExchangeRate)]],
+      ...columnTable(
+        pl.visible, plRevenueRows,
+        { amount: formatVal(plRevenueFiltered.total, plCurrency, plExchangeRate) },
+        'Total Revenue', 'Revenue',
+      ),
       styles: { fontSize: 9 },
       headStyles: { fillColor: [0, 71, 171] },
       footStyles: { fillColor: [241, 245, 249], textColor: [30, 41, 59], fontStyle: 'bold' },
@@ -394,15 +559,11 @@ export default function FinancialReportSection() {
 
     autoTable(doc, {
       startY: doc.lastAutoTable.finalY + 8,
-      head: [['Operating Expenses', 'Amount']],
-      body: [
-        ['Salaries & Benefits', formatVal(plExpensesFiltered.salaries, plCurrency, plExchangeRate)],
-        ['Office & Administration', formatVal(plExpensesFiltered.admin, plCurrency, plExchangeRate)],
-        ['Tax & Regulation', formatVal(plExpensesFiltered.tax, plCurrency, plExchangeRate)],
-        ['Loan Loss Provisions', formatVal(plExpensesFiltered.provisions, plCurrency, plExchangeRate)],
-        ['Other Expenses', formatVal(plExpensesFiltered.other, plCurrency, plExchangeRate)],
-      ],
-      foot: [['Total Expenses', formatVal(plExpensesFiltered.total, plCurrency, plExchangeRate)]],
+      ...columnTable(
+        pl.visible, plExpenseRows,
+        { amount: formatVal(plExpensesFiltered.total, plCurrency, plExchangeRate) },
+        'Total Expenses', 'Operating Expenses',
+      ),
       styles: { fontSize: 9 },
       headStyles: { fillColor: [0, 71, 171] },
       footStyles: { fillColor: [241, 245, 249], textColor: [30, 41, 59], fontStyle: 'bold' },
@@ -417,18 +578,27 @@ export default function FinancialReportSection() {
 
   // ── Balance Sheet rows (Description / Debit / Credit) ──────────────────────
   const bsAssetRows = useMemo(() => [
-    { label: 'Cash & Cash Equivalents (Main Account)', debit: mainAccountBalance || 1250000, credit: 0 },
+    { label: 'Cash & Cash Equivalents (Main Account)', debit: mainAccountBalance, credit: 0 },
     { label: 'Loan Portfolio (Gross)', debit: loanPortfolio, credit: 0 },
     { label: 'Less: Provision for Loan Losses', debit: 0, credit: plExpenses.provisions },
   ], [mainAccountBalance, loanPortfolio, plExpenses])
-  const bsLiabilityRows = [
-    { label: 'Borrowings / Debt', debit: 0, credit: 2100000 },
-    { label: 'Accounts Payable', debit: 0, credit: 45000 },
-  ]
-  const bsEquityRows = useMemo(() => [
-    { label: 'Paid-in Capital', debit: 0, credit: 3500000 },
-    { label: 'Retained Earnings', debit: netProfit < 0 ? -netProfit : 0, credit: netProfit >= 0 ? netProfit : 0 },
-  ], [netProfit])
+  // 2010 customer deposits and 2030 loan principal approved but not yet released are both
+  // money owed out, so they read as one Accounts Payable line the way an accountant states it.
+  const bsLiabilityRows = useMemo(() => [
+    { label: 'Borrowings / Debt', debit: 0, credit: glBalance('2020') },
+    { label: 'Accounts Payable', debit: 0, credit: glBalance('2010', '2030') },
+    { label: 'Tax Payable', debit: 0, credit: glBalance('2040') },
+    { label: 'Accumulated Depreciation', debit: 0, credit: glBalance('2050') },
+  ], [glBalance])
+  // Retained earnings carries what the chart holds plus the result this period has thrown off
+  // and not yet closed into it.
+  const bsEquityRows = useMemo(() => {
+    const retained = glBalance('3020') + netProfit
+    return [
+      { label: 'Paid-in Capital', debit: 0, credit: glBalance('3010') },
+      { label: 'Retained Earnings', debit: retained < 0 ? -retained : 0, credit: retained >= 0 ? retained : 0 },
+    ]
+  }, [glBalance, netProfit])
   const bsTotalAssets = bsAssetRows.reduce((s, r) => s + r.debit - r.credit, 0)
   const bsTotalLiabilities = bsLiabilityRows.reduce((s, r) => s + r.credit - r.debit, 0)
   const bsTotalEquity = bsEquityRows.reduce((s, r) => s + r.credit - r.debit, 0)
@@ -438,36 +608,29 @@ export default function FinancialReportSection() {
     addPdfHeader(doc, 'Balance Sheet')
     doc.text(`${bsCurrency}${bsCurrency === 'KHR' ? ` (1 USD = ${bsExchangeRate} KHR)` : ''} · ${bsBranch}`, 14, 26)
 
-    const fmt = (v) => v > 0 ? formatVal(v, bsCurrency, bsExchangeRate) : '—'
+    const bsTotal = (v) => formatVal(v, bsCurrency, bsExchangeRate)
     const tableOpts = {
       styles: { fontSize: 9 },
       headStyles: { fillColor: [0, 71, 171] },
       footStyles: { fillColor: [241, 245, 249], textColor: [30, 41, 59], fontStyle: 'bold' },
-      columnStyles: { 1: { halign: 'right' }, 2: { halign: 'right' } },
     }
 
     autoTable(doc, {
       startY: 31,
-      head: [['Assets', 'Debit', 'Credit']],
-      body: bsAssetRows.map(r => [r.label, fmt(r.debit), fmt(r.credit)]),
-      foot: [['Total Assets', formatVal(bsTotalAssets, bsCurrency, bsExchangeRate), '—']],
       ...tableOpts,
+      ...columnTable(bs.visible, bsAssetRows, { debit: bsTotal(bsTotalAssets), credit: '—' }, 'Total Assets', 'Assets'),
     })
 
     autoTable(doc, {
       startY: doc.lastAutoTable.finalY + 8,
-      head: [['Liabilities', 'Debit', 'Credit']],
-      body: bsLiabilityRows.map(r => [r.label, fmt(r.debit), fmt(r.credit)]),
-      foot: [['Total Liabilities', '—', formatVal(bsTotalLiabilities, bsCurrency, bsExchangeRate)]],
       ...tableOpts,
+      ...columnTable(bs.visible, bsLiabilityRows, { debit: '—', credit: bsTotal(bsTotalLiabilities) }, 'Total Liabilities', 'Liabilities'),
     })
 
     autoTable(doc, {
       startY: doc.lastAutoTable.finalY + 8,
-      head: [['Equity', 'Debit', 'Credit']],
-      body: bsEquityRows.map(r => [r.label, fmt(r.debit), fmt(r.credit)]),
-      foot: [['Total Equity', '—', formatVal(bsTotalEquity, bsCurrency, bsExchangeRate)]],
       ...tableOpts,
+      ...columnTable(bs.visible, bsEquityRows, { debit: '—', credit: bsTotal(bsTotalEquity) }, 'Total Equity', 'Equity'),
     })
 
     doc.save(`balance-sheet.pdf`)
@@ -508,6 +671,7 @@ export default function FinancialReportSection() {
               meta={`${effectiveDailyDate} · ${glBranch}`}
             />
             <ReportPanel
+              columnPicker={glDaily.picker}
               onPrint={() => handlePrint('landscape')}
               onDownload={handleDownloadGlDaily}
               filters={<>
@@ -528,50 +692,23 @@ export default function FinancialReportSection() {
                   whether the day has 1 transaction or 200 (past that, this box scrolls). */}
               <div className="overflow-x-auto overflow-y-auto flex-1 min-h-0">
                 <Table className="w-full h-full">
-                  <TableHeader className="sticky top-0 z-10">
-                    <TableRow className="border-0">
-                      <Th>Trn Date</Th>
-                      <Th>Trn No</Th>
-                      <Th>Value Date</Th>
-                      <Th>RecID</Th>
-                      <Th>Acc Code</Th>
-                      <Th>Acc Name</Th>
-                      <Th>Memo</Th>
-                      <Th right>Debit</Th>
-                      <Th right>Credit</Th>
-                      <Th right>Bal</Th>
-                    </TableRow>
-                  </TableHeader>
+                  <ColumnHead columns={glDaily.visible} />
                   <TableBody className="divide-y divide-slate-50 dark:divide-slate-700">
                     {glDailyRows.length === 0
-                      ? <EmptyRow colSpan={10} message="No transactions recorded for this date." />
+                      ? <EmptyRow colSpan={glDaily.visible.length} message="No transactions recorded for this date." />
                       : glDailyRows.map((r, i) => (
                         <TableRow key={i} className="border-0 hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
-                          <TableCell className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300 whitespace-nowrap">{r.trnDate}</TableCell>
-                          <TableCell className="px-4 py-3 text-xs font-mono text-slate-500 dark:text-slate-400 whitespace-nowrap">{r.trnNo}</TableCell>
-                          <TableCell className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300 whitespace-nowrap">{r.valueDate}</TableCell>
-                          <TableCell className="px-4 py-3 text-xs font-mono text-slate-500 dark:text-slate-400 whitespace-nowrap">{r.recId}</TableCell>
-                          <TableCell className="px-4 py-3 text-xs font-mono text-slate-500 dark:text-slate-400 whitespace-nowrap">{r.accCode}</TableCell>
-                          <TableCell className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">{r.accName}</TableCell>
-                          <TableCell className="px-4 py-3 text-xs text-slate-700 dark:text-slate-200">{r.memo}</TableCell>
-                          <TableCell className="px-4 py-3 text-xs font-medium text-slate-700 dark:text-slate-200 text-right">{r.debit > 0 ? formatVal(r.debit, currency) : '—'}</TableCell>
-                          <TableCell className="px-4 py-3 text-xs font-medium text-slate-700 dark:text-slate-200 text-right">{r.credit > 0 ? formatVal(r.credit, currency) : '—'}</TableCell>
-                          <TableCell className="px-4 py-3 text-xs font-bold text-slate-700 dark:text-slate-200 text-right">{formatVal(r.bal, currency)}</TableCell>
+                          <ColumnCells columns={glDaily.visible} row={r} />
                         </TableRow>
                       ))
                     }
                     {glDailyRows.length > 0 && (
-                      <TableRow aria-hidden="true" className="border-0 hover:bg-transparent"><TableCell colSpan={10} className="h-full p-0" /></TableRow>
+                      <TableRow aria-hidden="true" className="border-0 hover:bg-transparent"><TableCell colSpan={glDaily.visible.length} className="h-full p-0" /></TableRow>
                     )}
                   </TableBody>
                   {glDailyRows.length > 0 && (
                     <TableFooter className="sticky bottom-0 z-10">
-                      <TableRow className="border-0 border-t-2 border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700/50 hover:bg-slate-50 dark:hover:bg-slate-700/50">
-                        <TableCell colSpan={7} className="px-4 py-3 text-xs font-bold text-slate-700 dark:text-slate-200">Totals</TableCell>
-                        <TableCell className="px-4 py-3 text-xs font-bold text-rose-600 text-right">{formatVal(glDailyRows.reduce((s,r)=>s+r.debit,0), currency)}</TableCell>
-                        <TableCell className="px-4 py-3 text-xs font-bold text-emerald-600 text-right">{formatVal(glDailyRows.reduce((s,r)=>s+r.credit,0), currency)}</TableCell>
-                        <TableCell className="px-4 py-3 text-xs font-bold text-slate-700 dark:text-slate-200 text-right">{formatVal(glDailyRows[glDailyRows.length - 1].bal, currency)}</TableCell>
-                      </TableRow>
+                      <TotalsRow columns={glDaily.visible} label="Totals" totals={glDailyTotals} cls={DEBIT_CREDIT_CLS} />
                     </TableFooter>
                   )}
                 </Table>
@@ -590,6 +727,7 @@ export default function FinancialReportSection() {
               meta={`${effectiveHistFrom} to ${effectiveHistTo} · ${histAccountLabel} · ${glHistBranch}`}
             />
             <ReportPanel
+              columnPicker={glHistory.picker}
               onPrint={() => handlePrint('landscape')}
               onDownload={handleDownloadGlHistory}
               filters={<>
@@ -617,40 +755,20 @@ export default function FinancialReportSection() {
             >
               <div className="overflow-x-auto overflow-y-auto flex-1 min-h-0">
                 <Table className="w-full">
-                  <TableHeader className="sticky top-0 z-10">
-                    <TableRow className="border-0">
-                      <Th>Date</Th>
-                      <Th>Ref</Th>
-                      <Th>Description</Th>
-                      <Th>Account</Th>
-                      <Th>Type</Th>
-                      <Th right>Debit</Th>
-                      <Th right>Credit</Th>
-                    </TableRow>
-                  </TableHeader>
+                  <ColumnHead columns={glHistory.visible} />
                   <TableBody className="divide-y divide-slate-50 dark:divide-slate-700">
                     {historyEntries.length === 0
-                      ? <EmptyRow colSpan={7} message="No ledger history found." />
+                      ? <EmptyRow colSpan={glHistory.visible.length} message="No ledger history found." />
                       : historyEntries.map((e, i) => (
                         <TableRow key={i} className="border-0 hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
-                          <TableCell className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">{e.date}</TableCell>
-                          <TableCell className="px-4 py-3 text-xs font-mono text-slate-500 dark:text-slate-400">{e.code}</TableCell>
-                          <TableCell className="px-4 py-3 text-xs text-slate-700 dark:text-slate-200">{glDescription(e)}</TableCell>
-                          <TableCell className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">{glAccountLabel(e)}</TableCell>
-                          <TableCell className="px-4 py-3"><TypeBadge type={e.txType} /></TableCell>
-                          <TableCell className="px-4 py-3 text-xs font-medium text-slate-700 dark:text-slate-200 text-right">{e.debit > 0 ? formatVal(e.debit, currency) : '—'}</TableCell>
-                          <TableCell className="px-4 py-3 text-xs font-medium text-slate-700 dark:text-slate-200 text-right">{e.credit > 0 ? formatVal(e.credit, currency) : '—'}</TableCell>
+                          <ColumnCells columns={glHistory.visible} row={e} />
                         </TableRow>
                       ))
                     }
                   </TableBody>
                   {historyEntries.length > 0 && (
                     <TableFooter className="sticky bottom-0 z-10">
-                      <TableRow className="border-0 border-t-2 border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700/50 hover:bg-slate-50 dark:hover:bg-slate-700/50">
-                        <TableCell colSpan={5} className="px-4 py-3 text-xs font-bold text-slate-700 dark:text-slate-200">Totals</TableCell>
-                        <TableCell className="px-4 py-3 text-xs font-bold text-rose-600 text-right">{formatVal(historyEntries.reduce((s,e)=>s+e.debit,0), currency)}</TableCell>
-                        <TableCell className="px-4 py-3 text-xs font-bold text-emerald-600 text-right">{formatVal(historyEntries.reduce((s,e)=>s+e.credit,0), currency)}</TableCell>
-                      </TableRow>
+                      <TotalsRow columns={glHistory.visible} label="Totals" totals={glHistoryTotals} cls={DEBIT_CREDIT_CLS} />
                     </TableFooter>
                   )}
                 </Table>
@@ -669,6 +787,7 @@ export default function FinancialReportSection() {
               meta={`${effectivePlFrom} to ${effectivePlTo} · ${plCurrency}${plCurrency === 'KHR' ? ` (1 USD = ${plExchangeRate} KHR)` : ''} · ${plBranch}`}
             />
             <ReportPanel
+              columnPicker={pl.picker}
               onPrint={() => handlePrint()}
               onDownload={handleDownloadPl}
               filters={<>
@@ -697,30 +816,21 @@ export default function FinancialReportSection() {
                   <h4 className="text-xs font-bold text-slate-700 dark:text-slate-200 uppercase tracking-widest mb-3">Revenue</h4>
                   <div className="overflow-x-auto rounded-xl border border-slate-100 dark:border-slate-700">
                     <Table className="w-full">
-                      <TableHeader className="sticky top-0 z-10">
-                        <TableRow className="border-0">
-                          <Th>Category</Th>
-                          <Th right>Amount</Th>
-                        </TableRow>
-                      </TableHeader>
+                      <ColumnHead columns={pl.visible} />
                       <TableBody className="divide-y divide-slate-50 dark:divide-slate-700">
-                        {[
-                          { label: 'Interest Income', val: plRevenueFiltered.interest },
-                          { label: 'Fees & Charges', val: plRevenueFiltered.fees },
-                          { label: 'Penalties', val: plRevenueFiltered.penalties },
-                          { label: 'Other Income', val: plRevenueFiltered.other },
-                        ].map(row => (
+                        {plRevenueRows.map(row => (
                           <TableRow key={row.label} className="border-0 hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
-                            <TableCell className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">{row.label}</TableCell>
-                            <TableCell className="px-4 py-3 text-xs font-medium text-slate-700 dark:text-slate-200 text-right">{formatVal(row.val, plCurrency, plExchangeRate)}</TableCell>
+                            <ColumnCells columns={pl.visible} row={row} />
                           </TableRow>
                         ))}
                       </TableBody>
                       <TableFooter className="sticky bottom-0 z-10">
-                        <TableRow className="border-0 border-t-2 border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700/50 hover:bg-slate-50 dark:hover:bg-slate-700/50">
-                          <TableCell className="px-4 py-3 text-xs font-bold text-slate-700 dark:text-slate-200">Total Revenue</TableCell>
-                          <TableCell className="px-4 py-3 text-xs font-bold text-emerald-600 text-right">{formatVal(plRevenueFiltered.total, plCurrency, plExchangeRate)}</TableCell>
-                        </TableRow>
+                        <TotalsRow
+                          columns={pl.visible}
+                          label="Total Revenue"
+                          totals={{ amount: formatVal(plRevenueFiltered.total, plCurrency, plExchangeRate) }}
+                          cls={{ amount: 'text-emerald-600' }}
+                        />
                       </TableFooter>
                     </Table>
                   </div>
@@ -730,31 +840,21 @@ export default function FinancialReportSection() {
                   <h4 className="text-xs font-bold text-slate-700 dark:text-slate-200 uppercase tracking-widest mb-3">Operating Expenses</h4>
                   <div className="overflow-x-auto rounded-xl border border-slate-100 dark:border-slate-700">
                     <Table className="w-full">
-                      <TableHeader className="sticky top-0 z-10">
-                        <TableRow className="border-0">
-                          <Th>Category</Th>
-                          <Th right>Amount</Th>
-                        </TableRow>
-                      </TableHeader>
+                      <ColumnHead columns={pl.visible} />
                       <TableBody className="divide-y divide-slate-50 dark:divide-slate-700">
-                        {[
-                          { label: 'Salaries & Benefits', val: plExpensesFiltered.salaries },
-                          { label: 'Office & Administration', val: plExpensesFiltered.admin },
-                          { label: 'Tax & Regulation', val: plExpensesFiltered.tax },
-                          { label: 'Loan Loss Provisions', val: plExpensesFiltered.provisions },
-                          { label: 'Other Expenses', val: plExpensesFiltered.other },
-                        ].map(row => (
+                        {plExpenseRows.map(row => (
                           <TableRow key={row.label} className="border-0 hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
-                            <TableCell className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">{row.label}</TableCell>
-                            <TableCell className="px-4 py-3 text-xs font-medium text-slate-700 dark:text-slate-200 text-right">{formatVal(row.val, plCurrency, plExchangeRate)}</TableCell>
+                            <ColumnCells columns={pl.visible} row={row} />
                           </TableRow>
                         ))}
                       </TableBody>
                       <TableFooter className="sticky bottom-0 z-10">
-                        <TableRow className="border-0 border-t-2 border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700/50 hover:bg-slate-50 dark:hover:bg-slate-700/50">
-                          <TableCell className="px-4 py-3 text-xs font-bold text-slate-700 dark:text-slate-200">Total Expenses</TableCell>
-                          <TableCell className="px-4 py-3 text-xs font-bold text-rose-600 text-right">{formatVal(plExpensesFiltered.total, plCurrency, plExchangeRate)}</TableCell>
-                        </TableRow>
+                        <TotalsRow
+                          columns={pl.visible}
+                          label="Total Expenses"
+                          totals={{ amount: formatVal(plExpensesFiltered.total, plCurrency, plExchangeRate) }}
+                          cls={{ amount: 'text-rose-600' }}
+                        />
                       </TableFooter>
                     </Table>
                   </div>
@@ -783,6 +883,7 @@ export default function FinancialReportSection() {
               meta={`${bsCurrency}${bsCurrency === 'KHR' ? ` (1 USD = ${bsExchangeRate} KHR)` : ''} · ${bsBranch}`}
             />
             <ReportPanel
+              columnPicker={bs.picker}
               onPrint={() => handlePrint()}
               onDownload={handleDownloadBs}
               filters={<>
@@ -798,99 +899,30 @@ export default function FinancialReportSection() {
               </>}
             >
               <div className="p-4 space-y-6 overflow-y-auto flex-1 min-h-0">
-                {/* Assets */}
-                <div>
-                  <h4 className="text-xs font-bold text-slate-700 dark:text-slate-200 uppercase tracking-widest mb-3">Assets</h4>
-                  <div className="overflow-x-auto rounded-xl border border-slate-100 dark:border-slate-700">
-                    <Table className="w-full">
-                      <TableHeader className="sticky top-0 z-10">
-                        <TableRow className="border-0">
-                          <Th>Description</Th>
-                          <Th right>Debit</Th>
-                          <Th right>Credit</Th>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody className="divide-y divide-slate-50 dark:divide-slate-700">
-                        {bsAssetRows.map(r => (
-                          <TableRow key={r.label} className="border-0 hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
-                            <TableCell className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">{r.label}</TableCell>
-                            <TableCell className="px-4 py-3 text-xs font-medium text-slate-700 dark:text-slate-200 text-right">{r.debit > 0 ? formatVal(r.debit, bsCurrency, bsExchangeRate) : '—'}</TableCell>
-                            <TableCell className="px-4 py-3 text-xs font-medium text-slate-700 dark:text-slate-200 text-right">{r.credit > 0 ? formatVal(r.credit, bsCurrency, bsExchangeRate) : '—'}</TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                      <TableFooter>
-                        <TableRow className="border-0 border-t-2 border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700/50 hover:bg-slate-50 dark:hover:bg-slate-700/50">
-                          <TableCell className="px-4 py-3 text-xs font-bold text-slate-700 dark:text-slate-200">Total Assets</TableCell>
-                          <TableCell className="px-4 py-3 text-xs font-bold text-brand-600 text-right">{formatVal(bsTotalAssets, bsCurrency, bsExchangeRate)}</TableCell>
-                          <TableCell className="px-4 py-3 text-xs text-right">—</TableCell>
-                        </TableRow>
-                      </TableFooter>
-                    </Table>
-                  </div>
-                </div>
-                {/* Liabilities */}
-                <div>
-                  <h4 className="text-xs font-bold text-slate-700 dark:text-slate-200 uppercase tracking-widest mb-3">Liabilities</h4>
-                  <div className="overflow-x-auto rounded-xl border border-slate-100 dark:border-slate-700">
-                    <Table className="w-full">
-                      <TableHeader className="sticky top-0 z-10">
-                        <TableRow className="border-0">
-                          <Th>Description</Th>
-                          <Th right>Debit</Th>
-                          <Th right>Credit</Th>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody className="divide-y divide-slate-50 dark:divide-slate-700">
-                        {bsLiabilityRows.map(r => (
-                          <TableRow key={r.label} className="border-0 hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
-                            <TableCell className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">{r.label}</TableCell>
-                            <TableCell className="px-4 py-3 text-xs font-medium text-slate-700 dark:text-slate-200 text-right">{r.debit > 0 ? formatVal(r.debit, bsCurrency, bsExchangeRate) : '—'}</TableCell>
-                            <TableCell className="px-4 py-3 text-xs font-medium text-slate-700 dark:text-slate-200 text-right">{r.credit > 0 ? formatVal(r.credit, bsCurrency, bsExchangeRate) : '—'}</TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                      <TableFooter>
-                        <TableRow className="border-0 border-t-2 border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700/50 hover:bg-slate-50 dark:hover:bg-slate-700/50">
-                          <TableCell className="px-4 py-3 text-xs font-bold text-slate-700 dark:text-slate-200">Total Liabilities</TableCell>
-                          <TableCell className="px-4 py-3 text-xs text-right">—</TableCell>
-                          <TableCell className="px-4 py-3 text-xs font-bold text-rose-600 text-right">{formatVal(bsTotalLiabilities, bsCurrency, bsExchangeRate)}</TableCell>
-                        </TableRow>
-                      </TableFooter>
-                    </Table>
-                  </div>
-                </div>
-                {/* Equity */}
-                <div>
-                  <h4 className="text-xs font-bold text-slate-700 dark:text-slate-200 uppercase tracking-widest mb-3">Equity</h4>
-                  <div className="overflow-x-auto rounded-xl border border-slate-100 dark:border-slate-700">
-                    <table className="w-full">
-                      <thead className="sticky top-0 z-10">
-                        <tr>
-                          <Th>Description</Th>
-                          <Th right>Debit</Th>
-                          <Th right>Credit</Th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-50 dark:divide-slate-700">
-                        {bsEquityRows.map(r => (
-                          <tr key={r.label} className="hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
-                            <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">{r.label}</td>
-                            <td className="px-4 py-3 text-xs font-medium text-slate-700 dark:text-slate-200 text-right">{r.debit > 0 ? formatVal(r.debit, bsCurrency, bsExchangeRate) : '—'}</td>
-                            <td className="px-4 py-3 text-xs font-medium text-slate-700 dark:text-slate-200 text-right">{r.credit > 0 ? formatVal(r.credit, bsCurrency, bsExchangeRate) : '—'}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                      <tfoot>
-                        <tr className="border-t-2 border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700/50">
-                          <td className="px-4 py-3 text-xs font-bold text-slate-700 dark:text-slate-200">Total Equity</td>
-                          <td className="px-4 py-3 text-xs text-right">—</td>
-                          <td className="px-4 py-3 text-xs font-bold text-brand-600 text-right">{formatVal(bsTotalEquity, bsCurrency, bsExchangeRate)}</td>
-                        </tr>
-                      </tfoot>
-                    </table>
-                  </div>
-                </div>
+                <StatementSection
+                  title="Assets"
+                  columns={bs.visible}
+                  rows={bsAssetRows}
+                  totalLabel="Total Assets"
+                  totals={{ debit: formatVal(bsTotalAssets, bsCurrency, bsExchangeRate), credit: '—' }}
+                  cls={{ debit: 'text-brand-600', credit: 'font-normal text-slate-500' }}
+                />
+                <StatementSection
+                  title="Liabilities"
+                  columns={bs.visible}
+                  rows={bsLiabilityRows}
+                  totalLabel="Total Liabilities"
+                  totals={{ debit: '—', credit: formatVal(bsTotalLiabilities, bsCurrency, bsExchangeRate) }}
+                  cls={{ debit: 'font-normal text-slate-500', credit: 'text-rose-600' }}
+                />
+                <StatementSection
+                  title="Equity"
+                  columns={bs.visible}
+                  rows={bsEquityRows}
+                  totalLabel="Total Equity"
+                  totals={{ debit: '—', credit: formatVal(bsTotalEquity, bsCurrency, bsExchangeRate) }}
+                  cls={{ debit: 'font-normal text-slate-500', credit: 'text-brand-600' }}
+                />
               </div>
             </ReportPanel>
           </div>

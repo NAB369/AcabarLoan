@@ -71,17 +71,27 @@ function EmptyState({ icon: Icon, title, hint, bare = false, className = '', chi
 const GENDERS = ['Male', 'Female']
 const MARITAL_STATUSES = ['Single', 'Married', 'Divorced', 'Widowed']
 const COLLATERAL_TYPES = ['Land', 'Vehicle', 'House']
+// The order these appear in is the order they are worked: who is borrowing, what they earn
+// and spend, what secures it, what the bureau says, then the terms and the verdicts.
+//
+// Each carries an id and the panels below key off TAB.<id>, never off a literal index —
+// reordering this array used to mean renumbering nine `activeTab === n` checks by hand, and
+// getting one wrong silently swapped two screens. Audit Log stays last: the strip renders the
+// final entry apart, pushed to the right.
 const DETAIL_TABS = [
-  { label: 'Overview', icon: LayoutDashboard },
-  { label: 'Customer', icon: User },
-  { label: 'CBC', icon: CreditCard },
-  { label: 'Collateral', icon: Building },
-  { label: 'Income Verification', icon: ArrowDownLeft },
-  { label: 'Expense Verification', icon: Wallet },
-  { label: 'Loan Suggestion', icon: Calculator },
-  { label: 'Risk Assessment', icon: ShieldAlert },
-  { label: 'Audit Log', icon: History },
+  { id: 'overview',   label: 'Overview',          icon: LayoutDashboard },
+  { id: 'customer',   label: 'Customer',          icon: User },
+  { id: 'income',     label: 'Income',            icon: ArrowDownLeft },
+  { id: 'expense',    label: 'Expense',           icon: Wallet },
+  { id: 'collateral', label: 'Collateral',        icon: Building },
+  { id: 'cbc',        label: 'CBC',               icon: CreditCard },
+  { id: 'suggestion', label: 'Loan Suggestion',   icon: Calculator },
+  { id: 'assessment', label: 'Credit Assessment', icon: Scale },
+  { id: 'risk',       label: 'Risk Assessment',   icon: ShieldAlert },
+  { id: 'audit',      label: 'Audit Log',         icon: History },
 ]
+
+const TAB = Object.fromEntries(DETAIL_TABS.map((t, i) => [t.id, i]))
 
 function makePartyForm(party) {
   return {
@@ -579,10 +589,6 @@ export default function LoanDetail() {
   const hasCoBorrower = coBorrowers.length > 0 || !!loan.coBorrowerCreditHistoryInfo
   const cbcTargets = ['borrower', ...(hasCoBorrower && showCoBorrowerCbc ? ['coBorrower'] : [])]
   const activeCbcTarget = cbcTargets.includes(cbcTarget) ? cbcTarget : 'borrower'
-
-  // Which half of the Loan Suggestion tab is showing: the credit verdict, or the rates and
-  // terms set against it.
-  const [suggestionSection, setSuggestionSection] = useState('assessment')
 
   // Which collateral the Collateral tab is showing, by position. Derived against the list so
   // removing the last one falls back to the first instead of pointing past the end.
@@ -1621,7 +1627,7 @@ export default function LoanDetail() {
       <div className="bg-white dark:bg-slate-800 rounded-2xl overflow-hidden">
         <div className="pt-0 px-6 pb-6 max-h-[65vh] overflow-y-auto">
 
-        {activeTab === 0 && (
+        {activeTab === TAB.overview && (
         /* Section 1: Loan Overview — main info at a glance */
         <div className="space-y-4 pt-6">
           <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-700 pb-2">
@@ -1740,7 +1746,7 @@ export default function LoanDetail() {
         </div>
         )}
 
-        {activeTab === 1 && (
+        {activeTab === TAB.customer && (
         /* Section 2: Customer (Borrower, Co-Borrower, Guarantor) */
         <div className="space-y-4">
           {/* Same party tab bar as the CBC tab, but only for parties the loan actually has:
@@ -1910,7 +1916,7 @@ export default function LoanDetail() {
         </div>
         )}
 
-        {activeTab === 2 && (
+        {activeTab === TAB.cbc && (
         /* Section 3: Credit History & Score (CBC) */
         <div className="space-y-4">
           {/* Which tab is active is derived rather than stored, so removing the co-borrower's
@@ -2079,7 +2085,7 @@ export default function LoanDetail() {
         </div>
         )}
 
-        {activeTab === 3 && (
+        {activeTab === TAB.collateral && (
         /* Section 3: Collateral */
         <div className="space-y-4 pt-4">
           {/* One tab per collateral, named by what it is — a loan pledging land and a vehicle
@@ -2217,7 +2223,7 @@ export default function LoanDetail() {
         </div>
         )}
 
-        {activeTab === 4 && (
+        {activeTab === TAB.income && (
         /* Section 4: Income — the verification workspace: pick an income entry, read its
            documents alongside the declared figures, and record the review decision. */
         <IncomeVerification
@@ -2232,7 +2238,7 @@ export default function LoanDetail() {
         />
         )}
 
-        {activeTab === 5 && (
+        {activeTab === TAB.expense && (
         /* Section 5: Expense Verification — the declared expense types against what six months
            of bank statements show actually going out. Laid out like Income Verification. */
         <ExpenseVerification
@@ -2246,37 +2252,18 @@ export default function LoanDetail() {
         />
         )}
 
-        {activeTab === 6 && (
-        /* Section 6: Loan Suggestion — the verification verdict, and the rates/terms the
-           officer sets against it. The two used to run one under the other on a single very
-           long page; they are now a sub-tab each, on the same bar the CBC tab uses. Credit
-           Assessment leads because it is what the terms have to be justified against. */
-        <div className="pt-6 space-y-4">
-          <PartyTabs
-            idPrefix="suggestion-section"
-            ariaLabel="Loan suggestion sections"
-            activeId={suggestionSection}
-            onSelect={setSuggestionSection}
-            showMeta={false}
-            items={[
-              { id: 'assessment', label: 'Credit Assessment' },
-              { id: 'terms', label: 'Rates & Terms' },
-            ]}
-          />
+        {/* The credit verdict — its own tab now, rather than a sub-tab of Loan Suggestion. */}
+        {activeTab === TAB.assessment && (
+        <div className="pt-6">
+          <CreditVerificationPanel loan={loan} currency={currency} />
+        </div>
+        )}
 
-          {suggestionSection === 'assessment' && (
-            <div role="tabpanel" id="suggestion-section-panel-assessment" aria-labelledby="suggestion-section-tab-assessment">
-              <CreditVerificationPanel loan={loan} currency={currency} />
-            </div>
-          )}
-
-          {suggestionSection === 'terms' && (
-          <div
-            role="tabpanel"
-            id="suggestion-section-panel-terms"
-            aria-labelledby="suggestion-section-tab-terms"
-            className="grid grid-cols-1 lg:grid-cols-10 gap-4 items-start"
-          >
+        {activeTab === TAB.suggestion && (
+        /* Loan Suggestion — the rates and terms the officer sets against the verdict on the
+           Credit Assessment tab beside it. */
+        <div className="pt-6">
+          <div className="grid grid-cols-1 lg:grid-cols-10 gap-4 items-start">
           {/* Left: adjust loan product rate and benefit rate */}
           <div className="lg:col-span-3 space-y-4">
             <div className="rounded-xl overflow-hidden border border-slate-100 dark:border-slate-700">
@@ -2623,11 +2610,10 @@ export default function LoanDetail() {
             </div>
           </div>
           </div>
-          )}
         </div>
         )}
 
-        {activeTab === 7 && (
+        {activeTab === TAB.risk && (
         /* Section 9: Risk Assessment — auto-derived from each party's CBC data, plus
            manual factors a credit officer can add/remove to supplement it. */
         <div className="rounded-xl overflow-hidden">
@@ -2749,7 +2735,7 @@ export default function LoanDetail() {
         </div>
         )}
 
-        {activeTab === 8 && (
+        {activeTab === TAB.audit && (
         /* Section 10: Audit Log */
         <div className="rounded-xl overflow-hidden">
           <div className="px-4 py-3">

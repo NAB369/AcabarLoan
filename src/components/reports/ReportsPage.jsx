@@ -1,14 +1,15 @@
 import { useState, useMemo, useRef, useLayoutEffect } from 'react'
 import {
   FileText, AlertTriangle, Clock, Landmark, ChevronLeft, Calendar, BarChart3, Activity,
-  ChevronDown, ChevronRight, Printer, Download,
+  ChevronDown, Printer, Download,
   Users, Banknote, CheckCircle, ClipboardList, Percent, Wallet, ShieldAlert,
 } from 'lucide-react'
 import jsPDF from 'jspdf'
 import autoTable from 'jspdf-autotable'
 import { useApp } from '../../context/AppContext'
-import { formatVal, buildAmortizationData, formatAddress } from '../../utils/format'
+import { formatVal, buildAmortizationData, formatAddress, daysBetweenISO } from '../../utils/format'
 import StatusBadge from '../shared/StatusBadge'
+import { useTableColumns, ColumnPicker } from '../shared/DataTableTools'
 import { companyLogoSrc } from '../../utils/companyLogo'
 import FinancialReportSection from './FinancialReportSection'
 import ReportCard from './ReportCard'
@@ -16,7 +17,7 @@ import ReportCard from './ReportCard'
 // One definition drives the report selector, the report listing table and the
 // rendered body below — adding a report here puts it in all three at once.
 const REPORT_TABS = [
-  { id: 'listing',            label: 'Report Overview',                icon: ClipboardList,     category: 'Overview',    description: 'Index of every loan report in this module' },
+  { id: 'listing',            label: 'Overview',                       icon: ClipboardList,     category: 'Overview',    description: 'Index of every loan report in this module' },
   { id: 'collection-sheet',   label: 'Collection Sheet — Due & Overdue', icon: Clock,           category: 'Operations',  description: 'Installments due and overdue, for field collection' },
   { id: 'transactions',       label: 'Transaction Report',             icon: Activity,          category: 'Operations',  description: 'Repayments and disbursements over a date range' },
   { id: 'arrears',            label: 'Arrears & Portfolio at Risk',    icon: AlertTriangle,     category: 'Credit Risk', description: 'PAR aging and classification, grouped as needed' },
@@ -66,80 +67,25 @@ const SUMMARY_GROUPS = [
   { value: 'product',        label: 'Product Type',           column: 'Product Type',   key: l => l.product || 'Unspecified' },
 ]
 
-// Arrears aging. `rateNum` is the reserve rate the Loan Loss Provision report
-// multiplies against the outstanding balance to get the required provision.
-const PAR_ROWS = [
-  { bucket: 'Current (0 Days)',            classification: 'Normal',          rate: '1%',   rateNum: 1,   accounts: 42, outstanding: 186400, arrears: 0 },
-  { bucket: '1–30 Days Arrears',           classification: 'Special Mention', rate: '3%',   rateNum: 3,   accounts: 6,  outstanding: 24150,  arrears: 3220 },
-  { bucket: '31–60 Days Arrears',          classification: 'Sub-Standard',    rate: '20%',  rateNum: 20,  accounts: 3,  outstanding: 11600,  arrears: 2480 },
-  { bucket: '61–90 Days Arrears',          classification: 'Doubtful',        rate: '50%',  rateNum: 50,  accounts: 2,  outstanding: 6900,   arrears: 2100 },
-  { bucket: '90+ Days Arrears (Default)',  classification: 'Loss/Write-off',  rate: '100%', rateNum: 100, accounts: 1,  outstanding: 2000,   arrears: 2000 },
+// NBC-style arrears aging. A loan sits in the band its worst unsettled installment puts it in;
+// `rateNum` is the reserve rate the Loan Loss Provision report multiplies against outstanding
+// principal. These bands and rates are regulatory policy — unlike the figures they classify,
+// they are not derived from the register.
+const AGING_BANDS = [
+  { bucket: 'Current (0 Days)',            classification: 'Normal',          rate: '1%',   rateNum: 1,   maxDaysLate: 0 },
+  { bucket: '1–30 Days Arrears',           classification: 'Special Mention', rate: '3%',   rateNum: 3,   maxDaysLate: 30 },
+  { bucket: '31–60 Days Arrears',          classification: 'Sub-Standard',    rate: '20%',  rateNum: 20,  maxDaysLate: 60 },
+  { bucket: '61–90 Days Arrears',          classification: 'Doubtful',        rate: '50%',  rateNum: 50,  maxDaysLate: 90 },
+  { bucket: '90+ Days Arrears (Default)',  classification: 'Loss/Write-off',  rate: '100%', rateNum: 100, maxDaysLate: Infinity },
 ]
 
-const ARREARS_BY_TYPE_ROWS = [
-  { name: 'Business Loan',     accounts: 14, outstanding: 68400, arrears: 2150 },
-  { name: 'SME Loan',          accounts: 6,  outstanding: 92000, arrears: 3600 },
-  { name: 'Agricultural Loan', accounts: 9,  outstanding: 31200, arrears: 1480 },
-  { name: 'Personal Loan',     accounts: 18, outstanding: 24300, arrears: 2120 },
-  { name: 'Vehicle Loan',      accounts: 7,  outstanding: 15150, arrears: 450  },
-]
-
-const ARREARS_BY_ADDRESS_ROWS = [
-  { name: 'Phnom Penh HQ',       accounts: 22, outstanding: 142000, arrears: 4200 },
-  { name: 'Siem Reap Branch',    accounts: 9,  outstanding: 28500,  arrears: 1650 },
-  { name: 'Battambang Branch',   accounts: 8,  outstanding: 24300,  arrears: 1980 },
-  { name: 'Kampong Speu Branch', accounts: 6,  outstanding: 18900,  arrears: 1120 },
-  { name: 'Kandal Branch',       accounts: 5,  outstanding: 15350,  arrears: 850  },
-]
-
-// How the Arrears report can be grouped. Aging keeps the classification and reserve
-// rate columns; the other two are plain accounts/outstanding/arrears breakdowns.
+// How the Arrears report can be grouped. Aging keeps the classification and reserve rate
+// columns; the other two are plain accounts/outstanding/arrears breakdowns, keyed off a
+// field of the loan itself.
 const ARREARS_GROUPS = [
-  { value: 'aging',   label: 'Aging Bucket', column: 'Aging Bucket',  rows: PAR_ROWS },
-  { value: 'product', label: 'Loan Type',    column: 'Loan Type',     rows: ARREARS_BY_TYPE_ROWS },
-  { value: 'area',    label: 'Area / Branch', column: 'Area / Branch', rows: ARREARS_BY_ADDRESS_ROWS },
-]
-
-// Collection sheet — today's due installments and everything already overdue in one
-// list, so an officer carries a single sheet into the field.
-const COLLECTION_ROWS = [
-  { ref: 'AC-L-000991', customer: 'SOK CHANTHA',   product: 'SME Loan',          installment: 6,  dueDate: 'Today',      daysLate: 0,  amount: 890.50, branch: 'Phnom Penh HQ',     creditOfficer: 'Srey Neang', status: 'Due Today' },
-  { ref: 'AC-L-000998', customer: 'PHAL DARA',     product: 'Personal Loan',     installment: 3,  dueDate: 'Today',      daysLate: 0,  amount: 145.00, branch: 'Siem Reap Branch',  creditOfficer: 'Vuthy Sok',  status: 'Due Today' },
-  { ref: 'AC-L-000985', customer: 'MUNNY ROTHANA', product: 'Business Loan',     installment: 11, dueDate: 'Today',      daysLate: 0,  amount: 612.40, branch: 'Phnom Penh HQ',     creditOfficer: 'Vuthy Sok',  status: 'Due Today' },
-  { ref: 'AC-L-000979', customer: 'CHAN THEARY',   product: 'Personal Loan',     installment: 2,  dueDate: 'Today',      daysLate: 0,  amount: 184.97, branch: 'Phnom Penh HQ',     creditOfficer: 'Vuthy Sok',  status: 'Due Today' },
-  { ref: 'AC-L-001003', customer: 'SENG HONG',     product: 'Agricultural Loan', installment: 5,  dueDate: '01/07/2026', daysLate: 21, amount: 272.30, branch: 'Battambang Branch', creditOfficer: 'Vuthy Sok',  status: 'Overdue'   },
-  { ref: 'AC-L-001004', customer: 'LIM KIMHOUR',   product: 'SME Loan',          installment: 8,  dueDate: '01/07/2026', daysLate: 21, amount: 866.19, branch: 'Phnom Penh HQ',     creditOfficer: 'Srey Neang', status: 'Overdue'   },
-]
-
-// Transactions booked today. These carry no date of their own — buildTransactionRows
-// stamps them with the current date so the date-range filter covers them too.
-const TODAY_TRANSACTION_ROWS = [
-  { time: '09:12 AM', ref: 'AC-L-000991', customer: 'SOK CHANTHA',   type: 'Repayment',    amount: 890.50,  method: 'Cash',          officer: 'Sokha Chea',  balanceAfter: null },
-  { time: '10:05 AM', ref: 'AC-L-001007', customer: 'PICH SAROEUN',  type: 'Disbursement', amount: 6000.00, method: 'Bank Transfer', officer: 'Admin',       balanceAfter: null },
-  { time: '11:40 AM', ref: 'AC-L-000998', customer: 'PHAL DARA',     type: 'Repayment',    amount: 145.00,  method: 'ABA Pay',       officer: 'Sokha Chea',  balanceAfter: null },
-  { time: '01:20 PM', ref: 'AC-L-000985', customer: 'MUNNY ROTHANA', type: 'Repayment',    amount: 612.40,  method: 'Cash',          officer: 'Kunthea Lay', balanceAfter: null },
-  { time: '03:55 PM', ref: 'AC-L-000979', customer: 'CHAN THEARY',   type: 'Repayment',    amount: 184.97,  method: 'Wing Pay',      officer: 'Kunthea Lay', balanceAfter: null },
-]
-
-const HISTORY_TRANSACTION_ROWS = [
-  { dateISO: '2026-07-15', date: '15/07/2026', time: '—', ref: 'AC-L-001004', customer: 'LIM KIMHOUR',  type: 'Repayment',    amount: 866.19,  method: '—', officer: 'Srey Neang', balanceAfter: 20305.24 },
-  { dateISO: '2026-07-10', date: '10/07/2026', time: '—', ref: 'AC-L-001003', customer: 'SENG HONG',    type: 'Repayment',    amount: 272.30,  method: '—', officer: 'Vuthy Sok',  balanceAfter: 1361.50  },
-  { dateISO: '2026-07-01', date: '01/07/2026', time: '—', ref: 'AC-L-001006', customer: 'HENG SOPHEAK', type: 'Repayment',    amount: 519.71,  method: '—', officer: 'Srey Neang', balanceAfter: 6236.52  },
-  { dateISO: '2026-06-20', date: '20/06/2026', time: '—', ref: 'AC-L-001005', customer: 'CHAN THEARY',  type: 'Disbursement', amount: 2000.00, method: '—', officer: 'Vuthy Sok',  balanceAfter: 2000.00  },
-  { dateISO: '2026-06-15', date: '15/06/2026', time: '—', ref: 'AC-L-001004', customer: 'LIM KIMHOUR',  type: 'Repayment',    amount: 866.19,  method: '—', officer: 'Srey Neang', balanceAfter: 21171.43 },
-  { dateISO: '2026-06-01', date: '01/06/2026', time: '—', ref: 'AC-L-001003', customer: 'SENG HONG',    type: 'Repayment',    amount: 272.30,  method: '—', officer: 'Vuthy Sok',  balanceAfter: 1633.80  },
-  { dateISO: '2026-05-20', date: '20/05/2026', time: '—', ref: 'AC-L-001006', customer: 'HENG SOPHEAK', type: 'Repayment',    amount: 519.71,  method: '—', officer: 'Srey Neang', balanceAfter: 6756.23  },
-  { dateISO: '2026-05-01', date: '01/05/2026', time: '—', ref: 'AC-L-001003', customer: 'SENG HONG',    type: 'Repayment',    amount: 272.30,  method: '—', officer: 'Vuthy Sok',  balanceAfter: 1906.10  },
-]
-
-// Loan closures — paid off and written off are the same lifecycle event with a
-// different reason, so they share one report filtered by closure type.
-const CLOSED_LOAN_ROWS = [
-  { ref: 'AC-L-000972', customer: 'KEO SOPHEA',    product: 'Agricultural Loan', originalAmount: 4000, closureDate: '18/05/2026', amount: 2140.00, closure: 'Paid Off',    detail: 'Bank Transfer',                    approvedBy: '—'          },
-  { ref: 'AC-L-000965', customer: 'HENG SOPHEAK',  product: 'Business Loan',     originalAmount: 6000, closureDate: '02/04/2026', amount: 1850.75, closure: 'Paid Off',    detail: 'Cash',                             approvedBy: '—'          },
-  { ref: 'AC-L-000958', customer: 'MUNNY ROTHANA', product: 'Personal Loan',     originalAmount: 1500, closureDate: '22/02/2026', amount: 410.20,  closure: 'Paid Off',    detail: 'ABA Pay',                          approvedBy: '—'          },
-  { ref: 'AC-L-000940', customer: 'SENG HONG',     product: 'Agricultural Loan', originalAmount: null, closureDate: '15/01/2026', amount: 800.00,  closure: 'Written Off', detail: 'Guarantor default, uncollectible', approvedBy: 'Admin'      },
-  { ref: 'AC-L-000933', customer: 'CHAN THEARY',   product: 'Personal Loan',     originalAmount: null, closureDate: '28/11/2025', amount: 320.50,  closure: 'Written Off', detail: 'Borrower untraceable',            approvedBy: 'Srey Neang' },
+  { value: 'aging',   label: 'Aging Bucket',  column: 'Aging Bucket'   },
+  { value: 'product', label: 'Loan Type',     column: 'Loan Type',     key: l => l.product || 'Unspecified' },
+  { value: 'area',    label: 'Area / Branch', column: 'Area / Branch', key: l => l.branch || 'Unassigned' },
 ]
 
 // Mirrors the Dashboard KPI card so the two modules read as one system.
@@ -167,11 +113,14 @@ function KpiCard({ label, value, sub, icon: Icon, iconBg, valueClass = 'text-2xl
 // that measurement lands (and where there is no layout to measure, as on a server render) every
 // tab renders, so nothing is ever unreachable.
 const TAB_GAP_PX = 4
-const MORE_WIDTH_PX = 104
+const MORE_WIDTH_PX = 116
 
-const tabCls = (active) => `px-3.5 py-2 text-xs font-semibold whitespace-nowrap rounded-2xl transition-colors ${
+// The Financial Report's tab, to the letter — the two report modules sit behind the same
+// Reports entry, and a tab that looked and highlighted differently in each read as two
+// different controls. See STATEMENT_TABS in FinancialReportSection.jsx.
+const tabCls = (active) => `h-auto flex items-center gap-1.5 px-4 py-2 text-xs font-semibold whitespace-nowrap rounded-2xl transition-colors ${
   active
-    ? 'bg-brand-50 text-brand-600 dark:bg-brand-900/30 dark:text-brand-400'
+    ? 'bg-blue-50 text-[#0047ab] dark:bg-blue-900/30 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/30 hover:text-[#0047ab] dark:hover:text-blue-400'
     : 'text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-700 hover:text-slate-700 dark:hover:text-slate-200'
 }`
 
@@ -249,10 +198,12 @@ function ReportTypeTabs({ value, onChange }) {
   }
 
   return (
-    <div className="relative bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/60 dark:border-slate-700 shadow-sm px-3 py-2.5">
+    <div className="relative bg-white dark:bg-slate-800 rounded-2xl overflow-visible px-4 py-3">
       {/* Measured, never seen: the same tabs at natural width, so the row above knows what fits. */}
       <div ref={measureRef} aria-hidden="true" className="absolute invisible pointer-events-none flex gap-1 whitespace-nowrap">
-        {REPORT_TABS.map(t => <span key={t.id} className={tabCls(false)}>{t.label}</span>)}
+        {REPORT_TABS.map(t => (
+          <span key={t.id} className={tabCls(false)}><t.icon className="w-3.5 h-3.5" />{t.label}</span>
+        ))}
       </div>
 
       <div ref={rowRef} className="flex items-center gap-1 min-w-0">
@@ -272,6 +223,7 @@ function ReportTypeTabs({ value, onChange }) {
                 title={t.description}
                 className={tabCls(active)}
               >
+                <t.icon className="w-3.5 h-3.5 flex-shrink-0" />
                 {t.label}
               </button>
             )
@@ -304,8 +256,9 @@ function ReportTypeTabs({ value, onChange }) {
                       role="menuitem"
                       onClick={() => pick(t.id)}
                       title={t.description}
-                      className="w-full text-left px-2.5 py-2 rounded-lg text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700/50 transition-colors"
+                      className="w-full flex items-center gap-2 text-left px-2.5 py-2 rounded-lg text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700/50 transition-colors"
                     >
+                      <t.icon className="w-3.5 h-3.5 flex-shrink-0" />
                       {t.label}
                     </button>
                   ))}
@@ -431,9 +384,26 @@ function PrintReportHeader({ title, meta }) {
 // actions. `totals` renders a sticky footer row, keyed by column so money columns line
 // up with the data. `reportTitle` names the sheet on paper and in the PDF; `meta` is the
 // one-line filter summary printed under it.
-function SimpleReportTable({ reportTitle, meta, count, columns, rows, toolbar, totals, emptyMessage = 'No records found.' }) {
-  const { state, showToast } = useApp()
+function SimpleReportTable({ tableId, reportTitle, meta, count, columns: allColumns, rows, toolbar, totals, emptyMessage = 'No records found.' }) {
+  const { state, dispatch, showToast } = useApp()
   const { companyProfile } = state
+
+  // These reports run wide — ten columns on the collection sheet — and an officer working one
+  // question ("who is overdue and by how much") wants four of them. The choice is kept per
+  // report in the reducer, so the view an operator sets is the view they get back tomorrow.
+  // `key` is this table's column identifier; the picker's is `id`.
+  const pickerColumns = useMemo(() => allColumns.map(c => ({ id: c.key, label: c.label })), [allColumns])
+  const { visibleIds, toggle } = useTableColumns(pickerColumns, {
+    value: tableId ? state.reportColumns?.[tableId] : null,
+    onChange: tableId ? (ids => dispatch({ type: 'SET_REPORT_COLUMNS', table: tableId, ids })) : null,
+  })
+  // Hiding a column narrows print and PDF export too — the point of hiding it is usually to
+  // get the sheet down to what fits on paper.
+  const columns = useMemo(
+    () => (tableId ? allColumns.filter(c => visibleIds.includes(c.key)) : allColumns),
+    [tableId, allColumns, visibleIds]
+  )
+
   // Wide reports would clip on portrait A4 — those print and export landscape.
   const landscape = columns.length > 6
 
@@ -482,13 +452,28 @@ function SimpleReportTable({ reportTitle, meta, count, columns, rows, toolbar, t
     showToast(`${reportTitle} downloaded`, 'success')
   }
 
+  // The card can't clip its own overflow any more: the column picker's panel drops out of the
+  // header row, and on a short report (or one filtered down to no rows) a clipping card would
+  // cut the list off with no way to scroll to the rest. The scroll box below rounds its own
+  // bottom corners instead, which is all the clipping was doing.
   return (
-    <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/60 dark:border-slate-700 shadow-sm overflow-hidden">
+    <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/60 dark:border-slate-700 shadow-sm">
       <div className="px-5 py-4 border-b border-slate-100 dark:border-slate-700 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         {toolbar && <div className="flex items-center gap-x-4 gap-y-2 flex-wrap min-w-0">{toolbar}</div>}
         <div className="flex items-center gap-2 flex-shrink-0 lg:ml-auto">
           {count != null && (
             <p className="text-xs text-slate-400 dark:text-slate-500 mr-1">{count} records</p>
+          )}
+          {tableId && (
+            <div className="print:hidden">
+              <ColumnPicker
+                columns={pickerColumns}
+                visibleIds={visibleIds}
+                onToggle={toggle}
+                iconOnly
+                className="py-1.5 rounded-lg"
+              />
+            </div>
           )}
           <button
             onClick={handlePrint}
@@ -508,7 +493,7 @@ function SimpleReportTable({ reportTitle, meta, count, columns, rows, toolbar, t
       </div>
       <div className="printable-area">
       <PrintReportHeader title={reportTitle} meta={meta} />
-      <div className="overflow-x-auto max-h-[460px] overflow-y-auto">
+      <div className="overflow-x-auto max-h-[460px] overflow-y-auto rounded-b-2xl">
         <table className="w-full">
           <thead className="sticky top-0 z-10">
             <tr>
@@ -558,13 +543,159 @@ function buildDisbursementRows(loanApplications) {
     .map(l => ({ ...l, key: l.ref, stage: l.status === 'Active' ? 'Disbursed' : 'Pending Disbursement' }))
 }
 
-// Today's transactions carry no date of their own, so stamp them with the current
-// date and merge them into the dated history for one range-filterable list.
-function buildTransactionRows(todayISO, todayLabel) {
-  const today = TODAY_TRANSACTION_ROWS.map(r => ({ ...r, dateISO: todayISO, date: todayLabel }))
-  return [...today, ...HISTORY_TRANSACTION_ROWS]
-    .sort((a, b) => b.dateISO.localeCompare(a.dateISO) || (b.time || '').localeCompare(a.time || ''))
-    .map((r, i) => ({ ...r, key: `${r.ref}-${r.dateISO}-${i}` }))
+const round2 = n => Math.round((n || 0) * 100) / 100
+const dmy = iso => (iso ? new Date(`${iso}T00:00:00`).toLocaleDateString('en-GB') : '—')
+
+// A disbursed loan carries its schedule on the record — RECORD_REPAYMENT writes what was
+// actually collected back onto it — so the operational reports read that rather than deriving
+// their own. A loan with no stored schedule (never disbursed, or saved before schedules were
+// kept there) falls back to the amortization its own terms imply.
+function loanSchedule(loan) {
+  if (loan.schedule?.length) return loan.schedule
+  if (!loan.amount || !loan.interestRate) return []
+  return buildAmortizationData(loan.amount, loan.interestRate, loan.installments || 12, loan.firstInstallment).rows
+}
+
+const isLive = loan => loan.status === 'Active'
+const isSettled = row => row.status === 'Paid'
+// What an installment still owes. A partial payment settles part of it, so the rest stays
+// collectable rather than the whole installment dropping off the sheet or staying on it whole.
+const stillOwed = row => Math.max(round2((row.totalDue || 0) + (row.lateFee || 0) - (row.paid || 0)), 0)
+
+// Installments already due on a live loan and not yet settled — the round to collect today.
+function buildCollectionRows(loanApplications, todayISO) {
+  const rows = []
+  loanApplications.filter(isLive).forEach(loan => {
+    loanSchedule(loan).forEach((row, i) => {
+      if (isSettled(row) || !row.dueDateISO || row.dueDateISO > todayISO) return
+      const daysLate = Math.max(daysBetweenISO(row.dueDateISO, todayISO), 0)
+      rows.push({
+        key: `${loan.ref}-${row.num ?? i + 1}`,
+        ref: loan.ref,
+        customer: loan.customerName || loan.customerCode || '—',
+        product: loan.product || '—',
+        installment: row.num ?? i + 1,
+        dueDate: daysLate === 0 ? 'Today' : (row.dueDate || dmy(row.dueDateISO)),
+        daysLate,
+        amount: stillOwed(row),
+        branch: loan.branch || '—',
+        creditOfficer: loan.creditOfficer || '—',
+        status: daysLate === 0 ? 'Due Today' : 'Overdue',
+      })
+    })
+  })
+  // Longest overdue first — that is the order the arrears are worked in.
+  return rows.sort((a, b) => b.daysLate - a.daysLate || String(a.ref).localeCompare(String(b.ref)))
+}
+
+// Per-loan arrears state — outstanding principal, how much is overdue, and how late the worst
+// unsettled installment is. Both the Arrears and the Provision report are built on this.
+function buildLoanArrears(loanApplications, todayISO) {
+  return loanApplications.filter(isLive).map(loan => {
+    const schedule = loanSchedule(loan)
+    // Outstanding is principal still owed, not the remaining total due: future interest has
+    // not been earned yet and is not part of what is at risk.
+    const principalPaid = schedule.reduce((s, r) => s + (r.principalPaid || 0), 0)
+    let arrears = 0
+    let daysLate = 0
+    schedule.forEach(row => {
+      if (isSettled(row) || !row.dueDateISO || row.dueDateISO >= todayISO) return
+      arrears += stillOwed(row)
+      daysLate = Math.max(daysLate, daysBetweenISO(row.dueDateISO, todayISO))
+    })
+    return {
+      loan,
+      outstanding: Math.max(round2((loan.amount || 0) - principalPaid), 0),
+      arrears: round2(arrears),
+      daysLate,
+    }
+  })
+}
+
+const agingBandFor = daysLate =>
+  AGING_BANDS.find(b => daysLate <= b.maxDaysLate) || AGING_BANDS[AGING_BANDS.length - 1]
+
+function buildArrearsRows(loanArrears, group) {
+  const tally = rows => ({
+    accounts: rows.length,
+    outstanding: round2(rows.reduce((s, a) => s + a.outstanding, 0)),
+    arrears: round2(rows.reduce((s, a) => s + a.arrears, 0)),
+  })
+  if (!group.key) {
+    // Every band is listed even at zero: a classification that vanishes when empty reads as
+    // "nothing in default" when it should read as "nothing in default yet".
+    return AGING_BANDS.map(band => ({
+      key: band.bucket, name: band.bucket, bucket: band.bucket,
+      classification: band.classification, rate: band.rate, rateNum: band.rateNum,
+      ...tally(loanArrears.filter(a => agingBandFor(a.daysLate).bucket === band.bucket)),
+    }))
+  }
+  const byGroup = new Map()
+  loanArrears.forEach(a => {
+    const name = group.key(a.loan)
+    byGroup.set(name, [...(byGroup.get(name) || []), a])
+  })
+  return Array.from(byGroup.entries())
+    .map(([name, rows]) => ({ key: name, name, ...tally(rows) }))
+    .sort((a, b) => a.name.localeCompare(b.name))
+}
+
+// Money that actually moved: every disbursement released and every repayment collected.
+// Neither carries a clock time on the record, so the time column reads '—'.
+function buildTransactionRows(loanApplications) {
+  const rows = []
+  loanApplications.forEach(loan => {
+    const who = {
+      ref: loan.ref,
+      customer: loan.customerName || loan.customerCode || '—',
+      officer: loan.creditOfficer || '—',
+    }
+    if (loan.disbursementDate && (isLive(loan) || loan.status === 'Refinanced')) {
+      rows.push({ ...who, dateISO: loan.disbursementDate, time: '—', type: 'Disbursement',
+        amount: loan.amount || 0, method: loan.disbursementMethod || '—', balanceAfter: null })
+    }
+    loanSchedule(loan).forEach(row => {
+      if (!row.paidDate || !(row.paid > 0)) return
+      rows.push({ ...who, dateISO: row.paidDate, time: '—', type: 'Repayment',
+        amount: row.paid, method: row.paymentMethod || '—', balanceAfter: row.balance ?? null })
+    })
+  })
+  return rows
+    .sort((a, b) => b.dateISO.localeCompare(a.dateISO))
+    .map((r, i) => ({ ...r, date: dmy(r.dateISO), key: `${r.ref}-${r.dateISO}-${i}` }))
+}
+
+// A loan leaves the book one of two ways: paid to the last cent, or refinanced into a
+// replacement. There is no write-off action in the app, so nothing can close that way yet.
+function buildClosedLoanRows(loanApplications) {
+  const rows = []
+  loanApplications.forEach(loan => {
+    const schedule = loanSchedule(loan)
+    const settled = schedule.filter(isSettled)
+    const paidOff = isLive(loan) && schedule.length > 0 && settled.length === schedule.length
+    if (!paidOff && loan.status !== 'Refinanced') return
+    const last = settled[settled.length - 1]
+    const closureISO = paidOff ? last?.paidDate : (loan.closedDate || loan.disbursementDate)
+    // Amount at closure is what was cleared to close it: the payment that settled the last
+    // installment, or — for a refinance — the principal the replacement loan took over.
+    const principalPaid = schedule.reduce((s, r) => s + (r.principalPaid || 0), 0)
+    rows.push({
+      key: loan.ref,
+      ref: loan.ref,
+      customer: loan.customerName || loan.customerCode || '—',
+      product: loan.product || '—',
+      originalAmount: loan.amount || null,
+      closureISO: closureISO || '',
+      closureDate: dmy(closureISO),
+      amount: paidOff ? round2(last?.paid) : Math.max(round2((loan.amount || 0) - principalPaid), 0),
+      closure: paidOff ? 'Paid Off' : 'Refinanced',
+      detail: paidOff
+        ? (last?.paymentMethod || '—')
+        : `Refinanced into ${loan.refinancedToRef || 'a replacement loan'}`,
+      approvedBy: loan.approvedBy || '—',
+    })
+  })
+  return rows.sort((a, b) => (b.closureISO || '').localeCompare(a.closureISO || ''))
 }
 
 // Forward liquidity view: installments still to fall due, totalled by month.
@@ -656,11 +787,9 @@ function buildLoanBreakdownSummaryRows(detailRows, sorting) {
 }
 
 function buildCombinedSchedule(loanApplications) {
-  const active = loanApplications.filter(l => l.status === 'Active' && l.amount && l.interestRate)
   const rows = []
-  active.forEach(loan => {
-    const { rows: sched } = buildAmortizationData(loan.amount, loan.interestRate, loan.installments || 12, loan.firstInstallment)
-    sched.forEach(row => {
+  loanApplications.filter(isLive).forEach(loan => {
+    loanSchedule(loan).forEach(row => {
       rows.push({ ...row, ref: loan.ref, customer: loan.customerName, product: loan.product })
     })
   })
@@ -669,8 +798,11 @@ function buildCombinedSchedule(loanApplications) {
 
 export default function ReportsPage() {
   const { state, dispatch } = useApp()
-  const { reportTab, loanApplications, currency, customers } = state
-  const [view, setView] = useState(null) // null | 'loan' | 'financial'
+  const { reportTab, reportView, loanApplications, currency, customers } = state
+  // null | 'loan' | 'financial' — see reportView in AppContext: reducer state so the sidebar
+  // returning to this module drops back to the picker rather than leaving it where it was.
+  const view = reportView
+  const setView = v => dispatch({ type: 'SET_REPORT_VIEW', view: v })
 
   // ── Per-report filter state ───────────────────────────────────────────────
   const [collectionStatus, setCollectionStatus] = useState('all')
@@ -697,7 +829,7 @@ export default function ReportsPage() {
 
   const combinedSchedule = useMemo(() => buildCombinedSchedule(loanApplications), [loanApplications])
   const disbursementRows = useMemo(() => buildDisbursementRows(loanApplications), [loanApplications])
-  const transactionRows = useMemo(() => buildTransactionRows(todayISO, todayLabel), [todayISO, todayLabel])
+  const transactionRows = useMemo(() => buildTransactionRows(loanApplications), [loanApplications])
   const maturityRows = useMemo(() => buildMaturityProjection(combinedSchedule, todayISO), [combinedSchedule, todayISO])
 
   const summaryRows = useMemo(
@@ -721,12 +853,17 @@ export default function ReportsPage() {
     return { accounts: active.length, outstanding: active.reduce((sum, l) => sum + (l.amount || 0), 0) }
   }, [loanApplications])
 
+  // ── Rows derived from the loan register ───────────────────────────────────
+  const allCollectionRows = useMemo(() => buildCollectionRows(loanApplications, todayISO), [loanApplications, todayISO])
+  const loanArrears = useMemo(() => buildLoanArrears(loanApplications, todayISO), [loanApplications, todayISO])
+  const closedLoanRows = useMemo(() => buildClosedLoanRows(loanApplications), [loanApplications])
+
   // ── Filtered report rows ──────────────────────────────────────────────────
-  const collectionRows = useMemo(() => COLLECTION_ROWS.filter(r =>
+  const collectionRows = useMemo(() => allCollectionRows.filter(r =>
     (collectionStatus === 'all' || r.status === collectionStatus) &&
     (collectionOfficer === 'all' || r.creditOfficer === collectionOfficer) &&
     (collectionBranch === 'all' || r.branch === collectionBranch)
-  ), [collectionStatus, collectionOfficer, collectionBranch])
+  ), [allCollectionRows, collectionStatus, collectionOfficer, collectionBranch])
 
   const txEarliest = transactionRows.length
     ? transactionRows[transactionRows.length - 1].dateISO
@@ -743,58 +880,65 @@ export default function ReportsPage() {
     disburseStage === 'all' || r.stage === disburseStage
   ), [disbursementRows, disburseStage])
 
-  const filteredClosures = useMemo(() => CLOSED_LOAN_ROWS.filter(r =>
+  const filteredClosures = useMemo(() => closedLoanRows.filter(r =>
     closureType === 'all' || r.closure === closureType
-  ), [closureType])
+  ), [closedLoanRows, closureType])
 
   // Arrears grouping. Aging rows are keyed on `bucket`, the breakdowns on `name` —
   // normalise to `name` so one column definition serves all three groupings.
   const activeArrearsGroup = ARREARS_GROUPS.find(g => g.value === arrearsGroup) || ARREARS_GROUPS[0]
-  const arrearsRows = useMemo(() => activeArrearsGroup.rows.map((r, i) => ({
+  const groupedArrears = useMemo(
+    () => buildArrearsRows(loanArrears, activeArrearsGroup),
+    [loanArrears, activeArrearsGroup]
+  )
+  const arrearsRows = useMemo(() => groupedArrears.map((r, i) => ({
     ...r,
-    key: r.bucket || r.name,
-    name: r.bucket || r.name,
     // The current (never-late) bucket reads as the healthy baseline, so tint it.
     rowClass: arrearsGroup === 'aging' && i === 0 ? 'bg-emerald-50/30 dark:bg-emerald-900/10' : '',
-  })), [activeArrearsGroup, arrearsGroup])
+  })), [groupedArrears, arrearsGroup])
 
   const arrearsTotals = useMemo(() => ({
-    accounts: activeArrearsGroup.rows.reduce((s, r) => s + r.accounts, 0),
-    outstanding: activeArrearsGroup.rows.reduce((s, r) => s + r.outstanding, 0),
-    arrears: activeArrearsGroup.rows.reduce((s, r) => s + r.arrears, 0),
-  }), [activeArrearsGroup])
+    accounts: groupedArrears.reduce((s, r) => s + r.accounts, 0),
+    outstanding: groupedArrears.reduce((s, r) => s + r.outstanding, 0),
+    arrears: groupedArrears.reduce((s, r) => s + r.arrears, 0),
+  }), [groupedArrears])
 
   // Required provision per classification — the regulatory output of the aging above.
+  const agingRows = useMemo(() => buildArrearsRows(loanArrears, ARREARS_GROUPS[0]), [loanArrears])
   const provisionRows = useMemo(
-    () => PAR_ROWS.map(r => ({ ...r, key: r.bucket, provision: (r.outstanding * r.rateNum) / 100 })),
-    []
+    () => agingRows.map(r => ({ ...r, provision: round2((r.outstanding * r.rateNum) / 100) })),
+    [agingRows]
   )
 
-  const collectionOfficers = useMemo(() => [...new Set(COLLECTION_ROWS.map(r => r.creditOfficer))].sort(), [])
-  const collectionBranches = useMemo(() => [...new Set(COLLECTION_ROWS.map(r => r.branch))].sort(), [])
+  // Only the officers and branches that actually have something to collect — a filter listing
+  // names with no rows behind them sends an officer looking for work that isn't there.
+  const collectionOfficers = useMemo(
+    () => [...new Set(allCollectionRows.map(r => r.creditOfficer))].sort(), [allCollectionRows])
+  const collectionBranches = useMemo(
+    () => [...new Set(allCollectionRows.map(r => r.branch))].sort(), [allCollectionRows])
 
   function selectTab(tabId) {
     dispatch({ type: 'SET_REPORT_TAB', tab: tabId })
   }
 
-  // Portfolio figures come from the real loan records; arrears and collection figures
-  // are still driven by the sample rows the reports below render (per-loan repayment
-  // schedules aren't persisted yet — see buildPortfolioSummaryRows).
+  // Every figure on the header cards is the same number the report below it prints, read off
+  // the loan register — so a card and its report can never disagree.
   const loanKpis = useMemo(() => {
-    const parOutstanding = PAR_ROWS.reduce((s, r) => s + r.outstanding, 0)
-    const parArrears = PAR_ROWS.reduce((s, r) => s + r.arrears, 0)
-    const dueToday = COLLECTION_ROWS.filter(r => r.status === 'Due Today')
+    const totalOutstanding = agingRows.reduce((s, r) => s + r.outstanding, 0)
+    const totalArrears = agingRows.reduce((s, r) => s + r.arrears, 0)
+    const dueToday = allCollectionRows.filter(r => r.status === 'Due Today')
     return {
       accounts: companyBaseRow.accounts,
       outstanding: companyBaseRow.outstanding,
       dueTodayCount: dueToday.length,
-      dueTodayAmount: dueToday.reduce((s, r) => s + r.amount, 0),
-      arrearsAccounts: PAR_ROWS.slice(1).reduce((s, r) => s + r.accounts, 0),
-      arrears: parArrears,
-      par: parOutstanding > 0 ? (parArrears / parOutstanding) * 100 : 0,
-      provision: PAR_ROWS.reduce((s, r) => s + (r.outstanding * r.rateNum) / 100, 0),
+      dueTodayAmount: round2(dueToday.reduce((s, r) => s + r.amount, 0)),
+      // Every band but the first — an account is only in arrears once it is actually late.
+      arrearsAccounts: agingRows.slice(1).reduce((s, r) => s + r.accounts, 0),
+      arrears: totalArrears,
+      par: totalOutstanding > 0 ? (totalArrears / totalOutstanding) * 100 : 0,
+      provision: round2(agingRows.reduce((s, r) => s + (r.outstanding * r.rateNum) / 100, 0)),
     }
-  }, [companyBaseRow])
+  }, [companyBaseRow, agingRows, allCollectionRows])
 
   function openLoanReports() {
     selectTab('listing')
@@ -802,11 +946,6 @@ export default function ReportsPage() {
   }
 
 
-  // Opening a report from the listing gives way to that report's own page. There the
-  // "Loan Report" crumb is the way back, so the back arrow is dropped — it only appears
-  // one level up, where there is no crumb to click.
-  const activeReport = REPORT_TABS.find(t => t.id === reportTab) || REPORT_TABS[0]
-  const onReportPage = view === 'loan' && reportTab !== 'listing'
 
   return (
     // The Financial Report scrolls inside its own table rather than moving the page, so
@@ -815,7 +954,7 @@ export default function ReportsPage() {
       {/* ── Header ─────────────────────────────────────────────────────────── */}
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div className="flex items-center gap-2 min-w-0">
-          {view && !onReportPage && (
+          {view && (
             <button
               onClick={() => setView(null)}
               title="Back to Reports"
@@ -824,25 +963,13 @@ export default function ReportsPage() {
               <ChevronLeft className="w-4 h-4" />
             </button>
           )}
-          {/* On a report page the module name becomes a crumb back to the listing, and the
-              report's own name carries the page. */}
-          {onReportPage ? (
-            <>
-              <button
-                onClick={() => selectTab('listing')}
-                title="Back to Report Overview"
-                className="text-lg font-bold text-slate-400 dark:text-slate-500 hover:text-brand-600 dark:hover:text-brand-400 transition-colors flex-shrink-0"
-              >
-                Loan Report
-              </button>
-              <ChevronRight className="w-5 h-5 text-slate-300 dark:text-slate-600 flex-shrink-0" />
-              <h1 className="text-xl font-bold text-slate-800 dark:text-slate-100 truncate">{activeReport.label}</h1>
-            </>
-          ) : (
-            <h1 className="text-xl font-bold text-slate-800 dark:text-slate-100">
-              {view === 'loan' ? 'Loan Report' : view === 'financial' ? 'Financial Report' : 'Report'}
-            </h1>
-          )}
+          {/* The module name, and only that — picking a report switches the panel under the
+              tabs, exactly as the Financial Report's statements do. It used to open each report
+              as its own page with a "Loan Report › Collection Sheet" crumb, which made a tab
+              click read as navigation and put the way back somewhere different from the tabs. */}
+          <h1 className="text-xl font-bold text-slate-800 dark:text-slate-100">
+            {view === 'loan' ? 'Loan Report' : view === 'financial' ? 'Financial Report' : 'Report'}
+          </h1>
         </div>
       </div>
 
@@ -880,10 +1007,9 @@ export default function ReportsPage() {
             aria-labelledby={`report-tab-${reportTab}`}
             className="min-w-0 space-y-6"
           >
-          {/* KPI Row — Report Overview is the module's landing view, and since the index table
-              came out these KPIs are what it shows. A report opened from the strip is its own
-              page and shows only that report. */}
-          {!onReportPage && (
+          {/* The KPI row is the Overview tab's content — the index table came out, so these
+              are what that tab shows. */}
+          {reportTab === 'listing' && (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
             <KpiCard
               label="Active Accounts" value={loanKpis.accounts}
@@ -919,6 +1045,7 @@ export default function ReportsPage() {
           {/* Collection Sheet — Due & Overdue */}
           {reportTab === 'collection-sheet' && (
             <SimpleReportTable
+              tableId="collection-sheet"
               reportTitle="Collection Sheet - Due & Overdue"
               meta={`Status: ${collectionStatus === 'all' ? 'All' : collectionStatus} · Officer: ${collectionOfficer === 'all' ? 'All' : collectionOfficer} · Branch: ${collectionBranch === 'all' ? 'All' : collectionBranch}`}
               count={collectionRows.length}
@@ -967,6 +1094,7 @@ export default function ReportsPage() {
           {/* Transaction Report */}
           {reportTab === 'transactions' && (
             <SimpleReportTable
+              tableId="transactions"
               reportTitle="Transaction Report"
               meta={`${effectiveTxFrom} to ${effectiveTxTo} · Type: ${txType === 'all' ? 'All' : txType}`}
               count={filteredTransactions.length}
@@ -1005,6 +1133,7 @@ export default function ReportsPage() {
           {/* Arrears & Portfolio at Risk */}
           {reportTab === 'arrears' && (
             <SimpleReportTable
+              tableId="arrears"
               reportTitle="Arrears & Portfolio at Risk"
               meta={`Grouped by ${activeArrearsGroup.label}`}
               count={arrearsRows.length}
@@ -1047,6 +1176,7 @@ export default function ReportsPage() {
           {/* Loan Loss Provision */}
           {reportTab === 'provision' && (
             <SimpleReportTable
+              tableId="provision"
               reportTitle="Loan Loss Provision"
               meta={`As of ${todayLabel}`}
               count={provisionRows.length}
@@ -1078,9 +1208,13 @@ export default function ReportsPage() {
             />
           )}
 
-          {/* Loan Portfolio Listing — borrower detail or grouped summary */}
+          {/* Loan Portfolio Listing — borrower detail or grouped summary. The two modes share a
+              tab but not a column set (three grouped columns against twelve borrower-level ones,
+              overlapping only on the name), so each remembers its own view — stored under one id,
+              a view saved in Detail would leave Summary showing that single shared column. */}
           {reportTab === 'portfolio-listing' && (
             <SimpleReportTable
+              tableId={isListingSummary ? 'portfolio-listing-summary' : 'portfolio-listing-detail'}
               reportTitle="Loan Portfolio Listing"
               meta={`${isListingSummary ? 'Summary' : 'Detail'} by ${listingLabel}${listingFrom || listingTo ? ` · Disbursed ${listingFrom || 'start'} to ${listingTo || todayLabel}` : ''}`}
               count={isListingSummary ? breakdownSummaryRows.length : breakdownDetailRows.length}
@@ -1128,6 +1262,7 @@ export default function ReportsPage() {
           {/* Portfolio & Risk Summary — one report, five groupings */}
           {reportTab === 'portfolio-summary' && (
             <SimpleReportTable
+              tableId="portfolio-summary"
               reportTitle="Portfolio & Risk Summary"
               meta={`Grouped by ${activeSummaryGroup.label}${summaryFrom || summaryTo ? ` · Disbursed ${summaryFrom || 'start'} to ${summaryTo || todayLabel}` : ''}`}
               count={summaryRows.length}
@@ -1166,6 +1301,7 @@ export default function ReportsPage() {
           {reportTab === 'schedule-maturity' && (
             <div className="space-y-4">
               <SimpleReportTable
+                tableId="maturity"
                 reportTitle="Maturity Projection"
                 meta={`Installments falling due from ${todayLabel}`}
                 count={maturityRows.length}
@@ -1186,6 +1322,7 @@ export default function ReportsPage() {
                 emptyMessage="No future installments scheduled."
               />
               <SimpleReportTable
+                tableId="installment-schedule"
                 reportTitle="Installment Schedule"
                 meta="Combined installment schedule across active loan accounts"
                 count={combinedSchedule.length}
@@ -1208,6 +1345,7 @@ export default function ReportsPage() {
           {/* Disbursement Report — disbursed and pending in one list */}
           {reportTab === 'disbursement' && (
             <SimpleReportTable
+              tableId="disbursement"
               reportTitle="Disbursement Report"
               meta={`Stage: ${disburseStage === 'all' ? 'All' : disburseStage}`}
               count={filteredDisbursements.length}
@@ -1240,9 +1378,10 @@ export default function ReportsPage() {
             />
           )}
 
-          {/* Closed Loans — paid off and written off */}
+          {/* Closed Loans — settled in full, or closed by being refinanced */}
           {reportTab === 'closed-loans' && (
             <SimpleReportTable
+              tableId="closed-loans"
               reportTitle="Closed Loans"
               meta={`Closure: ${closureType === 'all' ? 'All' : closureType}`}
               count={filteredClosures.length}
@@ -1251,7 +1390,7 @@ export default function ReportsPage() {
                 options={[
                   { value: 'all', label: 'All Closures' },
                   { value: 'Paid Off', label: 'Paid Off' },
-                  { value: 'Written Off', label: 'Written Off' },
+                  { value: 'Refinanced', label: 'Refinanced' },
                 ]}
               /></>}
               columns={[

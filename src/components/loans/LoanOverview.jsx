@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useMemo } from 'react'
 import jsPDF from 'jspdf'
 import { DollarSign, TrendingUp, Calendar, Calculator, User, FileText, CreditCard, ShieldCheck, ShieldAlert, X, Check, Printer, Download, Bell, Phone, Building, Briefcase, History } from 'lucide-react'
 import { useApp, hasFundingAccount } from '../../context/AppContext'
@@ -14,6 +14,8 @@ import WeumsGateModal from '../shared/WeumsGateModal'
 import RepaymentTracking from './RepaymentTracking'
 import FirstRepaymentDateField from './FirstRepaymentDateField'
 import CBCReport from './CBCReport'
+import { buildProfileDocGroups } from '../../utils/loanDocuments'
+import ProfileCreditAssessment from './ProfileCreditAssessment'
 import { assessLoanRisk } from '../../utils/riskAssessment'
 import { incomeCapacity } from '../../utils/statementIncome'
 import { expenseCapacity } from '../../utils/statementExpense'
@@ -183,6 +185,8 @@ export default function LoanOverview() {
 
   // Risk Assessment: auto-derived from each party's CBC data — see utils/riskAssessment.
   const riskAssessment = assessLoanRisk(loan)
+  // Every file on the loan, for the profile's Documents section — see loanDocuments.js.
+  const profileDocGroups = useMemo(() => buildProfileDocGroups(loan, customer), [loan, customer])
 
   const upcomingInstallments = schedule.filter(r => r.status !== 'Paid')
   const nextPayment = upcomingInstallments[0] || null
@@ -439,7 +443,7 @@ export default function LoanOverview() {
       <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
         <div>
           <div className="flex items-center gap-2 flex-wrap">
-            <h1 className="text-xl font-bold text-slate-800 dark:text-slate-100">Approval Review</h1>
+            <h1 className="text-xl font-bold text-slate-800 dark:text-slate-100">Loan Preview</h1>
             <StatusBadge status={loan.status} size="xs" />
           </div>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{loan.ref} · {loan.product} · {loan.customerName}</p>
@@ -1060,7 +1064,7 @@ export default function LoanOverview() {
                   ))}
                 </DocSection>
 
-                <DocSection title="Repayment Capacity">
+                <DocSection title="Loan Suggestion — Repayment Capacity">
                   <DocFieldGrid>
                     <DocField label="Total Monthly Income" value={formatVal(totalMonthlyIncome, currency, 1)} />
                     <DocField label="Total Monthly Expense" value={formatVal(totalMonthlyExpense, currency, 1)} />
@@ -1110,7 +1114,7 @@ export default function LoanOverview() {
                   )}
                 </DocSection>
 
-                <DocSection title="Benefit to the Bank">
+                <DocSection title="Loan Suggestion — Benefit to the Bank">
                   <p className="text-[11px] text-slate-400 dark:text-slate-500 mb-2">
                     Auto-calculated from the loan's amount, interest rate and the fee rates configured in System Settings.
                   </p>
@@ -1126,16 +1130,22 @@ export default function LoanOverview() {
                   <DocField label="Total Benefit to Bank" value={formatVal(totalBenefitToBank, currency, 1)} />
                 </DocSection>
 
-                <DocSection title="Credit History (CBC)">
+                <DocSection title="CBC — Credit History">
                   {['borrower', 'coBorrower', 'guarantor'].map(target => {
                     const info = loan[CREDIT_HISTORY_FIELD[target]]
                     return (
                       <div key={target} className="mb-4 last:mb-0">
                         <DocSubHeading>{CREDIT_HISTORY_LABEL[target]}</DocSubHeading>
-                        <CBCReport info={info} currency={currency} onView={handleViewDoc} />
+                        <CBCReport info={info} currency={currency} onView={handleViewDoc} hideDocument />  /* the file itself is listed once, under Documents */
                       </div>
                     )
                   })}
+                </DocSection>
+
+                {/* The verdict the terms were set against — printed with the evidence, so the
+                    profile is readable by someone who was not at the screen. */}
+                <DocSection title="Credit Assessment">
+                  <ProfileCreditAssessment loan={loan} currency={currency} />
                 </DocSection>
 
                 <DocSection title="Risk Assessment">
@@ -1173,57 +1183,22 @@ export default function LoanOverview() {
                   )}
                 </DocSection>
 
+                {/* Every file on the loan, gathered once. A group with nothing uploaded is left
+                    out rather than printing a heading over "No documents uploaded." — on a
+                    profile that is read and filed, an empty heading is a line of noise. If
+                    nothing at all was uploaded the section itself does not print. */}
+                {profileDocGroups.length > 0 && (
                 <DocSection title="Documents">
                   <div className="space-y-4">
-                    <div>
-                      <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-2">Customer — Identity Documents</p>
-                      <DocList documents={customer?.documents} onView={handleViewDoc} />
-                    </div>
-
-                    {(loan.coBorrowers?.length ? loan.coBorrowers : (loan.coBorrower ? [loan.coBorrower] : [])).map((cb, idx, arr) => (
-                      <div key={idx}>
-                        <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-2">Co-Borrower{arr.length > 1 ? ` ${idx + 1}` : ''} — Identity Documents</p>
-                        <DocList documents={cb?.documents} onView={handleViewDoc} />
-                      </div>
-                    ))}
-
-                    {(loan.guarantors?.length ? loan.guarantors : (loan.guarantor ? [loan.guarantor] : [])).map((g, idx, arr) => (
-                      <div key={idx}>
-                        <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-2">Guarantor{arr.length > 1 ? ` ${idx + 1}` : ''} — Identity Documents</p>
-                        <DocList documents={g?.documents} onView={handleViewDoc} />
-                      </div>
-                    ))}
-
-                    {collaterals.map((c, idx, arr) => (
-                      <div key={idx}>
-                        <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-2">Collateral{arr.length > 1 ? ` ${idx + 1}` : ''} — Collateral Documents</p>
-                        <DocList documents={c.documents} onView={handleViewDoc} />
-                      </div>
-                    ))}
-
-                    {[
-                      { key: 'borrower', label: 'Borrower', list: borrowerIncomes },
-                      { key: 'coBorrower', label: 'Co-Borrower', list: coBorrowerIncomes },
-                      { key: 'guarantor', label: 'Guarantor', list: guarantorIncomes },
-                    ].map(party => party.list.map((info, idx, arr) => (
-                      <div key={`${party.key}-${idx}`}>
-                        <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-2">{party.label}{arr.length > 1 ? ` Income ${idx + 1}` : ' '} — Income Verification &amp; Proof</p>
-                        <DocList documents={info.documents} onView={handleViewDoc} />
-                      </div>
-                    )))}
-
-                    {[
-                      { key: 'borrower', label: 'Borrower', info: loan.borrowerExpenseInfo },
-                      { key: 'coBorrower', label: 'Co-Borrower', info: loan.coBorrowerExpenseInfo },
-                      { key: 'guarantor', label: 'Guarantor', info: loan.guarantorExpenseInfo },
-                    ].map(party => (
-                      <div key={party.key}>
-                        <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-2">{party.label} — Expense Documents</p>
-                        <DocList documents={party.info?.documents} onView={handleViewDoc} />
+                    {profileDocGroups.map(group => (
+                      <div key={group.key}>
+                        <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-2">{group.label}</p>
+                        <DocList documents={group.documents} onView={handleViewDoc} />
                       </div>
                     ))}
                   </div>
                 </DocSection>
+                )}
               </div>
             </div>
           )}

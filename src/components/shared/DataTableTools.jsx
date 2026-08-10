@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { Columns3, ChevronUp, ChevronDown, ChevronsUpDown } from 'lucide-react'
+import { cn } from '@/lib/utils'
 
 // Sorting and column visibility for the register tables. Both were wanted on Customers and on
 // Loan Applications at once, so they live here rather than being written twice — see the
@@ -48,7 +49,12 @@ export function useTableColumns(columns, { hidden = [], value = null, onChange =
 
 // `iconOnly` drops the text label for placement in a toolbar beside other icon-sized controls.
 // The button keeps its accessible name via aria-label — an icon alone announces as nothing.
-export function ColumnPicker({ columns, visibleIds, onToggle, label = 'View', iconOnly = false }) {
+// `remembered` says the choice outlives the session, which is true wherever the caller hands
+// this a persisted value. Ticking a box is the whole of "set my default view", so the panel
+// says so — otherwise the saving is silent and indistinguishable from not saving.
+// `className` is merged onto the button so a toolbar that sizes its controls differently (the
+// report cards' Print/Download row) can match, without every caller restating the base style.
+export function ColumnPicker({ columns, visibleIds, onToggle, label = 'View', iconOnly = false, remembered = true, className = '' }) {
   const [open, setOpen] = useState(false)
   return (
     <div className="relative">
@@ -58,9 +64,11 @@ export function ColumnPicker({ columns, visibleIds, onToggle, label = 'View', ic
         aria-expanded={open}
         aria-label={iconOnly ? 'Show or hide columns' : undefined}
         title={iconOnly ? 'Show or hide columns' : undefined}
-        className={`flex items-center justify-center gap-1.5 py-2 text-xs font-semibold rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors flex-shrink-0 ${
-          iconOnly ? 'px-2.5' : 'px-3'
-        }`}
+        className={cn(
+          'flex items-center justify-center gap-1.5 py-2 text-xs font-semibold rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors flex-shrink-0',
+          iconOnly ? 'px-2.5' : 'px-3',
+          className,
+        )}
       >
         <Columns3 className="w-3.5 h-3.5" />
         {!iconOnly && label}
@@ -71,6 +79,11 @@ export function ColumnPicker({ columns, visibleIds, onToggle, label = 'View', ic
           <div className="fixed inset-0 z-20" onClick={() => setOpen(false)} />
           <div className="absolute right-0 mt-1 z-30 w-52 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl shadow-lg p-2 max-h-72 overflow-y-auto">
             <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400 dark:text-slate-500 px-2 py-1">Columns</p>
+            {remembered && (
+              <p className="px-2 pb-1.5 text-[10px] leading-snug text-slate-400 dark:text-slate-500">
+                Kept as your default view for this table.
+              </p>
+            )}
             {columns.map(col => {
               const shown = visibleIds.includes(col.id)
               // The last visible column cannot be hidden — an empty table has no rows to read

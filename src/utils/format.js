@@ -165,7 +165,9 @@ export function getStatusBadgeClass(status) {
     'Registered':      'bg-slate-100  text-slate-600   border-slate-200       dark:bg-slate-700/50    dark:text-slate-300   dark:border-slate-600',
     'Incomplete':      'bg-amber-50   text-amber-700   border-amber-200/50    dark:bg-amber-900/30   dark:text-amber-400   dark:border-amber-800',
     'Pending Approval':'bg-amber-50   text-amber-700   border-amber-200/60    dark:bg-amber-900/30   dark:text-amber-400   dark:border-amber-800',
-    'In Progress':     'bg-amber-50   text-amber-700   border-amber-200/60    dark:bg-amber-900/30   dark:text-amber-400   dark:border-amber-800',
+    // Blue, not amber: a loan still being filled in is work in hand, not work waiting on
+    // someone. Amber is kept for the states that need attention — Pending Approval, Incomplete.
+    'In Progress':     'bg-brand-50   text-brand-700   border-brand-200/60    dark:bg-brand-900/30   dark:text-brand-400   dark:border-brand-800',
     'Disbursed':       'bg-brand-50   text-brand-700   border-brand-200/60    dark:bg-brand-900/30   dark:text-brand-400   dark:border-brand-800',
     'Rejected':        'bg-rose-50    text-rose-700    border-rose-200/60     dark:bg-rose-900/30    dark:text-rose-400    dark:border-rose-800',
     'Cancelled':       'bg-slate-100  text-slate-600   border-slate-200       dark:bg-slate-700/50    dark:text-slate-300   dark:border-slate-600',

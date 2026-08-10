@@ -312,9 +312,8 @@ export const INITIAL_CHART_OF_ACCOUNTS = [
   // an account of its own currency instead of landing in the USD one. Nothing in the loan
   // seed is booked in riel, so it starts at zero — same as 1131/6021.
   { code:'1121', type:'Asset',     name:'Interest Receivable (Accrued) (KHR)', nameKhmer:'', normalBalance:'DEBIT', parentCode:'1000', description:'Interest earned but not yet collected on riel loans. Debited by the End of Day accrual.', status:'ACTIVE', currency:'KHR', balance:0 },
-  // The two loan-book control accounts. Their balances mirror the Loan Account Management
-  // cards: Account Receivable is principal released and not yet collected back, Account
-  // Payable is principal approved and not yet released. The seeds below are the totals of
+  // The two loan-book control accounts. Account Receivable is principal released and not
+  // yet collected back, Account Payable is principal approved and not yet released. The seeds below are the totals of
   // INITIAL_LOANS — 1130 is the sum of every active loan's outstanding balance, 2030 the
   // sum of every loan still sitting in 'Waiting Disburse'.
   { code:'1130', type:'Asset',     name:'Account Receivable — Loan Repayment', nameKhmer:'', normalBalance:'DEBIT', parentCode:'1000', description:'Principal out with borrowers. Debited when a loan is disbursed, credited by the principal each repayment retires.', status:'ACTIVE', currency:'USD', balance:0 },
@@ -455,7 +454,7 @@ export const INITIAL_INTEGRATIONS = [
     // What one exchanged item is called, for log details and the sync toast — a billing
     // connection moves records, a messaging one sends messages.
     unit: 'record',
-    // Every provider ships unconnected: the install registers or signs in on Configure,
+    // Every provider ships unconnected: the install registers or signs in on Connect,
     // then saves the credentials the provider issued it. No `login` here means the sign-in
     // gate opens on the register form.
     status: 'disconnected',
@@ -467,7 +466,7 @@ export const INITIAL_INTEGRATIONS = [
     lastSyncAt: '',
     // The merchant's KHQR, shown on the repayment schedule so a borrower can scan and pay
     // from any Bakong-member app. The code is issued against the WeBill365 merchant account,
-    // so it is uploaded from that connection's Configure tab once it is connected, and the
+    // so it is uploaded from that connection's Connect tab once it is connected, and the
     // switch decides whether the schedule carries it at all. Empty until one is uploaded.
     khqrEnabled: false,
     khqrImage: '',

@@ -180,6 +180,10 @@ function loadPersistedState() {
       // existed has neither, and falls back to showing every column.
       customerVisibleColumns: p.customerVisibleColumns || null,
       loanVisibleColumns: p.loanVisibleColumns || null,
+      payrollColumns: p.payrollColumns || null,
+      bankGroupLabels: p.bankGroupLabels || null,
+      accountingColumns: p.accountingColumns || null,
+      reportColumns: p.reportColumns || null,
       // Which business day is open (or was last closed) and the batch history behind it.
       // Both are additive — an install saved before System Operations existed has neither,
       // and falls back to a closed day with no history rather than needing a key bump.
@@ -282,6 +286,10 @@ function mergeSeededIntegrations(saved) {
       // Which provider account this install registered/signed in as — install data, like
       // the credentials beside it. A seeded provider that was signed out stays signed out.
       login: s.login ?? seed.login,
+      // The bank account collected payments settle into (WeBill365's account card). Install
+      // data like the login beside it, and the seed ships none — without carrying it across,
+      // activating an account would last until the next reload.
+      bankAccount: s.bankAccount ?? seed.bankAccount ?? null,
       // The uploaded KHQR and its on/off switch belong to the install, not the build — the
       // seed ships them empty/off, so without carrying them across every reload would drop
       // the merchant's own code back to nothing.
@@ -349,7 +357,29 @@ const INITIAL_STATE = {
   loanQuickPreviewTab: 'Repayment Reminder',
   // Same as customerVisibleColumns, for the loan application register.
   loanVisibleColumns: persisted.loanVisibleColumns || null,
+  // The payroll tables' visible columns, keyed by table ('approval', 'audit'). One field
+  // rather than one per table: payroll has two lists today and adding a third should not mean
+  // another state field, another persisted key and another migration. null = show everything.
+  payrollColumns: persisted.payrollColumns || null,
   // accounting
+  // Which Account Management card is open as its own page ('general' | 'payroll' | null).
+  // Reducer state rather than the component's own, because SET_TAB resets accountingTab: held
+  // locally it outlived that reset and left the module on a card page with its tab bar showing
+  // and no tab selected. Transient, so not persisted.
+  accountingCard: null,
+  // Bank account group labels the operator has renamed, keyed by the group's fixed id
+  // ({ payable: 'Disbursement Bank' }). Only the label moves: every bank account stores the
+  // id, and the loan/payroll filtering downstream keys off it, so the id must never change.
+  // Persisted — a renamed group that reverted on reload would be worse than not renaming.
+  bankGroupLabels: persisted.bankGroupLabels || {},
+  // Which columns each General Account Management table shows, keyed by table id ('gl', 'je',
+  // 'se', 'ct', 'inc', 'exp'). One field for six tables, as payrollColumns is for payroll:
+  // the choice was local component state, so a view an operator set was gone on reload.
+  accountingColumns: persisted.accountingColumns || {},
+  // Same idea for the report tables, keyed by report id ('collection-sheet', 'gl-daily', …).
+  // Loan Report and Financial Report share the one field — the two modules sit on the same
+  // Reports page and their ids don't collide.
+  reportColumns: persisted.reportColumns || {},
   activeStatement: persisted.activeStatement || 'pl',
   // null = no section expanded; the Accounting page shows just its section cards
   accountingTab: null,
@@ -362,6 +392,11 @@ const INITIAL_STATE = {
   glAccountFilter: 'all',
   // reports
   reportTab: 'listing',
+  // Which report module is open ('loan' | 'financial' | null = the picker). In the reducer
+  // for the same reason accountingCard is: held in the component, it outlived SET_TAB, so
+  // clicking Report in the sidebar left the user inside whichever module they were already in
+  // and appeared to do nothing. Transient, so not persisted.
+  reportView: null,
   // settings
   selectedRole: 'Credit Manager',
   currentRole: 'Admin',
@@ -540,6 +575,11 @@ function reducer(state, action) {
       loanWizardPrefillCustomerCode: null,
       activeLoan: null,
       accountingTab: null,
+      accountingCard: null,
+      // Back to the report picker, and to that module's first report — the same rule the
+      // accounting cards follow: a sidebar entry returns its module to its landing view.
+      reportView: null,
+      reportTab: 'listing',
       accountHistoryCode: null,
       cashTransferModalOpen: false,
       transactionModalOpen: false,
@@ -669,6 +709,18 @@ function reducer(state, action) {
 
     // Loans
     case 'SET_LOAN_COLUMNS': return { ...state, loanVisibleColumns: action.ids }
+    case 'SET_ACCOUNTING_COLUMNS': return {
+      ...state,
+      accountingColumns: { ...(state.accountingColumns || {}), [action.table]: action.ids },
+    }
+    case 'SET_PAYROLL_COLUMNS': return {
+      ...state,
+      payrollColumns: { ...(state.payrollColumns || {}), [action.table]: action.ids },
+    }
+    case 'SET_REPORT_COLUMNS': return {
+      ...state,
+      reportColumns: { ...(state.reportColumns || {}), [action.table]: action.ids },
+    }
     case 'OPEN_LOAN_WIZARD': return { ...state, loanWizardOpen: true, loanWizardStep: 1, editingLoanRef: action.ref || null, loanWizardPrefillCustomerCode: action.customerCode || null }
     case 'CLOSE_LOAN_WIZARD': return { ...state, loanWizardOpen: false, editingLoanRef: null, loanWizardPrefillCustomerCode: null }
     case 'SET_LOAN_WIZARD_STEP': return { ...state, loanWizardStep: action.step }
@@ -1368,6 +1420,15 @@ function reducer(state, action) {
     // Accounting
     case 'SET_STATEMENT': return { ...state, activeStatement: action.stmt }
     case 'SET_ACCOUNTING_TAB': return { ...state, accountingTab: action.tab }
+    case 'SET_ACCOUNTING_CARD': return { ...state, accountingCard: action.card }
+    // A blank name falls back to the built-in label rather than leaving a group unnamed.
+    case 'SET_BANK_GROUP_LABEL': {
+      const label = (action.label || '').trim()
+      const next = { ...state.bankGroupLabels }
+      if (label) next[action.id] = label
+      else delete next[action.id]
+      return { ...state, bankGroupLabels: next }
+    }
 
     case 'ADD_INCOME': {
       const chartOfAccounts = state.chartOfAccounts.map(a =>
@@ -1541,6 +1602,7 @@ function reducer(state, action) {
     case 'DELETE_EMPLOYEE': return { ...state, employees: state.employees.filter(e => e.id !== action.id) }
 
     case 'SET_REPORT_TAB': return { ...state, reportTab: action.tab }
+    case 'SET_REPORT_VIEW': return { ...state, reportView: action.view }
 
     // ─── integrations ────────────────────────────────────────────────────
     // Added from the provider catalogue. Guarded on id so adding twice can't produce two
@@ -1848,9 +1910,13 @@ export function AppProvider({ children }) {
         customGeo: state.customGeo,
         customerVisibleColumns: state.customerVisibleColumns,
         loanVisibleColumns: state.loanVisibleColumns,
+        payrollColumns: state.payrollColumns,
+        bankGroupLabels: state.bankGroupLabels,
+        accountingColumns: state.accountingColumns,
+        reportColumns: state.reportColumns,
       }))
     } catch {}
-  }, [state.customerVisibleColumns, state.loanVisibleColumns, state.systemUsers, state.auditLogs, state.integrations, state.payrollRuns, state.customers, state.loanApplications, state.incomes, state.expenses, state.notifications, state.cashTransfers, state.accounts, state.feeSettings, state.loanProducts, state.activeStatement, state.chartOfAccounts, state.realBankAccounts, state.journalEntries, state.companyProfile, state.employees, state.businessDay, state.batchRuns, state.customGeo])
+  }, [state.customerVisibleColumns, state.loanVisibleColumns, state.payrollColumns, state.bankGroupLabels, state.accountingColumns, state.reportColumns, state.systemUsers, state.auditLogs, state.integrations, state.payrollRuns, state.customers, state.loanApplications, state.incomes, state.expenses, state.notifications, state.cashTransfers, state.accounts, state.feeSettings, state.loanProducts, state.activeStatement, state.chartOfAccounts, state.realBankAccounts, state.journalEntries, state.companyProfile, state.employees, state.businessDay, state.batchRuns, state.customGeo])
 
   // Dark mode
   useEffect(() => {
@@ -1890,3 +1956,13 @@ export function AppProvider({ children }) {
 export function useApp() {
   return useContext(AppContext)
 }
+
+
+
+
+
+
+
+
+
+

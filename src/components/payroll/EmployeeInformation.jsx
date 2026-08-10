@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Upload, Search, User, Pencil, Trash2 } from 'lucide-react'
 import { useApp } from '../../context/AppContext'
+import { useTableColumns, ColumnPicker, SortHeader, ariaSortFor } from '../shared/DataTableTools'
 import { EMPTY_ADDRESS } from '../../data/constants'
 import Pagination from '../shared/Pagination'
 import {
   employeeName, employeePhone, employeeEmail, employeeAddress,
-  nextEmployeeNo, splitFullName, splitPhone, splitEmail,
+  nextEmployeeNo, splitFullName, splitPhone, splitEmail, isOnPayroll, periodBounds, periodLabel,
 } from '../../utils/employee'
 import { formatDateDisplay, formatVal } from '../../utils/format'
 import EmployeeForm from './EmployeeForm'
@@ -84,6 +85,26 @@ const COLUMNS = [
   { id: 'address', label: 'Home Address', value: e => employeeAddress(e), cellClass: 'min-w-[220px]' },
 ]
 
+const MONTHS = [
+  '01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12',
+].map(value => ({
+  value,
+  label: new Date(2000, Number(value) - 1, 1).toLocaleDateString('en-GB', { month: 'long' }),
+}))
+
+// Payroll is run a month at a time, so the register opens on the month being paid rather than
+// on everyone who has ever been on staff. Both filters carry an "All" so the full register is
+// still one click away — someone who has left is otherwise unreachable from here.
+const thisYear = () => String(new Date().getFullYear())
+const thisMonth = () => String(new Date().getMonth() + 1).padStart(2, '0')
+
+// The span a year/month choice covers, as ISO bounds. An empty start means no period filter.
+function filterBounds(year, month) {
+  if (year === 'all') return { start: '', end: '' }
+  if (month === 'all') return { start: `${year}-01-01`, end: `${year}-12-31` }
+  return periodBounds(`${year}-${month}`)
+}
+
 // Minimal CSV row reader — enough for the quoted, comma-separated exports HR hands over.
 function parseCsvRow(line) {
   const out = []
@@ -133,22 +154,50 @@ export default function EmployeeInformation() {
   // form is a modal over this list rather than a page of its own.
   const [formFor, setFormFor] = useState(null)
   const [search, setSearch] = useState('')
+  // Opens on the month being paid — see filterBounds. 'all' on either widens it back out.
+  const [year, setYear] = useState(thisYear)
+  const [month, setMonth] = useState(thisMonth)
+  // Which columns the register shows. Persisted, so the view an operator sets is the one they
+  // get back — the register carries fourteen columns and few people want all of them at once.
+  const { visible: visibleColumns, visibleIds, toggle: toggleColumn } = useTableColumns(COLUMNS, {
+    value: state.payrollColumns?.employees,
+    onChange: ids => dispatch({ type: 'SET_PAYROLL_COLUMNS', table: 'employees', ids }),
+  })
   const [sort, setSort] = useState({ key: 'name', dir: 'asc' })
   const [page, setPage] = useState(1)
   const [deleting, setDeleting] = useState(null)
   // The record a row click opened for viewing — read-only until Edit is pressed.
   const [previewing, setPreviewing] = useState(null)
 
+  // Every year the register touches, plus the current one so a book with no staff yet still
+  // opens on something real. Newest first — payroll is run for the month just gone.
+  const years = useMemo(() => {
+    const seen = new Set([thisYear()])
+    employees.forEach(e => {
+      if (e.entryDate) seen.add(e.entryDate.slice(0, 4))
+      if (e.leaveDate) seen.add(e.leaveDate.slice(0, 4))
+    })
+    return [...seen].sort().reverse()
+  }, [employees])
+
+  const inPeriod = useMemo(() => {
+    const { start, end } = filterBounds(year, month)
+    // A record with no entry date can't be placed in any period. It stays listed rather than
+    // disappearing from every month — the register is also where a half-filled record is fixed.
+    return e => (!start || !e.entryDate) ? true : isOnPayroll(e, start, end)
+  }, [year, month])
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
-    if (!q) return employees
+    const inMonth = employees.filter(inPeriod)
+    if (!q) return inMonth
     // Every column the table now shows is searchable, plus the Khmer name, which the
     // register displays only in its Latin form.
-    return employees.filter(e => [
+    return inMonth.filter(e => [
       employeeName(e, 'khmer'),
       ...COLUMNS.map(col => String(col.value(e) ?? '')),
     ].some(v => (v || '').toLowerCase().includes(q)))
-  }, [employees, search])
+  }, [employees, search, inPeriod])
 
   const sorted = useMemo(() => {
     const col = COLUMNS.find(c => c.id === sort.key)
@@ -178,7 +227,7 @@ export default function EmployeeInformation() {
 
   // Any change to what is being listed returns to the first page — otherwise a filter that
   // shrinks the list leaves the table on a page that no longer exists.
-  useEffect(() => { setPage(1) }, [search, sort])
+  useEffect(() => { setPage(1) }, [search, sort, year, month])
 
   // These modals are local component state, so App.jsx's global Escape handler (which only
   // knows about reducer state) can't reach them.
@@ -284,7 +333,7 @@ export default function EmployeeInformation() {
   return (
     <div className="space-y-4">
       {/* No heading — the active payroll tab already names this page. The toolbar lives on
-          the table itself: search at the left, Upload and Add at the right. */}
+          the table itself: search and pay period at the left, Upload and Add at the right. */}
       <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/60 dark:border-slate-700 shadow-sm overflow-hidden">
         <div className="flex flex-wrap items-center gap-2 px-4 sm:px-5 py-3 border-b border-slate-100 dark:border-slate-700">
           <div className="relative w-full sm:w-64">
@@ -295,7 +344,30 @@ export default function EmployeeInformation() {
             />
           </div>
 
+          {/* Pay period. Two selects rather than a month input: payroll is discussed as a
+              month and a year, and a year on its own is a legitimate view. */}
+          <select
+            value={year}
+            onChange={e => setYear(e.target.value)}
+            aria-label="Filter by year"
+            className="h-auto border border-slate-200 dark:border-slate-600 rounded-lg px-2.5 py-1.5 text-xs font-medium bg-white dark:bg-slate-700 text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-500"
+          >
+            <option value="all">All Years</option>
+            {years.map(y => <option key={y} value={y}>{y}</option>)}
+          </select>
+          <select
+            value={month}
+            onChange={e => setMonth(e.target.value)}
+            disabled={year === 'all'}
+            aria-label="Filter by month"
+            className="h-auto border border-slate-200 dark:border-slate-600 rounded-lg px-2.5 py-1.5 text-xs font-medium bg-white dark:bg-slate-700 text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-500 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <option value="all">All Months</option>
+            {MONTHS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+          </select>
+
           <div className="flex items-center gap-2 sm:ml-auto">
+            <ColumnPicker columns={COLUMNS} visibleIds={visibleIds} onToggle={toggleColumn} iconOnly />
             <Button
               variant="outline"
               onClick={() => uploadRef.current?.click()}
@@ -329,29 +401,40 @@ export default function EmployeeInformation() {
             <TableHeader className="sticky top-0 z-10">
               <TableRow className="border-b-0 hover:bg-transparent">
                 <TableHead className={`${th} w-14`}><span className="sr-only">Photo</span></TableHead>
-                {/* Headers still sort on click — no arrow markers on them */}
-                {COLUMNS.map(col => (
-                  <TableHead key={col.id} className={`${th} ${col.align === 'right' ? 'text-right' : 'text-left'}`}>
-                    <Button
-                      variant="ghost"
-                      onClick={() => toggleSort(col.id)}
-                      className="h-auto w-auto p-0 font-semibold hover:bg-transparent hover:text-slate-700 dark:hover:text-slate-200 transition-colors"
-                      title={`Sort by ${col.label}`}
+                {/* Every header sorts, and now says so: an arrow on each, filled in on the
+                    column actually in use. Before this the click worked but nothing on screen
+                    showed the table was sortable, or which column it was ordered by.
+                    The register keys its sort state on `key`; SortHeader — shared with the
+                    customer, loan and payroll tables — reads `id`, so it is handed that shape
+                    rather than the sort engine being rewritten around it. */}
+                {visibleColumns.map(col => {
+                  const sortState = sort ? { id: sort.key, dir: sort.dir } : null
+                  const sortable = { ...col, sortable: true }
+                  return (
+                    <TableHead
+                      key={col.id}
+                      aria-sort={ariaSortFor(sortable, sortState)}
+                      className={`${th} ${col.align === 'right' ? 'text-right' : 'text-left'}`}
                     >
-                      {col.label}
-                    </Button>
-                  </TableHead>
-                ))}
+                      <SortHeader column={sortable} sort={sortState} onSort={toggleSort}>
+                        {col.label}
+                      </SortHeader>
+                    </TableHead>
+                  )
+                })}
                 <TableHead className={`${th} w-16`}><span className="sr-only">Actions</span></TableHead>
               </TableRow>
             </TableHeader>
             <TableBody className="divide-y divide-slate-100 dark:divide-slate-700 [&_tr]:border-b-0">
               {rows.length === 0 ? (
                 <TableRow className="hover:bg-transparent">
-                  <TableCell colSpan={COLUMNS.length + 2} className="py-12 text-center text-sm text-slate-400">
+                  <TableCell colSpan={visibleColumns.length + 2} className="py-12 text-center text-sm text-slate-400">
                     {employees.length === 0
                       ? 'No employees on the register yet — add one to get started.'
-                      : 'No employee matches this filter.'}
+                      /* Names the period, so an empty month doesn't read as an empty register */
+                      : (!search.trim() && year !== 'all' && month !== 'all')
+                        ? `Nobody was on payroll in ${periodLabel(`${year}-${month}`)}.`
+                        : 'No employee matches this filter.'}
                   </TableCell>
                 </TableRow>
               ) : rows.map(emp => (
@@ -369,7 +452,7 @@ export default function EmployeeInformation() {
                   </TableCell>
                   {/* Cells come off the same COLUMNS list as the headers, so the two stay in
                       step. A column with no render shows its sort text; an empty one a dash. */}
-                  {COLUMNS.map(col => {
+                  {visibleColumns.map(col => {
                     const content = col.render ? col.render(emp, { currency }) : col.value(emp)
                     return (
                       <TableCell key={col.id} className={`px-4 py-2.5 text-xs text-slate-600 dark:text-slate-300 ${col.cellClass || ''}`}>
