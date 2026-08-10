@@ -15,7 +15,10 @@ import DocList from '../shared/DocList'
 import WeumsGateModal from '../shared/WeumsGateModal'
 import RepaymentTracking from './RepaymentTracking'
 import FirstRepaymentDateField from './FirstRepaymentDateField'
+import StatusBadge from '../shared/StatusBadge'
 import CBCReport from './CBCReport'
+import { buildProfileDocGroups } from '../../utils/loanDocuments'
+import ProfileCreditAssessment from './ProfileCreditAssessment'
 import RestructureModal from './RestructureModal'
 import KhqrCard from './KhqrCard'
 import KhqrCropModal from './KhqrCropModal'
@@ -228,6 +231,8 @@ export default function LoanPreview() {
 
   // Risk Assessment: auto-derived from each party's CBC data — see utils/riskAssessment.
   const riskAssessment = assessLoanRisk(loan)
+  // Every file on the loan, for the profile's Documents section — see loanDocuments.js.
+  const profileDocGroups = useMemo(() => buildProfileDocGroups(loan, customer), [loan, customer])
 
 
   const upcomingInstallments = schedule.filter(r => r.status !== 'Paid')
@@ -273,7 +278,7 @@ export default function LoanPreview() {
       return
     }
     if (!account) {
-      showToast(`${webill365?.name || 'WeBill365'} has no ${webill365?.accountLabel || 'Merchant ID'} set — add it in Integrations → Configure`, 'error')
+      showToast(`${webill365?.name || 'WeBill365'} has no ${webill365?.accountLabel || 'Merchant ID'} set — add it in Integrations → Connect`, 'error')
       return
     }
     setKhqrBusy(true)
@@ -578,9 +583,10 @@ export default function LoanPreview() {
         <div>
           <div className="flex items-center gap-2 flex-wrap">
             <h1 className="text-xl font-bold text-slate-800 dark:text-slate-100">Loan Preview</h1>
-            <span className="inline-flex items-center px-2 py-0.5 rounded-full border text-[11px] font-medium bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-900/20 dark:text-emerald-400 dark:border-emerald-700">
-              {loan.status}
-            </span>
+            {/* The status decides the colour — this pill used to be hardcoded emerald, so a
+                Waiting Disburse or Cancelled loan read green here and blue or grey everywhere
+                else. StatusBadge is the one place those colours are defined. */}
+            <StatusBadge status={loan.status} size="xs" />
           </div>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{loan.ref} · {loan.product} · {loan.customerName}</p>
         </div>
@@ -1029,7 +1035,7 @@ export default function LoanPreview() {
                   ))}
                 </DocSection>
 
-                <DocSection title="Repayment Capacity">
+                <DocSection title="Loan Suggestion — Repayment Capacity">
                   <DocFieldGrid>
                     <DocField label="Total Monthly Income" value={formatVal(totalMonthlyIncome, currency, 1)} />
                     <DocField label="Total Monthly Expense" value={formatVal(totalMonthlyExpense, currency, 1)} />
@@ -1079,7 +1085,7 @@ export default function LoanPreview() {
                   )}
                 </DocSection>
 
-                <DocSection title="Benefit to the Bank">
+                <DocSection title="Loan Suggestion — Benefit to the Bank">
                   <p className="text-[11px] text-slate-400 dark:text-slate-500 mb-2">
                     Auto-calculated from the loan's amount, interest rate and the fee rates configured in System Settings.
                   </p>
@@ -1095,16 +1101,22 @@ export default function LoanPreview() {
                   <DocField label="Total Benefit to Bank" value={formatVal(totalBenefitToBank, currency, 1)} />
                 </DocSection>
 
-                <DocSection title="Credit History (CBC)">
+                <DocSection title="CBC — Credit History">
                   {['borrower', 'coBorrower', 'guarantor'].map(target => {
                     const info = loan[CREDIT_HISTORY_FIELD[target]]
                     return (
                       <div key={target} className="mb-4 last:mb-0">
                         <DocSubHeading>{CREDIT_HISTORY_LABEL[target]}</DocSubHeading>
-                        <CBCReport info={info} currency={currency} onView={handleViewDoc} />
+                        <CBCReport info={info} currency={currency} onView={handleViewDoc} hideDocument />  /* the file itself is listed once, under Documents */
                       </div>
                     )
                   })}
+                </DocSection>
+
+                {/* The verdict the terms were set against — printed with the evidence, so the
+                    profile is readable by someone who was not at the screen. */}
+                <DocSection title="Credit Assessment">
+                  <ProfileCreditAssessment loan={loan} currency={currency} />
                 </DocSection>
 
                 <DocSection title="Risk Assessment">
@@ -1142,57 +1154,22 @@ export default function LoanPreview() {
                   )}
                 </DocSection>
 
+                {/* Every file on the loan, gathered once. A group with nothing uploaded is left
+                    out rather than printing a heading over "No documents uploaded." — on a
+                    profile that is read and filed, an empty heading is a line of noise. If
+                    nothing at all was uploaded the section itself does not print. */}
+                {profileDocGroups.length > 0 && (
                 <DocSection title="Documents">
                   <div className="space-y-4">
-                    <div>
-                      <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-2">Customer — Identity Documents</p>
-                      <DocList documents={customer?.documents} onView={handleViewDoc} />
-                    </div>
-
-                    {(loan.coBorrowers?.length ? loan.coBorrowers : (loan.coBorrower ? [loan.coBorrower] : [])).map((cb, idx, arr) => (
-                      <div key={idx}>
-                        <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-2">Co-Borrower{arr.length > 1 ? ` ${idx + 1}` : ''} — Identity Documents</p>
-                        <DocList documents={cb?.documents} onView={handleViewDoc} />
-                      </div>
-                    ))}
-
-                    {(loan.guarantors?.length ? loan.guarantors : (loan.guarantor ? [loan.guarantor] : [])).map((g, idx, arr) => (
-                      <div key={idx}>
-                        <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-2">Guarantor{arr.length > 1 ? ` ${idx + 1}` : ''} — Identity Documents</p>
-                        <DocList documents={g?.documents} onView={handleViewDoc} />
-                      </div>
-                    ))}
-
-                    {collaterals.map((c, idx, arr) => (
-                      <div key={idx}>
-                        <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-2">Collateral{arr.length > 1 ? ` ${idx + 1}` : ''} — Collateral Documents</p>
-                        <DocList documents={c.documents} onView={handleViewDoc} />
-                      </div>
-                    ))}
-
-                    {[
-                      { key: 'borrower', label: 'Borrower', list: borrowerIncomes },
-                      { key: 'coBorrower', label: 'Co-Borrower', list: coBorrowerIncomes },
-                      { key: 'guarantor', label: 'Guarantor', list: guarantorIncomes },
-                    ].map(party => party.list.map((info, idx, arr) => (
-                      <div key={`${party.key}-${idx}`}>
-                        <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-2">{party.label}{arr.length > 1 ? ` Income ${idx + 1}` : ' '} — Income Verification &amp; Proof</p>
-                        <DocList documents={info.documents} onView={handleViewDoc} />
-                      </div>
-                    )))}
-
-                    {[
-                      { key: 'borrower', label: 'Borrower', info: loan.borrowerExpenseInfo },
-                      { key: 'coBorrower', label: 'Co-Borrower', info: loan.coBorrowerExpenseInfo },
-                      { key: 'guarantor', label: 'Guarantor', info: loan.guarantorExpenseInfo },
-                    ].map(party => (
-                      <div key={party.key}>
-                        <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-2">{party.label} — Expense Documents</p>
-                        <DocList documents={party.info?.documents} onView={handleViewDoc} />
+                    {profileDocGroups.map(group => (
+                      <div key={group.key}>
+                        <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-2">{group.label}</p>
+                        <DocList documents={group.documents} onView={handleViewDoc} />
                       </div>
                     ))}
                   </div>
                 </DocSection>
+                )}
               </div>
             </div>
           )}

@@ -121,10 +121,19 @@ function describeNameChecks(results) {
 const CONTENT_DESCRIPTION = {
   'Payslips': (ctx, doc) => {
     const reading = derivePayslipIncome(doc.analysis)
+    // Who pays whom. The employer is taken off the payslip where the reader found it, and
+    // otherwise from the company the entry declares — a payslip whose employer line did not
+    // parse should still say who the pay is coming from. Which of the two it is gets marked:
+    // "KOSIGN pay to …" means the file says so, "KOSIGN (declared) pay to …" means only the
+    // application does. A credit file must not assert something the document never said.
+    const employee = doc.analysis?.employee
+    const readEmployer = doc.analysis?.employer
+    const employer = readEmployer || ctx.companyName
+    const payer = employer && `${employer}${readEmployer ? '' : ' (declared)'}`
     return sentence([
-      // Whose payslip it is comes off the payslip itself where the reader found a name on it,
-      // which is better evidence of that than the employer the application declares.
-      doc.analysis?.employee && `pay to ${doc.analysis.employee}`,
+      employee
+        ? `${payer ? `${payer} pay` : 'Pay'} to ${employee}`
+        : payer && `issued by ${payer}`,
       reading
         ? `states ${reading.basis} pay of ${reading.periodAmount.toFixed(2)}`
           + (reading.multiplier === 1 ? ' per month' : ` ${reading.frequency}`)

@@ -26,6 +26,9 @@ import {
 import EmployeeInformation from '../payroll/EmployeeInformation'
 import PayrollRunModal from '../payroll/PayrollRunModal'
 import { periodLabel } from '../../utils/employee'
+import {
+  useTableColumns, useTableSort, sortRows, ColumnPicker, SortHeader, ariaSortFor,
+} from '../shared/DataTableTools'
 import ChartOfAccountsConfig from './ChartOfAccountsConfig'
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
@@ -82,8 +85,8 @@ function TypeBadge({ type }) {
     Income: 'bg-emerald-50 text-emerald-700 border-emerald-200/50 dark:bg-emerald-900/30 dark:text-emerald-400 dark:border-emerald-800',
     Expense: 'bg-rose-50 text-rose-700 border-rose-200/50 dark:bg-rose-900/30 dark:text-rose-400 dark:border-rose-800',
     Transfer: 'bg-brand-50 text-brand-700 border-brand-200/50 dark:bg-brand-900/30 dark:text-brand-400 dark:border-brand-800',
-    // The loan book's two control accounts, in the amber the Loan Account Management
-    // card carries so a ledger row reads back to where it came from.
+    // The loan book's two control accounts, kept in their own colours so a ledger row
+    // reads as loan-book movement rather than general income or expense.
     Payable: 'bg-amber-50 text-amber-700 border-amber-200/50 dark:bg-amber-900/30 dark:text-amber-400 dark:border-amber-800',
     Receivable: 'bg-indigo-50 text-indigo-700 border-indigo-200/50 dark:bg-indigo-900/30 dark:text-indigo-400 dark:border-indigo-800',
   }
@@ -103,14 +106,48 @@ function EmptyState({ message }) {
   )
 }
 
+// Every account in the chart, parents before their children, each with the depth it sits at.
+// The Linked GL picker walks this so a bank account can be linked to a sub-account as easily
+// as to a main one: filtering to `!parentCode` used to mean "every account", but since the
+// chart was banded it means only the six band headers — which left the real cash and bank
+// accounts unreachable from this field. An account whose parent is missing is still listed,
+// at the top level, rather than dropping out.
+function chartOptions(chartOfAccounts) {
+  const byCode = (a, b) => (a.code || '').localeCompare(b.code || '')
+  const present = new Set(chartOfAccounts.map(a => a.code))
+  const children = new Map()
+  const roots = []
+  for (const a of chartOfAccounts) {
+    const parent = (a.parentCode || '').trim()
+    if (parent && parent !== a.code && present.has(parent)) {
+      if (!children.has(parent)) children.set(parent, [])
+      children.get(parent).push(a)
+    } else {
+      roots.push(a)
+    }
+  }
+  const out = []
+  const walk = (account, depth, seen) => {
+    if (seen.has(account.code)) return          // a parentCode cycle would recurse forever
+    out.push({ account, depth })
+    const next = new Set(seen).add(account.code)
+    for (const child of (children.get(account.code) || []).sort(byCode)) walk(child, depth + 1, next)
+  }
+  for (const root of [...roots].sort(byCode)) walk(root, 0, new Set())
+  return out
+}
+
 // ─── Modal: Bank Account ─────────────────────────────────────────────────────
-function BankAccountModal({ account, chartOfAccounts, onClose, onSubmit, onDelete }) {
+// `defaultGroup` is the group whose own Add button opened this — the field still shows and
+// can still be changed, but it starts on the group the operator was looking at rather than
+// making them re-pick what they just clicked.
+function BankAccountModal({ account, chartOfAccounts, defaultGroup, onClose, onSubmit, onDelete }) {
   const [form, setForm] = useState({
     name: account?.name || '',
     currency: account?.currency || 'USD',
     number: account?.number || '',
     glCode: account?.glCode || chartOfAccounts[0]?.code || '',
-    group: account?.group || DEFAULT_BANK_GROUP,
+    group: account?.group || defaultGroup || DEFAULT_BANK_GROUP,
     branch: account?.branch || '',
   })
 
@@ -178,8 +215,10 @@ function BankAccountModal({ account, chartOfAccounts, onClose, onSubmit, onDelet
           <div>
             <Label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">Linked GL ({form.currency})</Label>
             <select value={form.glCode} onChange={e => set('glCode', e.target.value)} required className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500">
-              {chartOfAccounts.filter(a => !a.parentCode).map(a => (
-                <option key={a.code} value={a.code}>{a.code} — {a.name}</option>
+              {chartOptions(chartOfAccounts).map(({ account, depth }) => (
+                <option key={account.code} value={account.code}>
+                  {`${'\u00A0\u00A0'.repeat(depth)}${account.code} — ${account.name}`}
+                </option>
               ))}
             </select>
           </div>
@@ -641,16 +680,6 @@ const CARDS = [
     title: 'text-blue-700 dark:text-blue-400',
   },
   {
-    id: 'loan', label: 'Loan Account Management', icon: Banknote,
-    desc: 'Account Payable and Account Receivable',
-    idle: 'bg-amber-50 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400',
-    on: 'bg-amber-500 text-white',
-    bar: 'bg-amber-500',
-    ring: 'border-amber-500 ring-2 ring-amber-500/20 bg-amber-50/60 dark:bg-amber-900/20 dark:border-amber-500',
-    hover: 'hover:border-amber-300 dark:hover:border-amber-900/50',
-    title: 'text-amber-700 dark:text-amber-500',
-  },
-  {
     id: 'payroll', label: 'Payroll Management', icon: Users,
     desc: 'Employee register, payroll account and salary payments',
     idle: 'bg-purple-50 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400',
@@ -665,7 +694,23 @@ const CARDS = [
 // General Ledger columns. One definition drives the header, the rows, the View menu and
 // the PDF export, so hiding a column takes it out of all four at once. `text` is what the
 // PDF carries — `render` may return an element, which autoTable cannot print.
-const GL_COLUMNS = [
+// Sorting, added to a set of column definitions. `text(row, fmt)` already exists for the PDF
+// export and is what a text column orders on; the amount columns override it with the number
+// behind the formatted string, since "$1,200.00" sorts before "$80.00" as text.
+const AMOUNT_SORT = {
+  debit: e => (e.debit > 0 ? e.debit : null),
+  credit: e => (e.credit > 0 ? e.credit : null),
+  amount: r => (r.amount ?? (r.lines || []).reduce((sum, l) => sum + (l.debit || 0), 0)) || 0,
+  exchangeRate: t => Number(t.exchangeRate ?? 1),
+}
+const sortableColumns = columns => columns.map(c => ({
+  ...c,
+  align: c.right ? 'right' : undefined,
+  sortable: true,
+  sortValue: AMOUNT_SORT[c.id] || (row => c.text(row, v => v)),
+}))
+
+const GL_COLUMNS = sortableColumns([
   { id: 'date', label: 'Date', text: e => e.date || '', render: e => e.date },
   { id: 'ref', label: 'Ref', text: e => e.code || '', render: e => e.code, cellClass: 'font-mono text-slate-500 dark:text-slate-400' },
   { id: 'description', label: 'Description', text: e => `${e.category || ''}${e.description ? ` — ${e.description}` : ''}`, render: e => `${e.category || ''}${e.description ? ` — ${e.description}` : ''}`, cellClass: 'text-slate-700 dark:text-slate-200' },
@@ -674,11 +719,11 @@ const GL_COLUMNS = [
   { id: 'type', label: 'Type', text: e => e.txType || '', render: e => <TypeBadge type={e.txType} /> },
   { id: 'debit', label: 'Debit', right: true, text: (e, fmt) => e.debit > 0 ? fmt(e.debit) : '—', render: (e, fmt) => e.debit > 0 ? fmt(e.debit) : '—', cellClass: 'font-medium text-slate-700 dark:text-slate-200' },
   { id: 'credit', label: 'Credit', right: true, text: (e, fmt) => e.credit > 0 ? fmt(e.credit) : '—', render: (e, fmt) => e.credit > 0 ? fmt(e.credit) : '—', cellClass: 'font-medium text-slate-700 dark:text-slate-200' },
-]
+])
 
 // Journal entry columns — same contract as GL_COLUMNS. Entries carry their own amount
 // except the older ones, where it is the sum of the debit side.
-const JE_COLUMNS = [
+const JE_COLUMNS = sortableColumns([
   { id: 'date', label: 'Date', text: j => j.date || '', render: j => j.date },
   { id: 'transactionNo', label: 'Transaction No', text: j => j.transactionNo || '', render: j => j.transactionNo, cellClass: 'font-mono text-slate-500 dark:text-slate-400' },
   // The reference the posting arrived on. Entries written before the field existed, and the
@@ -694,10 +739,9 @@ const JE_COLUMNS = [
     render: (j, fmt) => fmt(j.amount ?? (j.lines || []).reduce((s, l) => s + (l.debit || 0), 0)),
     cellClass: 'font-bold text-slate-700 dark:text-slate-200',
   },
-]
-
+])
 // Income columns.
-const INC_COLUMNS = [
+const INC_COLUMNS = sortableColumns([
   { id: 'date', label: 'Date', text: e => e.date || '', render: e => e.date },
   { id: 'code', label: 'Trn No', text: e => e.code || '', render: e => e.code, cellClass: 'font-mono text-slate-500 dark:text-slate-400' },
   { id: 'category', label: 'Category', text: e => e.category || '', render: e => e.category, cellClass: 'text-slate-700 dark:text-slate-200' },
@@ -710,11 +754,10 @@ const INC_COLUMNS = [
     render: (e, fmt) => `+${fmt(e.amount || 0)}`,
     cellClass: 'font-bold text-emerald-600 dark:text-emerald-400',
   },
-]
-
+])
 // Expense columns. Mirrors the income set, plus the status the approval turns and the
 // Approve action that turns it.
-const EXP_COLUMNS = [
+const EXP_COLUMNS = sortableColumns([
   { id: 'date', label: 'Date', text: e => e.date || '', render: e => e.date },
   { id: 'code', label: 'Trn No', text: e => e.code || '', render: e => e.code, cellClass: 'font-mono text-slate-500 dark:text-slate-400' },
   { id: 'category', label: 'Category', text: e => e.category || '', render: e => e.category, cellClass: 'text-slate-700 dark:text-slate-200' },
@@ -745,11 +788,10 @@ const EXP_COLUMNS = [
         </button>
       ),
   },
-]
-
+])
 // Cash transfer columns. A transfer has no type of its own, so the tab's first filter is
 // the account it touches on either side.
-const CT_COLUMNS = [
+const CT_COLUMNS = sortableColumns([
   { id: 'date', label: 'Date', text: t => t.date || '', render: t => t.date },
   { id: 'ref', label: 'Transaction No', text: t => t.ref || '', render: t => t.ref, cellClass: 'font-mono text-slate-500 dark:text-slate-400' },
   // The reference the transfer came in on. Seeded rows and anything saved before the field
@@ -772,13 +814,12 @@ const CT_COLUMNS = [
     render: (t, fmt) => fmt(t.amount || 0),
     cellClass: 'font-bold text-brand-600 dark:text-brand-400',
   },
-]
-
+])
 // Single entry columns — a single entry has exactly one line, so its account and side
 // come straight off it.
 const seLine = j => (j.lines || [])[0] || {}
 const seSideOf = j => ((seLine(j).debit || 0) > 0 ? 'Debit' : 'Credit')
-const SE_COLUMNS = [
+const SE_COLUMNS = sortableColumns([
   { id: 'date', label: 'Date', text: j => j.date || '', render: j => j.date },
   { id: 'transactionNo', label: 'Transaction No', text: j => j.transactionNo || '', render: j => j.transactionNo, cellClass: 'font-mono text-slate-500 dark:text-slate-400' },
   { id: 'account', label: 'Account', text: j => j.accountsLabel || '—', render: j => j.accountsLabel || '—', cellClass: 'text-slate-700 dark:text-slate-200' },
@@ -790,8 +831,7 @@ const SE_COLUMNS = [
     render: (j, fmt) => fmt(j.amount || 0),
     cellClass: 'font-bold text-slate-700 dark:text-slate-200',
   },
-]
-
+])
 // Chart of accounts columns — same contract as GL_COLUMNS: one definition drives the
 // header, the rows and the View menu. `ctx` carries the row actions.
 // An account either heads the chart or hangs off another one (`parentCode`), and the table
@@ -932,35 +972,46 @@ const GENERAL_TABS = [
 ]
 
 // Tabs of Payroll Management. The card lands on the employee register — payroll starts from
-// who is on staff, and the salary account and its postings follow from that.
-// Salary payments and the accounts they post against are two tabs, not one: the payments are
-// a working list that is added to every run and approved row by row, the accounts are the
-// standing chart-of-accounts entries behind them. Reading one rarely means reading the other.
+// who is on staff, and the salary postings follow from that. The payroll GL accounts are read
+// in the Chart of Accounts, where every other account is, rather than restated here.
 // Audit Log is last and sits apart at the right end, the same way the general card's does:
 // every payroll action, including each period run and what it paid.
 const PAYROLL_TABS = [
-  { id: 'employees', label: 'Employee Information', icon: Users },
-  { id: 'salary',    label: 'Salary Payment', icon: Banknote },
+  { id: 'employees', label: 'Employee Salary Payment', icon: Users },
   { id: 'approval',  label: 'Approval', icon: CheckCheck },
-  { id: 'account',   label: 'Payroll Account', icon: Landmark },
   { id: 'audit-log', label: 'Audit Log', icon: History },
 ]
 
-// The two control accounts behind Loan Account Management's Payable and Receivable
-// tabs. Every disbursement passes through the payable and every repayment through the
-// receivable, so these are the codes the loan ledger below posts against.
+// The two payroll tables, as column definitions rather than hand-written headers and cells:
+// one list drives both, so a column cannot end up labelled one thing and filled with another.
+// `sortValue` is what the column orders on, which is rarely what it draws — an amount sorts on
+// the number behind the formatted currency, a period on its raw YYYY-MM rather than "Jan 2026".
+const PAYROLL_APPROVAL_COLUMNS = [
+  { id: 'date',        label: 'Date',        sortable: true, sortValue: e => e.date || '' },
+  { id: 'code',        label: 'Ref',         sortable: true, sortValue: e => e.code || '', cellClass: 'font-mono text-slate-500 dark:text-slate-400' },
+  { id: 'period',      label: 'Period',      sortable: true, sortValue: e => e.period || '' },
+  { id: 'description', label: 'Description', sortable: true, sortValue: e => e.description || e.category || '' },
+  { id: 'account',     label: 'Account',     sortable: true },
+  { id: 'employees',   label: 'Employees',   sortable: true, align: 'right', sortValue: e => e.employeeCount || 0 },
+  { id: 'amount',      label: 'Amount',      sortable: true, align: 'right', sortValue: e => e.amount || 0 },
+  { id: 'action',      label: 'Action' },
+]
+
+const PAYROLL_AUDIT_COLUMNS = [
+  { id: 'date',      label: 'Date',      sortable: true, sortValue: r => r.date || '' },
+  { id: 'time',      label: 'Time',      sortable: true, sortValue: r => r.timeLabel || '' },
+  { id: 'action',    label: 'Action',    sortable: true, sortValue: r => r.action || '' },
+  { id: 'reference', label: 'Reference', sortable: true, sortValue: r => r.reference || '', cellClass: 'font-mono text-slate-500 dark:text-slate-400 whitespace-nowrap' },
+  { id: 'user',      label: 'User',      sortable: true, sortValue: r => r.user || '' },
+  // null sorts last either way — an entry that moved no money is not a zero.
+  { id: 'amount',    label: 'Amount',    sortable: true, align: 'right', sortValue: r => (r.amount == null ? null : r.amount) },
+]
+
+// The loan book's two control accounts. Every disbursement passes through the payable and
+// every repayment through the receivable, so these are the codes the loan ledger below posts
+// against, and the pair LOAN_GL_CODES is built around.
 const AP_LOAN_CODE = '2030'
 const AR_LOAN_CODE = '1130'
-
-// The loan card's two accounts, in the order they are shown — same tab bar as the
-// general and payroll cards. The first is what the card opens on, so this list is the
-// single place that order is decided. The GL code rides along on each tab, so the tab
-// and the ledger account it posts to are visibly the same thing.
-const LOAN_ACCOUNT_TABS = [
-  { id: 'payable',    label: 'Account Payable',    icon: ArrowUpCircle,   code: AP_LOAN_CODE },
-  { id: 'receivable', label: 'Account Receivable', icon: ArrowDownCircle, code: AR_LOAN_CODE },
-]
-const LOAN_ACCOUNT_VIEWS = LOAN_ACCOUNT_TABS.map(t => t.id)
 
 // The Real Bank Accounts tab groups its cards into four collapsible sections, each
 // scoping its cards' transaction history to what that group is for: Payable to loan
@@ -1158,6 +1209,32 @@ export default function AccountingPage() {
     () => Object.fromEntries(BANK_CARD_GROUPS.map((g, i) => [g.id, i === 0]))
   )
   const toggleBankGroup = id => setOpenBankGroups(s => ({ ...s, [id]: !s[id] }))
+  // What each group is called here — the operator's name for it, or the built-in one.
+  const bankGroupLabel = group => state.bankGroupLabels?.[group.id] || group.label
+  // The group whose name is being edited, and the text so far.
+  const [renamingGroup, setRenamingGroup] = useState(null)
+  const [groupNameDraft, setGroupNameDraft] = useState('')
+
+  function startRenameGroup(group) {
+    setGroupNameDraft(bankGroupLabel(group))
+    setRenamingGroup(group.id)
+  }
+  function commitRenameGroup(id) {
+    dispatch({ type: 'SET_BANK_GROUP_LABEL', id, label: groupNameDraft })
+    setRenamingGroup(null)
+  }
+  // Which group a new bank account starts in, set by the Add button that opened the modal.
+  const [newBankGroup, setNewBankGroup] = useState(DEFAULT_BANK_GROUP)
+
+  // Adding is per group now, so the group is decided by where the click came from. The group
+  // is opened at the same time: adding into a collapsed group would otherwise file the account
+  // somewhere the operator cannot see it.
+  function openBankAccountModal(groupId) {
+    setEditingBankAccount(null)
+    setNewBankGroup(groupId || DEFAULT_BANK_GROUP)
+    if (groupId) setOpenBankGroups(s => ({ ...s, [groupId]: true }))
+    setBankAccountModalOpen(true)
+  }
   // A transaction row expands in place to show its bank-transfer receipt fields (Trx.
   // ID, Reference #, Payer, etc.). Accordion behaviour — opening one row closes whichever
   // other one was open — keeps the list from growing tall with several receipts open at
@@ -1168,39 +1245,71 @@ export default function AccountingPage() {
   // Which of the two landing cards is open, and — inside the loan card — which of its
   // two accounts is expanded. The page still lands on the cards alone, but opening the
   // loan card selects Payable straight away rather than showing a bare prompt.
-  const [openCard, setOpenCard] = useState(null)
-  const [loanAccountView, setLoanAccountView] = useState(LOAN_ACCOUNT_VIEWS[0])
+  // Which card is open as its own page — see accountingCard in AppContext: it lives in the
+  // reducer so the sidebar returning to this module closes it, rather than leaving the page on
+  // a card whose tab was reset out from under it.
+  const openCard = state.accountingCard
+  const setOpenCard = card => dispatch({ type: 'SET_ACCOUNTING_CARD', card })
 
   // Payroll card: which of its tabs is showing, and whether a payroll run is being drafted.
   const [payrollTab, setPayrollTab] = useState(PAYROLL_TABS[0].id)
   const [payrollRunOpen, setPayrollRunOpen] = useState(false)
 
+  // Sorting and which columns each payroll table shows. The column choice is persisted, so
+  // the view an operator sets is the one they get back — see SET_PAYROLL_COLUMNS.
+  const approvalSort = useTableSort()
+  const approvalCols = useTableColumns(PAYROLL_APPROVAL_COLUMNS, {
+    value: state.payrollColumns?.approval,
+    onChange: ids => dispatch({ type: 'SET_PAYROLL_COLUMNS', table: 'approval', ids }),
+  })
+  const auditSort = useTableSort()
+  const auditCols = useTableColumns(PAYROLL_AUDIT_COLUMNS, {
+    value: state.payrollColumns?.audit,
+    onChange: ids => dispatch({ type: 'SET_PAYROLL_COLUMNS', table: 'audit', ids }),
+  })
+
   // General Ledger toolbar: date range, free-text search and which columns are shown.
   const [glDate, setGlDate] = useState('')
   const [glSearch, setGlSearch] = useState('')
-  const [glViewOpen, setGlViewOpen] = useState(false)
-  const [glColumns, setGlColumns] = useState(() => GL_COLUMNS.map(c => c.id))
+  const glCols = useTableColumns(GL_COLUMNS, {
+    value: state.accountingColumns?.gl,
+    onChange: ids => dispatch({ type: 'SET_ACCOUNTING_COLUMNS', table: 'gl', ids }),
+  })
+  const glColumns = glCols.visibleIds
+  const glSort = useTableSort()
 
   // Journal Entry toolbar: entry-type filter, search and column choice.
   const [jeType, setJeType] = useState('all')
   const [jeSearch, setJeSearch] = useState('')
-  const [jeViewOpen, setJeViewOpen] = useState(false)
-  const [jeColumns, setJeColumns] = useState(() => JE_COLUMNS.map(c => c.id))
+  const jeCols = useTableColumns(JE_COLUMNS, {
+    value: state.accountingColumns?.je,
+    onChange: ids => dispatch({ type: 'SET_ACCOUNTING_COLUMNS', table: 'je', ids }),
+  })
+  const jeColumns = jeCols.visibleIds
+  const jeSort = useTableSort()
 
   // Income toolbar: date, category, search and column choice.
   const [incDate, setIncDate] = useState('')
   const [incCategory, setIncCategory] = useState('all')
   const [incSearch, setIncSearch] = useState('')
-  const [incViewOpen, setIncViewOpen] = useState(false)
-  const [incColumns, setIncColumns] = useState(() => INC_COLUMNS.map(c => c.id))
+  const incCols = useTableColumns(INC_COLUMNS, {
+    value: state.accountingColumns?.inc,
+    onChange: ids => dispatch({ type: 'SET_ACCOUNTING_COLUMNS', table: 'inc', ids }),
+  })
+  const incColumns = incCols.visibleIds
+  const incSort = useTableSort()
 
   // Expense toolbar — same controls as income, plus a status filter for the approval queue.
   const [expDate, setExpDate] = useState('')
   const [expCategory, setExpCategory] = useState('all')
   const [expStatus, setExpStatus] = useState('all')
   const [expSearch, setExpSearch] = useState('')
-  const [expViewOpen, setExpViewOpen] = useState(false)
-  const [expColumns, setExpColumns] = useState(() => EXP_COLUMNS.map(c => c.id))
+  const expCols = useTableColumns(EXP_COLUMNS, {
+    value: state.accountingColumns?.exp,
+    onChange: ids => dispatch({ type: 'SET_ACCOUNTING_COLUMNS', table: 'exp', ids }),
+  })
+  const expColumns = expCols.visibleIds
+  const expSort = useTableSort()
   // Approving releases real funds from a bank account — confirm-then-commit before the
   // dispatch, the same pattern already used for deleting a chart-of-accounts entry.
   const [approvingExpense, setApprovingExpense] = useState(null)
@@ -1208,14 +1317,22 @@ export default function AccountingPage() {
   // Cash Transfer toolbar.
   const [ctAccount, setCtAccount] = useState('all')
   const [ctSearch, setCtSearch] = useState('')
-  const [ctViewOpen, setCtViewOpen] = useState(false)
-  const [ctColumns, setCtColumns] = useState(() => CT_COLUMNS.map(c => c.id))
+  const ctCols = useTableColumns(CT_COLUMNS, {
+    value: state.accountingColumns?.ct,
+    onChange: ids => dispatch({ type: 'SET_ACCOUNTING_COLUMNS', table: 'ct', ids }),
+  })
+  const ctColumns = ctCols.visibleIds
+  const ctSort = useTableSort()
 
   // Single Entry toolbar mirrors the Journal Entry one; its "type" is the posting side.
   const [seSide, setSeSide] = useState('all')
   const [seSearch, setSeSearch] = useState('')
-  const [seViewOpen, setSeViewOpen] = useState(false)
-  const [seColumns, setSeColumns] = useState(() => SE_COLUMNS.map(c => c.id))
+  const seCols = useTableColumns(SE_COLUMNS, {
+    value: state.accountingColumns?.se,
+    onChange: ids => dispatch({ type: 'SET_ACCOUNTING_COLUMNS', table: 'se', ids }),
+  })
+  const seColumns = seCols.visibleIds
+  const seSort = useTableSort()
 
   const [coaSearch, setCoaSearch] = useState('')
   const [deletingCoa, setDeletingCoa] = useState(null)
@@ -1355,10 +1472,6 @@ export default function AccountingPage() {
     () => expenses.filter(isPayrollExpense).sort((a, b) => (b.date || '').localeCompare(a.date || '')),
     [expenses]
   )
-  const payrollPaid = useMemo(
-    () => payrollEntries.filter(e => e.status === 'Approved').reduce((s, e) => s + (e.amount || 0), 0),
-    [payrollEntries]
-  )
   const payrollPending = useMemo(
     () => payrollEntries.filter(e => e.status !== 'Approved').reduce((s, e) => s + (e.amount || 0), 0),
     [payrollEntries]
@@ -1378,85 +1491,6 @@ export default function AccountingPage() {
       .sort((a, b) => (a.date || '').localeCompare(b.date || '')),
     [payrollEntries, payrollRuns]
   )
-  const generalCashBalance = useMemo(
-    () => generalGlAccounts.filter(a => a.type === 'Asset').reduce((s, a) => s + (a.balance || 0), 0),
-    [generalGlAccounts]
-  )
-
-  // Account Receivable — one row per borrower loan with money out. A loan only has a
-  // receivable once it has actually been released, so pending/approved applications are
-  // left out; the figures come from the same place the loan screens read — the repayment
-  // schedule, whose last settled row carries the outstanding balance.
-  const loanAccountRows = useMemo(() => loanApplications
-    .filter(l => l.status === 'Active' || (l.schedule || []).some(r => r.status === 'Paid' || r.status === 'Partial'))
-    .map(l => {
-      const schedule = l.schedule || []
-      const repaid = schedule.reduce((s, r) => s + (r.paid || 0), 0)
-      const lastSettled = schedule.reduce((last, r) => (r.status === 'Paid' || r.status === 'Partial' ? r : last), null)
-      return {
-        ref: l.ref,
-        customerName: l.customerName || l.customerCode || '—',
-        product: l.product || '—',
-        principal: l.amount || 0,
-        repaid: Math.round(repaid * 100) / 100,
-        outstanding: lastSettled ? (lastSettled.balance ?? 0) : (l.amount || 0),
-      }
-    }), [loanApplications])
-
-  const loanTotals = useMemo(() => loanAccountRows.reduce((t, r) => ({
-    principal: t.principal + r.principal,
-    repaid: t.repaid + r.repaid,
-    outstanding: t.outstanding + r.outstanding,
-  }), { principal: 0, repaid: 0, outstanding: 0 }), [loanAccountRows])
-
-  // Account Payable — the company's side of every approved loan. One sits in
-  // 'Waiting Disburse' until DISBURSE_LOAN flips it to Active and posts the payout
-  // expense, so that status is exactly an unpaid obligation. Released loans stay on the
-  // list carrying what was actually paid out, rather than dropping off it — the account
-  // is what the company owed and settled, not only what it still owes. Open rows sort
-  // first, then newest release date, since those are the ones that need acting on.
-  //
-  // This is the account's full picture and it stays that way: the payable total below is
-  // read off it, and that total is what the card and the GL 2030 balance both show. The
-  // table renders every row of it for the same reason — showing only the released ones
-  // put a disbursed-only total under a card holding the payable, two figures that share
-  // no loan between them and so never agreed once anything had been released.
-  const loanPayableRows = useMemo(() => loanApplications
-    .map(l => {
-      const schedule = l.schedule || []
-      const released = l.status === 'Active' || schedule.some(r => r.status === 'Paid' || r.status === 'Partial')
-      const awaiting = l.status === 'Waiting Disburse'
-      if (!released && !awaiting) return null
-      const payout = expenses.find(e => e.code === `DSB-${l.ref}`)
-      return {
-        ref: l.ref,
-        customerName: l.customerName || l.customerCode || '—',
-        product: l.product || '—',
-        // Once released this is the date the money actually left, not the date it was
-        // scheduled to — the two differ whenever a disbursement runs late.
-        dueDate: (released ? payout?.date : null) || l.disbursementDate || '—',
-        // The two sides of the account, and only ever one of them per row: a loan is
-        // either still owed to the borrower or already paid out to them. Preferring the
-        // payout expense's own amount over the loan's keeps the figure honest if a
-        // release ever went out for something other than the approved principal.
-        disbursed: released ? (payout?.amount ?? (l.amount || 0)) : 0,
-        payable: released ? 0 : (l.amount || 0),
-        released,
-      }
-    })
-    .filter(Boolean)
-    .sort((a, b) => (a.released === b.released ? (b.dueDate || '').localeCompare(a.dueDate || '') : a.released ? 1 : -1)),
-    [loanApplications, expenses])
-
-  const payableTotals = useMemo(() => loanPayableRows.reduce((t, r) => ({
-    disbursed: t.disbursed + r.disbursed,
-    payable: t.payable + r.payable,
-  }), { disbursed: 0, payable: 0 }), [loanPayableRows])
-
-  // Only what is still owed — this is the figure that ties back to the 2030 balance,
-  // so released rows (which carry a zero payable) must not count toward it.
-  const payableTotal = payableTotals.payable
-
   // ── Loan ledger: every movement through Account Payable and Account Receivable ──
   // Derived from the loan book itself rather than from journal postings, so a loan
   // seeded straight into state and one released through the app produce the same
@@ -1703,7 +1737,7 @@ export default function AccountingPage() {
       .filter(g => g.accounts.length > 0)
   }, [chartOfAccounts, coaSearch])
 
-  const visibleGlColumns = useMemo(() => GL_COLUMNS.filter(c => glColumns.includes(c.id)), [glColumns])
+  const visibleGlColumns = glCols.visible
   // "Totals" spans every visible column that is not an amount column.
   const glTotalsSpan = visibleGlColumns.filter(c => c.id !== 'debit' && c.id !== 'credit').length
 
@@ -1734,7 +1768,7 @@ export default function AccountingPage() {
         .some(v => (v || '').toString().toLowerCase().includes(term)))
   }, [allJournalPostings, jeType, jeSearch])
 
-  const visibleJeColumns = useMemo(() => JE_COLUMNS.filter(c => jeColumns.includes(c.id)), [jeColumns])
+  const visibleJeColumns = jeCols.visible
   const singlePostings = useMemo(() => {
     const term = seSearch.trim().toLowerCase()
     return (journalEntries || [])
@@ -1746,7 +1780,7 @@ export default function AccountingPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [journalEntries, chartOfAccounts, accounts, seSide, seSearch])
 
-  const visibleSeColumns = useMemo(() => SE_COLUMNS.filter(c => seColumns.includes(c.id)), [seColumns])
+  const visibleSeColumns = seCols.visible
 
   const transferRows = useMemo(() => {
     const term = ctSearch.trim().toLowerCase()
@@ -1757,7 +1791,7 @@ export default function AccountingPage() {
         .some(v => (v || '').toString().toLowerCase().includes(term)))
   }, [cashTransfers, ctAccount, ctSearch])
 
-  const visibleCtColumns = useMemo(() => CT_COLUMNS.filter(c => ctColumns.includes(c.id)), [ctColumns])
+  const visibleCtColumns = ctCols.visible
   // Categories offered by the filter come from the data itself.
   const incomeCategories = useMemo(
     () => [...new Set(incomes.map(i => i.category).filter(Boolean))].sort(),
@@ -1776,7 +1810,7 @@ export default function AccountingPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [incomes, chartOfAccounts, accounts, incDate, incCategory, incSearch])
 
-  const visibleIncColumns = useMemo(() => INC_COLUMNS.filter(c => incColumns.includes(c.id)), [incColumns])
+  const visibleIncColumns = incCols.visible
   // Unapproved expenses first — they are the ones that need someone to act.
   const expenseCategories = useMemo(
     () => [...new Set(expenses.map(e => e.category).filter(Boolean))].sort(),
@@ -1797,7 +1831,7 @@ export default function AccountingPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expenses, chartOfAccounts, accounts, expDate, expCategory, expStatus, expSearch])
 
-  const visibleExpColumns = useMemo(() => EXP_COLUMNS.filter(c => expColumns.includes(c.id)), [expColumns])
+  const visibleExpColumns = expCols.visible
   // What has been done *in this module* — built from the records General Account
   // Management itself creates, not from the system-wide audit log in Settings (that one
   // carries logins, loan approvals and user-management changes, none of which happen here,
@@ -2196,24 +2230,23 @@ export default function AccountingPage() {
   const activeCard = CARDS.find(c => c.id === openCard) || null
 
   function openCardPage(id) {
-    // Each card opens on its first section — General and Payroll on their first tab, the
-    // loan card on Account Payable — so no card ever lands on an empty body.
+    // Each card opens on its first section, so no card ever lands on an empty body.
     dispatch({ type: 'SET_ACCOUNTING_TAB', tab: id === 'general' ? GENERAL_TABS[0].id : null })
-    setLoanAccountView(LOAN_ACCOUNT_VIEWS[0])
     setPayrollTab(PAYROLL_TABS[0].id)
     setOpenCard(id)
   }
 
   function closeCardPage() {
     dispatch({ type: 'SET_ACCOUNTING_TAB', tab: null })
-    setLoanAccountView(LOAN_ACCOUNT_VIEWS[0])
     setAccountSettingOpen(false)
     setOpenCard(null)
   }
 
   // ── table th helper ─────────────────────────────────────────────────
-  const Th = ({ children, right }) => (
-    <th className={`px-4 py-3 text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide bg-slate-50 dark:bg-slate-700/50 first:rounded-tl-xl last:rounded-tr-xl ${right ? 'text-right' : 'text-left'}`}>
+  // `ariaSort` is what a sorted column reports to assistive tech, mirroring the arrow beside
+  // it. Passed through rather than assumed: most tables here are not sortable.
+  const Th = ({ children, right, ariaSort }) => (
+    <th aria-sort={ariaSort} className={`px-4 py-3 text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide bg-slate-50 dark:bg-slate-700/50 first:rounded-tl-xl last:rounded-tr-xl ${right ? 'text-right' : 'text-left'}`}>
       {children}
     </th>
   )
@@ -2231,20 +2264,6 @@ export default function AccountingPage() {
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         {CARDS.map(card => {
-          const stats = {
-            general: [
-              { label: 'Accounts', value: String(generalGlAccounts.length) },
-              { label: 'Cash & assets', value: formatVal(generalCashBalance, currency) },
-            ],
-            loan: [
-              { label: 'Payable', value: formatVal(payableTotal, currency) },
-              { label: 'Receivable', value: formatVal(loanTotals.outstanding, currency) },
-            ],
-            payroll: [
-              { label: 'Employees', value: String(employees.length) },
-              { label: 'Salaries paid', value: formatVal(payrollPaid, currency) },
-            ],
-          }[card.id]
           return (
             <button
               key={card.id}
@@ -2270,15 +2289,9 @@ export default function AccountingPage() {
                 </div>
               </div>
 
-              <div className="w-full mt-auto pt-4 flex items-end gap-2 border-t border-slate-100 dark:border-slate-700/70">
-                <div className="flex-1 min-w-0 grid grid-cols-2 gap-2">
-                  {stats.map(s => (
-                    <div key={s.label} className="min-w-0">
-                      <p className="text-[9px] font-bold uppercase tracking-wide text-slate-400 dark:text-slate-500 truncate">{s.label}</p>
-                      <p className="text-xs font-bold text-slate-700 dark:text-slate-200 truncate">{s.value}</p>
-                    </div>
-                  ))}
-                </div>
+              {/* A card names what it opens and nothing else — the figures live inside, on
+                  the screens that can act on them. */}
+              <div className="w-full mt-auto pt-4 flex items-center justify-end border-t border-slate-100 dark:border-slate-700/70">
                 <ChevronRight className="w-4 h-4 flex-shrink-0 text-slate-300 dark:text-slate-600 group-hover:translate-x-0.5 transition-transform" />
               </div>
             </button>
@@ -2345,164 +2358,6 @@ export default function AccountingPage() {
         </div>
       )}
 
-      {/* Panel: Loan Account Management — exactly two accounts. Payable is principal
-          committed but not yet released; Receivable is principal out with borrowers. */}
-      {openCard === 'loan' && (
-        <div className="space-y-4">
-          {/* Same tab bar as the general and payroll cards, down to the active colour —
-              the bar means the same thing on every card, so it reads the same on each.
-              One tab is always selected — Payable by default — so the page never sits on
-              an empty body. */}
-          <div className="bg-white dark:bg-slate-800 rounded-2xl overflow-hidden">
-            <div className="flex items-center gap-1 px-4 py-3 overflow-x-auto">
-              {LOAN_ACCOUNT_TABS.map(tab => {
-                const active = loanAccountView === tab.id
-                return (
-                  <button
-                    key={tab.id}
-                    onClick={() => setLoanAccountView(tab.id)}
-                    aria-pressed={active}
-                    className={`flex items-center gap-1.5 px-4 py-2 text-xs font-semibold whitespace-nowrap rounded-2xl transition-colors ${
-                      active
-                        ? 'bg-blue-50 text-[#0047ab] dark:bg-blue-900/30 dark:text-blue-400'
-                        : 'text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-700 hover:text-slate-700 dark:hover:text-slate-200'
-                    }`}
-                  >
-                    <tab.icon className="w-3.5 h-3.5" />
-                    {tab.label}
-                    {/* The chart-of-accounts code, so the tab and the ledger account it
-                        posts to are visibly the same thing. Dimmed on the inactive tab so
-                        it never competes with the label for attention. */}
-                    <span className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded ${
-                      active
-                        ? 'bg-blue-100/70 text-[#0047ab] dark:bg-blue-900/50 dark:text-blue-400'
-                        : 'bg-slate-100 text-slate-400 dark:bg-slate-700 dark:text-slate-500'
-                    }`}>
-                      {tab.code}
-                    </span>
-                  </button>
-                )
-              })}
-            </div>
-          </div>
-
-          {/* No balance line above the tables — each table's footer already totals its own
-              account, so a figure here would only restate it. */}
-
-          {/* No heading on either table — the selected tab above already names the
-              account and shows its code, so a title here would only repeat it. */}
-          {loanAccountView === 'payable' && (
-            <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/60 dark:border-slate-700 shadow-sm overflow-hidden">
-              <div className="overflow-x-auto">
-                <table className="w-full">
-                  <thead>
-                    <tr>
-                      <Th>Loan Ref</Th>
-                      <Th>Customer</Th>
-                      <Th>Product</Th>
-                      <Th>Status</Th>
-                      {/* One date column for both kinds of row: the date the money left
-                          for a released loan, the date it is due to leave for one still
-                          awaiting release. The status beside it says which is which. */}
-                      <Th>Release Date</Th>
-                      <Th right>Payable</Th>
-                      <Th right>Disbursed</Th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
-                    {loanPayableRows.length === 0
-                      ? <EmptyState message="No payable yet — a loan appears here once it has been approved for release." />
-                      : loanPayableRows.map(r => (
-                        <tr key={r.ref} className="hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
-                          <td className="px-4 py-3 text-xs font-mono font-bold text-brand-600 dark:text-brand-400">{r.ref}</td>
-                          <td className="px-4 py-3 text-xs font-semibold text-slate-800 dark:text-slate-100">{r.customerName}</td>
-                          <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">{r.product}</td>
-                          <td className="px-4 py-3 whitespace-nowrap">
-                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                              r.released
-                                ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400'
-                                : 'bg-rose-50 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400'
-                            }`}>
-                              {r.released ? 'Released' : 'Awaiting Release'}
-                            </span>
-                          </td>
-                          <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300 whitespace-nowrap">{r.dueDate}</td>
-                          {/* A loan sits on exactly one side of the account, so the other
-                              side is a dash rather than a zero — a column of $0.00 reads
-                              as a figure that was calculated, not one that doesn't apply. */}
-                          <td className="px-4 py-3 text-xs font-semibold text-rose-600 dark:text-rose-400 text-right whitespace-nowrap">
-                            {r.released ? '—' : formatVal(r.payable, currency)}
-                          </td>
-                          <td className="px-4 py-3 text-xs font-semibold text-emerald-600 dark:text-emerald-400 text-right whitespace-nowrap">
-                            {r.released ? formatVal(r.disbursed, currency) : '—'}
-                          </td>
-                        </tr>
-                      ))
-                    }
-                  </tbody>
-                  {loanPayableRows.length > 0 && (
-                    <tfoot>
-                      {/* Payable first, so the column the card's figure is the sum of sits
-                          under the card. Disbursed is the settled side of the same
-                          account, reported alongside rather than in place of it. */}
-                      <tr className="border-t-2 border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700/50">
-                        <td colSpan={5} className="px-4 py-3 text-xs font-bold text-slate-700 dark:text-slate-200">Totals</td>
-                        <td className="px-4 py-3 text-xs font-bold text-rose-600 text-right whitespace-nowrap">{formatVal(payableTotals.payable, currency)}</td>
-                        <td className="px-4 py-3 text-xs font-bold text-emerald-600 text-right whitespace-nowrap">{formatVal(payableTotals.disbursed, currency)}</td>
-                      </tr>
-                    </tfoot>
-                  )}
-                </table>
-              </div>
-            </div>
-          )}
-
-          {loanAccountView === 'receivable' && (
-            <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/60 dark:border-slate-700 shadow-sm overflow-hidden">
-              <div className="overflow-x-auto">
-                <table className="w-full">
-                  <thead>
-                    <tr>
-                      <Th>Loan Ref</Th>
-                      <Th>Customer</Th>
-                      <Th>Product</Th>
-                      <Th right>Principal</Th>
-                      <Th right>Collected</Th>
-                      <Th right>Receivable</Th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
-                    {loanAccountRows.length === 0
-                      ? <EmptyState message="No receivables yet — accounts appear once a loan is released." />
-                      : loanAccountRows.map(r => (
-                        <tr key={r.ref} className="hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
-                          <td className="px-4 py-3 text-xs font-mono font-bold text-brand-600 dark:text-brand-400">{r.ref}</td>
-                          <td className="px-4 py-3 text-xs font-semibold text-slate-800 dark:text-slate-100">{r.customerName}</td>
-                          <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">{r.product}</td>
-                          <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300 text-right whitespace-nowrap">{formatVal(r.principal, currency)}</td>
-                          <td className="px-4 py-3 text-xs font-semibold text-emerald-600 dark:text-emerald-400 text-right whitespace-nowrap">{formatVal(r.repaid, currency)}</td>
-                          <td className="px-4 py-3 text-xs font-bold text-amber-600 dark:text-amber-400 text-right whitespace-nowrap">{formatVal(r.outstanding, currency)}</td>
-                        </tr>
-                      ))
-                    }
-                  </tbody>
-                  {loanAccountRows.length > 0 && (
-                    <tfoot>
-                      <tr className="border-t-2 border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700/50">
-                        <td colSpan={3} className="px-4 py-3 text-xs font-bold text-slate-700 dark:text-slate-200">Totals</td>
-                        <td className="px-4 py-3 text-xs font-bold text-slate-700 dark:text-slate-200 text-right whitespace-nowrap">{formatVal(loanTotals.principal, currency)}</td>
-                        <td className="px-4 py-3 text-xs font-bold text-emerald-600 text-right whitespace-nowrap">{formatVal(loanTotals.repaid, currency)}</td>
-                        <td className="px-4 py-3 text-xs font-bold text-amber-600 text-right whitespace-nowrap">{formatVal(loanTotals.outstanding, currency)}</td>
-                      </tr>
-                    </tfoot>
-                  )}
-                </table>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
       {/* Payroll Management tabs — same bar as the general card, active colour included */}
       {openCard === 'payroll' && (
         <div className="bg-white dark:bg-slate-800 rounded-2xl overflow-hidden">
@@ -2536,112 +2391,69 @@ export default function AccountingPage() {
           Add/Edit modal */}
       {openCard === 'payroll' && payrollTab === 'employees' && <EmployeeInformation />}
 
-      {/* Panel: Salary Payment — the record of every salary posting made against a payroll
-          account, read-only apart from processing a new period. Approving is the Approval
-          tab's job, so the gate lives in one place rather than on two tables. */}
-      {openCard === 'payroll' && payrollTab === 'salary' && (
-        <div className="space-y-4">
-          {/* No heading and no stat cards — the active tab names the page, the Status column
-              says which postings are paid and which are pending, and the footer totals them.
-              Process Payroll sits on the table's own toolbar, the way Add does on the employee
-              register, so the action stays reachable without a header band to hold it. */}
-          <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/60 dark:border-slate-700 shadow-sm overflow-hidden">
-            <div className="flex items-center px-4 sm:px-5 py-3 border-b border-slate-100 dark:border-slate-700">
-              {/* No icon — Process Payroll runs a period, it does not add a row, so a plus
-                  described the wrong action */}
+      {/* Panel: Approval — the gate between a salary being committed and the money leaving the
+          payroll account, and the only place that gate is offered. It carries the postings that
+          still need deciding; what was already paid is in the Audit Log. */}
+      {openCard === 'payroll' && payrollTab === 'approval' && (
+        <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/60 dark:border-slate-700 shadow-sm overflow-hidden">
+          <div className="flex items-center px-4 sm:px-5 py-3 border-b border-slate-100 dark:border-slate-700">
+            {/* Filter and action together at the right, the way the employee register puts its
+                filter beside Upload. Process Payroll carries no icon: it runs a period rather
+                than adding a row, so a plus described the wrong action. */}
+            <div className="flex items-center gap-2 ml-auto">
+              <ColumnPicker
+                columns={PAYROLL_APPROVAL_COLUMNS}
+                visibleIds={approvalCols.visibleIds}
+                onToggle={approvalCols.toggle}
+                iconOnly
+              />
               <button
                 onClick={() => setPayrollRunOpen(true)}
-                className="ml-auto px-4 py-1.5 rounded-lg text-xs font-bold text-white bg-brand-600 hover:bg-brand-700 shadow-sm transition-colors"
+                className="px-4 py-1.5 rounded-lg text-xs font-bold text-white bg-brand-600 hover:bg-brand-700 shadow-sm transition-colors"
               >
                 Process Payroll
               </button>
             </div>
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr>
-                    <Th>Date</Th>
-                    <Th>Ref</Th>
-                    <Th>Description</Th>
-                    <Th>Account</Th>
-                    <Th right>Amount</Th>
-                    <Th>Status</Th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
-                  {payrollEntries.length === 0
-                    ? <EmptyState message="No salary payments recorded yet." />
-                    : payrollEntries.map((e, i) => (
-                      <tr key={`${e.code}-${i}`} className="hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
-                        <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300 whitespace-nowrap">{e.date}</td>
-                        <td className="px-4 py-3 text-xs font-mono text-slate-500 dark:text-slate-400">{e.code}</td>
-                        <td className="px-4 py-3 text-xs text-slate-700 dark:text-slate-200">{e.description || e.category}</td>
-                        <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">{accountName(e.account)}</td>
-                        <td className="px-4 py-3 text-xs font-bold text-slate-700 dark:text-slate-200 text-right whitespace-nowrap">{formatVal(e.amount, currency)}</td>
-                        <td className="px-4 py-3">
-                          <StatusBadge status={e.status || 'Pending'} size="xs" />
-                        </td>
-                      </tr>
-                    ))
-                  }
-                </tbody>
-                {payrollEntries.length > 0 && (
-                  <tfoot>
-                    <tr className="border-t-2 border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700/50">
-                      <td colSpan={4} className="px-4 py-3 text-xs font-bold text-slate-700 dark:text-slate-200">Total Posted</td>
-                      <td className="px-4 py-3 text-xs font-bold text-slate-700 dark:text-slate-200 text-right whitespace-nowrap">
-                        {formatVal(payrollPaid + payrollPending, currency)}
-                      </td>
-                      <td />
-                    </tr>
-                  </tfoot>
-                )}
-              </table>
-            </div>
           </div>
-        </div>
-      )}
-
-      {/* Panel: Approval — the gate between a salary being committed and the money leaving the
-          payroll account, and the only place that gate is offered. Salary Payment lists the
-          same postings as a record; this tab is that list filtered to what still needs deciding. */}
-      {openCard === 'payroll' && payrollTab === 'approval' && (
-        <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/60 dark:border-slate-700 shadow-sm overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full">
               <thead>
                 <tr>
-                  <Th>Date</Th>
-                  <Th>Ref</Th>
-                  <Th>Period</Th>
-                  <Th>Description</Th>
-                  <Th>Account</Th>
-                  <Th right>Employees</Th>
-                  <Th right>Amount</Th>
-                  <Th>Action</Th>
+                  {approvalCols.visible.map(col => (
+                    <Th key={col.id} right={col.align === 'right'} ariaSort={ariaSortFor(col, approvalSort.sort)}>
+                      <SortHeader column={col} sort={approvalSort.sort} onSort={approvalSort.toggleSort}>{col.label}</SortHeader>
+                    </Th>
+                  ))}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
                 {payrollApprovals.length === 0
                   ? <EmptyState message="Nothing awaiting approval — every salary posting has been released." />
-                  : payrollApprovals.map((e, i) => (
+                  : sortRows(payrollApprovals, approvalCols.visible, approvalSort.sort).map((e, i) => (
                     <tr key={`${e.code}-${i}`} className="hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
-                      <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300 whitespace-nowrap">{e.date}</td>
-                      <td className="px-4 py-3 text-xs font-mono text-slate-500 dark:text-slate-400">{e.code}</td>
-                      {/* Only a payroll run has a period — a one-off salary posting is dated, not monthly */}
-                      <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300 whitespace-nowrap">{e.period ? periodLabel(e.period) : '—'}</td>
-                      <td className="px-4 py-3 text-xs text-slate-700 dark:text-slate-200">{e.description || e.category}</td>
-                      <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">{accountName(e.account)}</td>
-                      <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300 text-right">{e.employeeCount || '—'}</td>
-                      <td className="px-4 py-3 text-xs font-bold text-amber-700 dark:text-amber-400 text-right whitespace-nowrap">{formatVal(e.amount, currency)}</td>
-                      <td className="px-4 py-3">
-                        <button
-                          onClick={() => handleApproveExpense(e.code)}
-                          className="flex items-center gap-1 px-2 py-1 text-[11px] font-semibold rounded-lg border border-emerald-200 dark:border-emerald-800 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 transition-colors whitespace-nowrap"
+                      {approvalCols.visible.map(col => (
+                        <td
+                          key={col.id}
+                          className={`px-4 py-3 text-xs ${col.align === 'right' ? 'text-right' : ''} ${col.cellClass || 'text-slate-600 dark:text-slate-300'}`}
                         >
-                          <Check className="w-3 h-3" /> Approve
-                        </button>
-                      </td>
+                          {col.id === 'date' ? e.date
+                            : col.id === 'code' ? e.code
+                            /* Only a payroll run has a period — a one-off salary posting is dated, not monthly */
+                            : col.id === 'period' ? (e.period ? periodLabel(e.period) : '—')
+                            : col.id === 'description' ? (e.description || e.category)
+                            : col.id === 'account' ? accountName(e.account)
+                            : col.id === 'employees' ? (e.employeeCount || '—')
+                            : col.id === 'amount' ? <span className="font-bold text-amber-700 dark:text-amber-400 whitespace-nowrap">{formatVal(e.amount, currency)}</span>
+                            : (
+                              <button
+                                onClick={() => handleApproveExpense(e.code)}
+                                className="flex items-center gap-1 px-2 py-1 text-[11px] font-semibold rounded-lg border border-emerald-200 dark:border-emerald-800 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 transition-colors whitespace-nowrap"
+                              >
+                                <Check className="w-3 h-3" /> Approve
+                              </button>
+                            )}
+                        </td>
+                      ))}
                     </tr>
                   ))
                 }
@@ -2652,7 +2464,7 @@ export default function AccountingPage() {
               {payrollApprovals.length > 0 && (
                 <tfoot>
                   <tr className="border-t-2 border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700/50">
-                    <td colSpan={6} className="px-4 py-3 text-xs font-bold text-slate-700 dark:text-slate-200">Awaiting Approval</td>
+                    <td colSpan={Math.max(1, approvalCols.visible.length - 2)} className="px-4 py-3 text-xs font-bold text-slate-700 dark:text-slate-200">Awaiting Approval</td>
                     <td className="px-4 py-3 text-xs font-bold text-amber-700 dark:text-amber-400 text-right whitespace-nowrap">
                       {formatVal(payrollPending, currency)}
                     </td>
@@ -2665,50 +2477,48 @@ export default function AccountingPage() {
         </div>
       )}
 
-      {/* Panel: Payroll Account — the chart-of-accounts entries salary postings land in, and
-          what is left in them to pay with. */}
-      {openCard === 'payroll' && payrollTab === 'account' && (
-        <div className="space-y-4">
-          {/* No heading and no balance card — the active tab names the page and the table
-              below carries each account's own balance, which is what the card restated. */}
-          <GlAccountTable
-            accounts={payrollGlAccounts}
-            currency={currency}
-            emptyMessage="No payroll account defined yet."
-          />
-        </div>
-      )}
-
       {/* Panel: Audit Log — who did what in this module: the register edited, a period run,
           a run approved. Same columns as the general card's log, so the two read alike. */}
       {openCard === 'payroll' && payrollTab === 'audit-log' && (
         <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/60 dark:border-slate-700 shadow-sm overflow-hidden">
           {/* No heading — the active tab already names this table */}
-          <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
+          <div className="flex items-center justify-end px-4 sm:px-5 py-3 border-b border-slate-100 dark:border-slate-700">
+            <ColumnPicker
+              columns={PAYROLL_AUDIT_COLUMNS}
+              visibleIds={auditCols.visibleIds}
+              onToggle={auditCols.toggle}
+              iconOnly
+            />
+          </div>
+          <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-24rem)]">
             <table className="w-full">
               <thead className="sticky top-0 z-10">
                 <tr>
-                  <Th>Date</Th>
-                  <Th>Time</Th>
-                  <Th>Action</Th>
-                  <Th>Reference</Th>
-                  <Th>User</Th>
-                  <Th right>Amount</Th>
+                  {auditCols.visible.map(col => (
+                    <Th key={col.id} right={col.align === 'right'} ariaSort={ariaSortFor(col, auditSort.sort)}>
+                      <SortHeader column={col} sort={auditSort.sort} onSort={auditSort.toggleSort}>{col.label}</SortHeader>
+                    </Th>
+                  ))}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
                 {payrollAuditRows.length === 0
                   ? <EmptyState message="Nothing has been done in payroll yet." />
-                  : payrollAuditRows.map((row, i) => (
+                  : sortRows(payrollAuditRows, auditCols.visible, auditSort.sort).map((row, i) => (
                     <tr key={`${row.reference}-${i}`} className="hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
-                      <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300 whitespace-nowrap">{row.date || '—'}</td>
-                      <td className="px-4 py-3 text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap">{row.timeLabel || '—'}</td>
-                      <td className="px-4 py-3 text-xs text-slate-700 dark:text-slate-200">{row.action}</td>
-                      <td className="px-4 py-3 text-xs font-mono text-slate-500 dark:text-slate-400 whitespace-nowrap">{row.reference}</td>
-                      <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300 whitespace-nowrap">{row.user}</td>
-                      <td className="px-4 py-3 text-xs font-bold text-slate-700 dark:text-slate-200 text-right whitespace-nowrap">
-                        {row.amount == null ? '—' : formatVal(row.amount, currency)}
-                      </td>
+                      {auditCols.visible.map(col => (
+                        <td
+                          key={col.id}
+                          className={`px-4 py-3 text-xs whitespace-nowrap ${col.align === 'right' ? 'text-right' : ''} ${col.cellClass || 'text-slate-600 dark:text-slate-300'}`}
+                        >
+                          {col.id === 'date' ? (row.date || '—')
+                            : col.id === 'time' ? (row.timeLabel || '—')
+                            : col.id === 'action' ? row.action
+                            : col.id === 'reference' ? row.reference
+                            : col.id === 'user' ? row.user
+                            : <span className="font-bold text-slate-700 dark:text-slate-200">{row.amount == null ? '—' : formatVal(row.amount, currency)}</span>}
+                        </td>
+                      ))}
                     </tr>
                   ))
                 }
@@ -2749,6 +2559,15 @@ export default function AccountingPage() {
             </div>
 
             <div className="flex items-center gap-2 flex-shrink-0 ml-auto">
+              {/* Which columns the table and its export carry. The icon alone: this row
+                  already holds a filter, a search and an action, and a fourth word on it
+                  crowded them. The choice is persisted — see accountingColumns. */}
+              <ColumnPicker
+                columns={JE_COLUMNS}
+                visibleIds={jeCols.visibleIds}
+                onToggle={jeCols.toggle}
+                iconOnly
+              />
               <button
                 onClick={() => can('manage_accounting') ? setJournalEntryModalOpen(true) : showToast(`${state.currentRole} does not have permission to manage income & expense.`, 'error')}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-white shadow-sm transition-colors ${
@@ -2757,44 +2576,6 @@ export default function AccountingPage() {
               >
                 <Plus className="w-3.5 h-3.5" /> New Journal Entry
               </button>
-              {/* View settings — which columns the table (and its export) carry */}
-              <div className="relative">
-                <button
-                  onClick={() => setJeViewOpen(o => !o)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
-                >
-                  <Columns3 className="w-3.5 h-3.5" /> View
-                </button>
-                {jeViewOpen && (
-                  <>
-                    <div className="fixed inset-0 z-20" onClick={() => setJeViewOpen(false)} />
-                    <div className="absolute right-0 mt-1 z-30 w-52 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl shadow-lg p-2">
-                      <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400 dark:text-slate-500 px-2 py-1">Columns</p>
-                      {JE_COLUMNS.map(col => {
-                        const shown = jeColumns.includes(col.id)
-                        const lastOne = shown && jeColumns.length === 1
-                        return (
-                          <label
-                            key={col.id}
-                            className={`flex items-center gap-2.5 px-2 py-1.5 rounded-lg text-xs text-slate-600 dark:text-slate-300 ${lastOne ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-700/50'}`}
-                          >
-                            <input
-                              type="checkbox"
-                              checked={shown}
-                              disabled={lastOne}
-                              onChange={() => setJeColumns(cols =>
-                                cols.includes(col.id) ? cols.filter(c => c !== col.id) : JE_COLUMNS.filter(c => cols.includes(c.id) || c.id === col.id).map(c => c.id)
-                              )}
-                              className="w-3.5 h-3.5 rounded border-slate-300 dark:border-slate-600 text-[#0047ab] focus:ring-blue-500/40"
-                            />
-                            {col.label}
-                          </label>
-                        )
-                      })}
-                    </div>
-                  </>
-                )}
-              </div>
               <button
                 onClick={handleDownloadJournalPdf}
                 disabled={journalPostings.length === 0}
@@ -2808,13 +2589,17 @@ export default function AccountingPage() {
             <table className="w-full">
               <thead className="sticky top-0 z-10">
                 <tr>
-                  {visibleJeColumns.map(col => <Th key={col.id} right={col.right}>{col.label}</Th>)}
+                  {visibleJeColumns.map(col => (
+                    <Th key={col.id} right={col.right} ariaSort={ariaSortFor(col, jeSort.sort)}>
+                      <SortHeader column={col} sort={jeSort.sort} onSort={jeSort.toggleSort}>{col.label}</SortHeader>
+                    </Th>
+                  ))}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
                 {journalPostings.length === 0
                   ? <EmptyState message="No journal entries found." />
-                  : journalPostings.map((j, i) => (
+                  : sortRows(journalPostings, visibleJeColumns, jeSort.sort).map((j, i) => (
                     <tr key={j.id || `${j.transactionNo}-${i}`} className="hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
                       {visibleJeColumns.map(col => (
                         <td
@@ -2865,6 +2650,15 @@ export default function AccountingPage() {
             </div>
 
             <div className="flex items-center gap-2 flex-shrink-0 ml-auto">
+              {/* Which columns the table and its export carry. The icon alone: this row
+                  already holds a filter, a search and an action, and a fourth word on it
+                  crowded them. The choice is persisted — see accountingColumns. */}
+              <ColumnPicker
+                columns={SE_COLUMNS}
+                visibleIds={seCols.visibleIds}
+                onToggle={seCols.toggle}
+                iconOnly
+              />
               <button
                 onClick={() => can('manage_accounting') ? setSingleEntryModalOpen(true) : showToast(`${state.currentRole} does not have permission to manage income & expense.`, 'error')}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-white shadow-sm transition-colors ${
@@ -2873,44 +2667,6 @@ export default function AccountingPage() {
               >
                 <Plus className="w-3.5 h-3.5" /> New Single Entry
               </button>
-              {/* View settings — which columns the table (and its export) carry */}
-              <div className="relative">
-                <button
-                  onClick={() => setSeViewOpen(o => !o)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
-                >
-                  <Columns3 className="w-3.5 h-3.5" /> View
-                </button>
-                {seViewOpen && (
-                  <>
-                    <div className="fixed inset-0 z-20" onClick={() => setSeViewOpen(false)} />
-                    <div className="absolute right-0 mt-1 z-30 w-52 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl shadow-lg p-2">
-                      <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400 dark:text-slate-500 px-2 py-1">Columns</p>
-                      {SE_COLUMNS.map(col => {
-                        const shown = seColumns.includes(col.id)
-                        const lastOne = shown && seColumns.length === 1
-                        return (
-                          <label
-                            key={col.id}
-                            className={`flex items-center gap-2.5 px-2 py-1.5 rounded-lg text-xs text-slate-600 dark:text-slate-300 ${lastOne ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-700/50'}`}
-                          >
-                            <input
-                              type="checkbox"
-                              checked={shown}
-                              disabled={lastOne}
-                              onChange={() => setSeColumns(cols =>
-                                cols.includes(col.id) ? cols.filter(c => c !== col.id) : SE_COLUMNS.filter(c => cols.includes(c.id) || c.id === col.id).map(c => c.id)
-                              )}
-                              className="w-3.5 h-3.5 rounded border-slate-300 dark:border-slate-600 text-[#0047ab] focus:ring-blue-500/40"
-                            />
-                            {col.label}
-                          </label>
-                        )
-                      })}
-                    </div>
-                  </>
-                )}
-              </div>
               <button
                 onClick={handleDownloadSinglePdf}
                 disabled={singlePostings.length === 0}
@@ -2924,13 +2680,17 @@ export default function AccountingPage() {
             <table className="w-full">
               <thead className="sticky top-0 z-10">
                 <tr>
-                  {visibleSeColumns.map(col => <Th key={col.id} right={col.right}>{col.label}</Th>)}
+                  {visibleSeColumns.map(col => (
+                    <Th key={col.id} right={col.right} ariaSort={ariaSortFor(col, seSort.sort)}>
+                      <SortHeader column={col} sort={seSort.sort} onSort={seSort.toggleSort}>{col.label}</SortHeader>
+                    </Th>
+                  ))}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
                 {singlePostings.length === 0
                   ? <EmptyState message="No single entries found." />
-                  : singlePostings.map((j, i) => (
+                  : sortRows(singlePostings, visibleSeColumns, seSort.sort).map((j, i) => (
                     <tr key={j.id || `${j.transactionNo}-${i}`} className="hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
                       {visibleSeColumns.map(col => (
                         <td
@@ -3000,6 +2760,15 @@ export default function AccountingPage() {
             </div>
 
             <div className="flex items-center gap-2 flex-shrink-0 ml-auto">
+              {/* Which columns the table and its export carry. The icon alone: this row
+                  already holds a filter, a search and an action, and a fourth word on it
+                  crowded them. The choice is persisted — see accountingColumns. */}
+              <ColumnPicker
+                columns={INC_COLUMNS}
+                visibleIds={incCols.visibleIds}
+                onToggle={incCols.toggle}
+                iconOnly
+              />
               <button
                 onClick={() => can('manage_accounting') ? dispatch({ type: 'OPEN_TRANSACTION_MODAL', transactionType: 'Income' }) : showToast(`${state.currentRole} does not have permission to manage income & expense.`, 'error')}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-white shadow-sm transition-colors ${
@@ -3008,44 +2777,6 @@ export default function AccountingPage() {
               >
                 <Plus className="w-3.5 h-3.5" /> Record Income
               </button>
-              {/* View settings — which columns the table (and its export) carry */}
-              <div className="relative">
-                <button
-                  onClick={() => setIncViewOpen(o => !o)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
-                >
-                  <Columns3 className="w-3.5 h-3.5" /> View
-                </button>
-                {incViewOpen && (
-                  <>
-                    <div className="fixed inset-0 z-20" onClick={() => setIncViewOpen(false)} />
-                    <div className="absolute right-0 mt-1 z-30 w-52 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl shadow-lg p-2">
-                      <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400 dark:text-slate-500 px-2 py-1">Columns</p>
-                      {INC_COLUMNS.map(col => {
-                        const shown = incColumns.includes(col.id)
-                        const lastOne = shown && incColumns.length === 1
-                        return (
-                          <label
-                            key={col.id}
-                            className={`flex items-center gap-2.5 px-2 py-1.5 rounded-lg text-xs text-slate-600 dark:text-slate-300 ${lastOne ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-700/50'}`}
-                          >
-                            <input
-                              type="checkbox"
-                              checked={shown}
-                              disabled={lastOne}
-                              onChange={() => setIncColumns(cols =>
-                                cols.includes(col.id) ? cols.filter(c => c !== col.id) : INC_COLUMNS.filter(c => cols.includes(c.id) || c.id === col.id).map(c => c.id)
-                              )}
-                              className="w-3.5 h-3.5 rounded border-slate-300 dark:border-slate-600 text-[#0047ab] focus:ring-blue-500/40"
-                            />
-                            {col.label}
-                          </label>
-                        )
-                      })}
-                    </div>
-                  </>
-                )}
-              </div>
               <button
                 onClick={handleDownloadIncomePdf}
                 disabled={incomeRows.length === 0}
@@ -3059,13 +2790,17 @@ export default function AccountingPage() {
             <table className="w-full">
               <thead className="sticky top-0 z-10">
                 <tr>
-                  {visibleIncColumns.map(col => <Th key={col.id} right={col.right}>{col.label}</Th>)}
+                  {visibleIncColumns.map(col => (
+                    <Th key={col.id} right={col.right} ariaSort={ariaSortFor(col, incSort.sort)}>
+                      <SortHeader column={col} sort={incSort.sort} onSort={incSort.toggleSort}>{col.label}</SortHeader>
+                    </Th>
+                  ))}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
                 {incomeRows.length === 0
                   ? <EmptyState message="No income found." />
-                  : incomeRows.map((e, i) => (
+                  : sortRows(incomeRows, visibleIncColumns, incSort.sort).map((e, i) => (
                     <tr key={`${e.code}-${i}`} className="hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
                       {visibleIncColumns.map(col => (
                         <td
@@ -3160,6 +2895,15 @@ export default function AccountingPage() {
             </div>
 
             <div className="flex items-center gap-2 flex-shrink-0 ml-auto">
+              {/* Which columns the table and its export carry. The icon alone: this row
+                  already holds a filter, a search and an action, and a fourth word on it
+                  crowded them. The choice is persisted — see accountingColumns. */}
+              <ColumnPicker
+                columns={EXP_COLUMNS}
+                visibleIds={expCols.visibleIds}
+                onToggle={expCols.toggle}
+                iconOnly
+              />
               <button
                 onClick={() => can('manage_accounting') ? dispatch({ type: 'OPEN_TRANSACTION_MODAL', transactionType: 'Expense' }) : showToast(`${state.currentRole} does not have permission to manage income & expense.`, 'error')}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-white shadow-sm transition-colors ${
@@ -3168,44 +2912,6 @@ export default function AccountingPage() {
               >
                 <Plus className="w-3.5 h-3.5" /> Record Expense
               </button>
-              {/* View settings — which columns the table (and its export) carry */}
-              <div className="relative">
-                <button
-                  onClick={() => setExpViewOpen(o => !o)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
-                >
-                  <Columns3 className="w-3.5 h-3.5" /> View
-                </button>
-                {expViewOpen && (
-                  <>
-                    <div className="fixed inset-0 z-20" onClick={() => setExpViewOpen(false)} />
-                    <div className="absolute right-0 mt-1 z-30 w-52 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl shadow-lg p-2">
-                      <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400 dark:text-slate-500 px-2 py-1">Columns</p>
-                      {EXP_COLUMNS.map(col => {
-                        const shown = expColumns.includes(col.id)
-                        const lastOne = shown && expColumns.length === 1
-                        return (
-                          <label
-                            key={col.id}
-                            className={`flex items-center gap-2.5 px-2 py-1.5 rounded-lg text-xs text-slate-600 dark:text-slate-300 ${lastOne ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-700/50'}`}
-                          >
-                            <input
-                              type="checkbox"
-                              checked={shown}
-                              disabled={lastOne}
-                              onChange={() => setExpColumns(cols =>
-                                cols.includes(col.id) ? cols.filter(c => c !== col.id) : EXP_COLUMNS.filter(c => cols.includes(c.id) || c.id === col.id).map(c => c.id)
-                              )}
-                              className="w-3.5 h-3.5 rounded border-slate-300 dark:border-slate-600 text-[#0047ab] focus:ring-blue-500/40"
-                            />
-                            {col.label}
-                          </label>
-                        )
-                      })}
-                    </div>
-                  </>
-                )}
-              </div>
               <button
                 onClick={handleDownloadExpensePdf}
                 disabled={expenseRows.length === 0}
@@ -3219,13 +2925,17 @@ export default function AccountingPage() {
             <table className="w-full">
               <thead className="sticky top-0 z-10">
                 <tr>
-                  {visibleExpColumns.map(col => <Th key={col.id} right={col.right}>{col.label}</Th>)}
+                  {visibleExpColumns.map(col => (
+                    <Th key={col.id} right={col.right} ariaSort={ariaSortFor(col, expSort.sort)}>
+                      <SortHeader column={col} sort={expSort.sort} onSort={expSort.toggleSort}>{col.label}</SortHeader>
+                    </Th>
+                  ))}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
                 {expenseRows.length === 0
                   ? <EmptyState message="No expenses found." />
-                  : expenseRows.map((e, i) => (
+                  : sortRows(expenseRows, visibleExpColumns, expSort.sort).map((e, i) => (
                     <tr key={`${e.code}-${i}`} className="hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
                       {visibleExpColumns.map(col => (
                         <td
@@ -3336,6 +3046,15 @@ export default function AccountingPage() {
             </div>
 
             <div className="flex items-center gap-2 flex-shrink-0 ml-auto">
+              {/* Which columns the table and its export carry. The icon alone: this row
+                  already holds a filter, a search and an action, and a fourth word on it
+                  crowded them. The choice is persisted — see accountingColumns. */}
+              <ColumnPicker
+                columns={CT_COLUMNS}
+                visibleIds={ctCols.visibleIds}
+                onToggle={ctCols.toggle}
+                iconOnly
+              />
               <button
                 onClick={() => can('manage_accounting') ? dispatch({ type: 'OPEN_CASH_TRANSFER_MODAL' }) : showToast(`${state.currentRole} does not have permission to manage income & expense.`, 'error')}
                 title={can('manage_accounting') ? undefined : `${state.currentRole} cannot manage accounting`}
@@ -3345,44 +3064,6 @@ export default function AccountingPage() {
               >
                 <Plus className="w-3.5 h-3.5" /> New Transfer
               </button>
-              {/* View settings — which columns the table (and its export) carry */}
-              <div className="relative">
-                <button
-                  onClick={() => setCtViewOpen(o => !o)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
-                >
-                  <Columns3 className="w-3.5 h-3.5" /> View
-                </button>
-                {ctViewOpen && (
-                  <>
-                    <div className="fixed inset-0 z-20" onClick={() => setCtViewOpen(false)} />
-                    <div className="absolute right-0 mt-1 z-30 w-52 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl shadow-lg p-2">
-                      <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400 dark:text-slate-500 px-2 py-1">Columns</p>
-                      {CT_COLUMNS.map(col => {
-                        const shown = ctColumns.includes(col.id)
-                        const lastOne = shown && ctColumns.length === 1
-                        return (
-                          <label
-                            key={col.id}
-                            className={`flex items-center gap-2.5 px-2 py-1.5 rounded-lg text-xs text-slate-600 dark:text-slate-300 ${lastOne ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-700/50'}`}
-                          >
-                            <input
-                              type="checkbox"
-                              checked={shown}
-                              disabled={lastOne}
-                              onChange={() => setCtColumns(cols =>
-                                cols.includes(col.id) ? cols.filter(c => c !== col.id) : CT_COLUMNS.filter(c => cols.includes(c.id) || c.id === col.id).map(c => c.id)
-                              )}
-                              className="w-3.5 h-3.5 rounded border-slate-300 dark:border-slate-600 text-[#0047ab] focus:ring-blue-500/40"
-                            />
-                            {col.label}
-                          </label>
-                        )
-                      })}
-                    </div>
-                  </>
-                )}
-              </div>
               <button
                 onClick={handleDownloadTransfersPdf}
                 disabled={transferRows.length === 0}
@@ -3396,13 +3077,17 @@ export default function AccountingPage() {
             <table className="w-full">
               <thead className="sticky top-0 z-10">
                 <tr>
-                  {visibleCtColumns.map(col => <Th key={col.id} right={col.right}>{col.label}</Th>)}
+                  {visibleCtColumns.map(col => (
+                    <Th key={col.id} right={col.right} ariaSort={ariaSortFor(col, ctSort.sort)}>
+                      <SortHeader column={col} sort={ctSort.sort} onSort={ctSort.toggleSort}>{col.label}</SortHeader>
+                    </Th>
+                  ))}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
                 {transferRows.length === 0
                   ? <EmptyState message="No cash transfers found." />
-                  : transferRows.map((t, i) => (
+                  : sortRows(transferRows, visibleCtColumns, ctSort.sort).map((t, i) => (
                     <tr key={`${t.ref}-${i}`} className="hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
                       {visibleCtColumns.map(col => (
                         <td
@@ -3440,21 +3125,23 @@ export default function AccountingPage() {
         /* Wrapped in the same card shell the other tabs use, so the bank list and its
            history panel read as one section rather than floating on the page. */
         <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/60 dark:border-slate-700 shadow-sm p-5 space-y-4">
-          {/* No heading — the active tab already names this section */}
-          <div className="flex justify-end">
-            <button
-              onClick={() => { setEditingBankAccount(null); setBankAccountModalOpen(true) }}
-              className="flex items-center justify-center gap-1.5 px-3 py-1.5 bg-brand-600 hover:bg-brand-700 text-white text-xs font-bold rounded-lg shadow-sm transition-colors flex-shrink-0"
-            >
-              <Plus className="w-3.5 h-3.5" /> Add Bank Account
-            </button>
-          </div>
-
+          {/* No heading — the active tab already names this section. Adding is per group,
+              on each group's own header, so an account lands in the group it was added from
+              rather than in whatever the modal's dropdown happened to be showing. */}
           {(!realBankAccounts || realBankAccounts.length === 0) ? (
+            /* Nothing configured at all. The per-group Add buttons live inside the group list
+               below, which does not render here — so this state carries its own, or the first
+               account could never be created. */
             <div className="py-12 text-center bg-slate-50 dark:bg-slate-900/30 rounded-2xl border border-dashed border-slate-200 dark:border-slate-700">
               <Landmark className="w-8 h-8 text-slate-300 mx-auto mb-3" />
               <p className="text-sm font-medium text-slate-500 dark:text-slate-400">No bank accounts configured</p>
               <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">Add your real-world bank accounts to manage disbursements and repayments</p>
+              <button
+                onClick={() => openBankAccountModal(DEFAULT_BANK_GROUP)}
+                className="mt-4 inline-flex items-center gap-1.5 px-3 py-1.5 bg-brand-600 hover:bg-brand-700 text-white text-xs font-bold rounded-lg shadow-sm transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" /> Add Bank Account
+              </button>
             </div>
           ) : (
             <div className="flex flex-col lg:flex-row gap-4 items-start">
@@ -3473,31 +3160,80 @@ export default function AccountingPage() {
                     const open = openBankGroups[group.id]
                     return (
                       <div key={group.id} className="space-y-3">
-                        <button
-                          type="button"
-                          onClick={() => toggleBankGroup(group.id)}
-                          aria-expanded={open}
-                          className={`w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl border transition-colors ${
+                        {/* A row, not one button: Add cannot be nested inside the toggle. */}
+                        <div
+                          className={`w-full flex items-center gap-1 pl-3 pr-1.5 py-1.5 rounded-xl border transition-colors ${
                             open
                               ? 'bg-brand-50 border-brand-300 dark:bg-brand-900/20 dark:border-brand-900/50'
                               : 'bg-slate-50 dark:bg-slate-900/50 border-slate-200/60 dark:border-slate-700 hover:border-brand-300 dark:hover:border-brand-900/50'
                           }`}
                         >
-                          <span className="flex items-center gap-2 min-w-0">
-                            <span className={`text-xs font-bold truncate ${open ? 'text-brand-700 dark:text-brand-400' : 'text-slate-700 dark:text-slate-200'}`}>
-                              {group.label}
+                          {renamingGroup === group.id ? (
+                            /* Renaming in place — Enter or blur keeps it, Escape drops it.
+                               Only the label changes; the group's id is what every bank
+                               account and the history filtering below are keyed on. */
+                            <input
+                              autoFocus
+                              value={groupNameDraft}
+                              onChange={e => setGroupNameDraft(e.target.value)}
+                              onBlur={() => commitRenameGroup(group.id)}
+                              onKeyDown={e => {
+                                if (e.key === 'Enter') { e.preventDefault(); commitRenameGroup(group.id) }
+                                if (e.key === 'Escape') { e.preventDefault(); setRenamingGroup(null) }
+                              }}
+                              aria-label={`Rename ${group.label}`}
+                              placeholder={group.label}
+                              className="flex-1 min-w-0 px-2 py-1 text-xs font-bold rounded-lg border border-brand-300 dark:border-brand-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500/40"
+                            />
+                          ) : (
+                          <button
+                            type="button"
+                            onClick={() => toggleBankGroup(group.id)}
+                            aria-expanded={open}
+                            className="flex-1 min-w-0 flex items-center justify-between gap-2 py-1 text-left"
+                          >
+                            <span className="flex items-center gap-2 min-w-0">
+                              <span className={`text-xs font-bold truncate ${open ? 'text-brand-700 dark:text-brand-400' : 'text-slate-700 dark:text-slate-200'}`}>
+                                {bankGroupLabel(group)}
+                              </span>
+                              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-brand-50 text-brand-700 border border-brand-200 dark:bg-brand-900/30 dark:text-brand-400 dark:border-brand-900/50 flex-shrink-0">
+                                {groupAccounts.length}
+                              </span>
                             </span>
-                            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-brand-50 text-brand-700 border border-brand-200 dark:bg-brand-900/30 dark:text-brand-400 dark:border-brand-900/50 flex-shrink-0">
-                              {groupAccounts.length}
-                            </span>
-                          </span>
-                          <ChevronDown className={`w-4 h-4 flex-shrink-0 transition-transform ${open ? 'rotate-180 text-brand-600 dark:text-brand-400' : 'text-slate-400'}`} />
-                        </button>
+                            <ChevronDown className={`w-4 h-4 flex-shrink-0 transition-transform ${open ? 'rotate-180 text-brand-600 dark:text-brand-400' : 'text-slate-400'}`} />
+                          </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => startRenameGroup(group)}
+                            title={`Rename ${bankGroupLabel(group)}`}
+                            aria-label={`Rename ${bankGroupLabel(group)}`}
+                            className="p-1.5 rounded-lg text-slate-400 hover:text-brand-600 hover:bg-white dark:hover:bg-slate-700 transition-colors flex-shrink-0"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => openBankAccountModal(group.id)}
+                            title={`Add a bank account to ${bankGroupLabel(group)}`}
+                            aria-label={`Add a bank account to ${bankGroupLabel(group)}`}
+                            className="p-1.5 rounded-lg text-slate-400 hover:text-brand-600 hover:bg-white dark:hover:bg-slate-700 transition-colors flex-shrink-0"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
 
                         {open && groupAccounts.length === 0 && (
-                          <p className="px-3 py-3 text-center text-[11px] text-slate-400 dark:text-slate-500 bg-slate-50/50 dark:bg-slate-900/30 rounded-xl border border-dashed border-slate-200 dark:border-slate-700">
-                            No bank accounts in this group
-                          </p>
+                          /* An empty group is a place to put one, not a dead end. */
+                          <div className="px-3 py-3 text-center bg-slate-50/50 dark:bg-slate-900/30 rounded-xl border border-dashed border-slate-200 dark:border-slate-700">
+                            <p className="text-[11px] text-slate-400 dark:text-slate-500">No bank accounts in this group</p>
+                            <button
+                              onClick={() => openBankAccountModal(group.id)}
+                              className="mt-2 inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-700 transition-colors"
+                            >
+                              <Plus className="w-3 h-3" /> Add to {bankGroupLabel(group)}
+                            </button>
+                          </div>
                         )}
 
                         {open && groupAccounts.length > 0 && (
@@ -3782,45 +3518,15 @@ export default function AccountingPage() {
             </div>
 
             <div className="flex items-center gap-2 flex-shrink-0 ml-auto">
-              {/* View settings — which columns the table (and its exports) carry */}
-              <div className="relative">
-                <button
-                  onClick={() => setGlViewOpen(o => !o)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
-                >
-                  <Columns3 className="w-3.5 h-3.5" /> View
-                </button>
-                {glViewOpen && (
-                  <>
-                    <div className="fixed inset-0 z-20" onClick={() => setGlViewOpen(false)} />
-                    <div className="absolute right-0 mt-1 z-30 w-52 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl shadow-lg p-2">
-                      <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400 dark:text-slate-500 px-2 py-1">Columns</p>
-                      {GL_COLUMNS.map(col => {
-                        const shown = glColumns.includes(col.id)
-                        // The last visible column can't be hidden — an empty table is not a view.
-                        const lastOne = shown && glColumns.length === 1
-                        return (
-                          <label
-                            key={col.id}
-                            className={`flex items-center gap-2.5 px-2 py-1.5 rounded-lg text-xs text-slate-600 dark:text-slate-300 ${lastOne ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-700/50'}`}
-                          >
-                            <input
-                              type="checkbox"
-                              checked={shown}
-                              disabled={lastOne}
-                              onChange={() => setGlColumns(cols =>
-                                cols.includes(col.id) ? cols.filter(c => c !== col.id) : GL_COLUMNS.filter(c => cols.includes(c.id) || c.id === col.id).map(c => c.id)
-                              )}
-                              className="w-3.5 h-3.5 rounded border-slate-300 dark:border-slate-600 text-[#0047ab] focus:ring-blue-500/40"
-                            />
-                            {col.label}
-                          </label>
-                        )
-                      })}
-                    </div>
-                  </>
-                )}
-              </div>
+              {/* Which columns the table and its export carry. The icon alone: this row
+                  already holds a filter, a search and an action, and a fourth word on it
+                  crowded them. The choice is persisted — see accountingColumns. */}
+              <ColumnPicker
+                columns={GL_COLUMNS}
+                visibleIds={glCols.visibleIds}
+                onToggle={glCols.toggle}
+                iconOnly
+              />
               <button
                 onClick={handleDownloadLedgerPdf}
                 disabled={glEntries.length === 0}
@@ -3837,13 +3543,17 @@ export default function AccountingPage() {
             <table className="w-full">
               <thead className="sticky top-0 z-10">
                 <tr>
-                  {visibleGlColumns.map(col => <Th key={col.id} right={col.right}>{col.label}</Th>)}
+                  {visibleGlColumns.map(col => (
+                    <Th key={col.id} right={col.right} ariaSort={ariaSortFor(col, glSort.sort)}>
+                      <SortHeader column={col} sort={glSort.sort} onSort={glSort.toggleSort}>{col.label}</SortHeader>
+                    </Th>
+                  ))}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
                 {glEntries.length === 0
                   ? <EmptyState message="No ledger entries found." />
-                  : glEntries.map((e, i) => (
+                  : sortRows(glEntries, visibleGlColumns, glSort.sort).map((e, i) => (
                     <tr key={i} className="hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
                       {visibleGlColumns.map(col => (
                         <td key={col.id} className={`px-4 py-3 text-xs ${col.cellClass || 'text-slate-600 dark:text-slate-300'} ${col.right ? 'text-right' : ''}`}>
@@ -4071,6 +3781,7 @@ export default function AccountingPage() {
         <BankAccountModal
           account={editingBankAccount}
           chartOfAccounts={chartOfAccounts}
+          defaultGroup={newBankGroup}
           onClose={() => setBankAccountModalOpen(false)}
           onDelete={(id) => {
             dispatch({ type: 'DELETE_BANK_ACCOUNT', id })

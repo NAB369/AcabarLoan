@@ -9,14 +9,11 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 
-// Sample "logged in as" identities for the role-switcher demo — one representative
-// person per role so switching roles feels like switching users, not just labels.
-const ROLE_SAMPLE_NAMES = {
-  'Admin':          'System Administrator',
-  'Credit Officer': 'Vuthy Sok',
-  'Credit Manager': 'Srey Neang',
-  'Accountant':     'Sopha Ly',
-}
+// There is no login, so the role switcher stands in for one. Who it names comes from the user
+// accounts in Settings rather than from invented staff — a fresh install has only the
+// administrator, and the other roles read as the role itself until someone is added to them.
+const nameForRole = (systemUsers, role) =>
+  systemUsers.find(u => u.role === role && u.status !== 'Inactive')?.fullName || role
 
 // Flags are drawn inline rather than using emoji — Windows renders regional
 // indicator pairs as bare letters ("GB"), so 🇬🇧 would not read as a flag.
@@ -266,7 +263,7 @@ export default function Header({ onMenuClick }) {
                 <User className="w-4 h-4" />
               </div>
               <div className="text-left hidden md:block">
-                <p className="text-xs font-bold text-slate-800 dark:text-slate-200">{ROLE_SAMPLE_NAMES[state.currentRole] || state.currentRole}</p>
+                <p className="text-xs font-bold text-slate-800 dark:text-slate-200">{nameForRole(state.systemUsers, state.currentRole)}</p>
                 <p className="text-[10px] text-slate-400 dark:text-slate-500">{state.currentRole}</p>
               </div>
             </Button>
@@ -284,7 +281,7 @@ export default function Header({ onMenuClick }) {
                   key={role}
                   onSelect={() => {
                     dispatch({ type: 'SET_CURRENT_ROLE', role })
-                    showToast(`Switched to ${ROLE_SAMPLE_NAMES[role] || role} (${role})`, 'info')
+                    showToast(`Switched to ${nameForRole(state.systemUsers, role)} (${role})`, 'info')
                   }}
                   className={`flex-col items-start w-full px-3 py-2 rounded-xl cursor-pointer ${
                     state.currentRole === role
@@ -292,7 +289,7 @@ export default function Header({ onMenuClick }) {
                       : 'text-slate-600 dark:text-slate-400'
                   }`}
                 >
-                  <p className="text-xs font-semibold">{ROLE_SAMPLE_NAMES[role] || role}</p>
+                  <p className="text-xs font-semibold">{nameForRole(state.systemUsers, role)}</p>
                   <p className={`text-[10px] ${state.currentRole === role ? 'text-white/70' : 'text-slate-400 dark:text-slate-500'}`}>{role}</p>
                 </DropdownMenuItem>
               ))}

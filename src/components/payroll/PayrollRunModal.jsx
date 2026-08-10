@@ -20,16 +20,42 @@ export default function PayrollRunModal({ accountCode, accountLabel, onClose }) 
   const { employees, payrollRuns, currency } = state
 
   const [month, setMonth] = useState(currentMonth())
+  // Who is being left out of this run, by employee id. Held as exclusions rather than
+  // selections so the run defaults to paying everyone — the normal case is the whole payroll,
+  // and someone added to the register mid-draft should be in it, not silently missed.
+  const [excluded, setExcluded] = useState(() => new Set())
   const { start, end } = periodBounds(month)
+
+  // A different month is a different set of staff, so nothing carries over from the last one.
+  function pickMonth(value) {
+    setMonth(value)
+    setExcluded(new Set())
+  }
 
   const eligible = useMemo(
     () => employees.filter(e => isOnPayroll(e, start, end)),
     [employees, start, end]
   )
   // Someone on staff without a salary can't be paid — reported rather than silently dropped.
-  const lines = useMemo(() => eligible.filter(e => Number(e.salary) > 0), [eligible])
-  const missingSalary = eligible.length - lines.length
+  const payable = useMemo(() => eligible.filter(e => Number(e.salary) > 0), [eligible])
+  const lines = useMemo(() => payable.filter(e => !excluded.has(e.id)), [payable, excluded])
+  const missingSalary = eligible.length - payable.length
   const total = lines.reduce((s, e) => s + Number(e.salary), 0)
+  const leftOut = payable.length - lines.length
+
+  const allSelected = payable.length > 0 && leftOut === 0
+  const noneSelected = lines.length === 0
+  function toggleAll() {
+    setExcluded(allSelected ? new Set(payable.map(e => e.id)) : new Set())
+  }
+  function toggleOne(id) {
+    setExcluded(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
 
   const alreadyRun = payrollRuns.find(r => r.period === month)
   const canSubmit = !!month && lines.length > 0 && !alreadyRun
@@ -100,7 +126,7 @@ export default function PayrollRunModal({ accountCode, accountLabel, onClose }) 
             <div>
               <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">Pay Period</label>
               <input
-                type="month" value={month} onChange={e => setMonth(e.target.value)}
+                type="month" value={month} onChange={e => pickMonth(e.target.value)}
                 className="px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500/40"
               />
             </div>
@@ -139,6 +165,18 @@ export default function PayrollRunModal({ accountCode, accountLabel, onClose }) 
             </p>
           )}
 
+          {/* A period can only be run once (see alreadyRun), so anyone left out of this run
+              cannot be paid for this month afterwards. Said before posting, not discovered
+              when the second run is refused. */}
+          {leftOut > 0 && !alreadyRun && (
+            <p className="flex items-start gap-2 text-xs font-semibold text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 rounded-xl px-3 py-2">
+              <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+              {leftOut} of {payable.length} employee{payable.length === 1 ? '' : 's'} {leftOut === 1 ? 'is' : 'are'} left
+              out of this run. {periodLabel(month)} can only be run once, so {leftOut === 1 ? 'they' : 'they'} cannot be
+              paid for this period afterwards.
+            </p>
+          )}
+
           {missingSalary > 0 && (
             <p className="flex items-start gap-2 text-xs text-slate-500 dark:text-slate-400">
               <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5 text-amber-500" />
@@ -154,38 +192,72 @@ export default function PayrollRunModal({ accountCode, accountLabel, onClose }) 
               <table className="w-full">
                 <thead className="sticky top-0 z-10">
                   <tr>
+                    <th className={`${th} w-16`}>
+                      {/* Ticks or clears the whole list. Carries the word "All" because a bare
+                          box among four text headings doesn't read as a control — the first
+                          person to use this asked where select-all was. Indeterminate while
+                          only some are in, so it reports a partial run rather than "none". */}
+                      <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={allSelected}
+                          ref={el => { if (el) el.indeterminate = !allSelected && !noneSelected }}
+                          onChange={toggleAll}
+                          disabled={payable.length === 0}
+                          aria-label="Include every employee in this run"
+                          className="w-3.5 h-3.5 rounded border-slate-300 dark:border-slate-600 text-brand-600 focus:ring-brand-500/40"
+                        />
+                        All
+                      </label>
+                    </th>
                     <th className={th}>Employee No.</th>
                     <th className={th}>Name</th>
                     <th className={th}>Position</th>
                     <th className={`${th} !text-right`}>Salary</th>
                   </tr>
                 </thead>
+                {/* Every payable employee is listed, ticked or not — an unticked row has to
+                    stay visible or there is no way to put it back into the run. */}
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
-                  {lines.length === 0 ? (
+                  {payable.length === 0 ? (
                     <tr>
-                      <td colSpan={4} className="py-10 text-center text-sm text-slate-400">
+                      <td colSpan={5} className="py-10 text-center text-sm text-slate-400">
                         No employee is on payroll for this period.
                       </td>
                     </tr>
-                  ) : lines.map(e => (
-                    <tr key={e.id}>
-                      <td className="px-4 py-2.5 text-xs font-mono text-slate-500 dark:text-slate-400">{e.employeeNo}</td>
-                      <td className="px-4 py-2.5 text-xs font-semibold text-slate-700 dark:text-slate-200 whitespace-nowrap">{employeeName(e)}</td>
-                      <td className="px-4 py-2.5 text-xs text-slate-600 dark:text-slate-300">{e.position || '—'}</td>
-                      <td className="px-4 py-2.5 text-xs font-bold text-slate-700 dark:text-slate-200 text-right whitespace-nowrap">
-                        {formatVal(Number(e.salary), currency)}
-                      </td>
-                    </tr>
-                  ))}
+                  ) : payable.map(e => {
+                    const included = !excluded.has(e.id)
+                    return (
+                      <tr key={e.id} className={included ? '' : 'opacity-45'}>
+                        <td className="px-4 py-2.5">
+                          <input
+                            type="checkbox"
+                            checked={included}
+                            onChange={() => toggleOne(e.id)}
+                            aria-label={`Include ${employeeName(e) || e.employeeNo} in this run`}
+                            className="w-3.5 h-3.5 rounded border-slate-300 dark:border-slate-600 text-brand-600 focus:ring-brand-500/40 align-middle"
+                          />
+                        </td>
+                        <td className="px-4 py-2.5 text-xs font-mono text-slate-500 dark:text-slate-400">{e.employeeNo}</td>
+                        <td className="px-4 py-2.5 text-xs font-semibold text-slate-700 dark:text-slate-200 whitespace-nowrap">{employeeName(e)}</td>
+                        <td className="px-4 py-2.5 text-xs text-slate-600 dark:text-slate-300">{e.position || '—'}</td>
+                        <td className="px-4 py-2.5 text-xs font-bold text-slate-700 dark:text-slate-200 text-right whitespace-nowrap">
+                          {formatVal(Number(e.salary), currency)}
+                        </td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
-                {lines.length > 0 && (
+                {payable.length > 0 && (
                   // Pinned to the bottom of the scroll area, so the total stays readable while
                   // paging through the list rather than only at the end of it. The background
                   // is fully opaque here — a translucent one lets the rows it overlaps show
                   // through, which the scrolled-under header already did in dark mode.
                   <tfoot className="sticky bottom-0 z-10">
                     <tr className="border-t-2 border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700">
-                      <td colSpan={3} className="px-4 py-2.5 text-xs font-bold text-slate-700 dark:text-slate-200">Total Payroll</td>
+                      <td colSpan={4} className="px-4 py-2.5 text-xs font-bold text-slate-700 dark:text-slate-200">
+                        Total Payroll{leftOut > 0 ? ` — ${lines.length} of ${payable.length} selected` : ''}
+                      </td>
                       <td className="px-4 py-2.5 text-xs font-bold text-slate-800 dark:text-slate-100 text-right whitespace-nowrap">
                         {formatVal(total, currency)}
                       </td>
