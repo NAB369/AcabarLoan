@@ -464,6 +464,54 @@ export const INITIAL_INTEGRATIONS = [
     autoSync: false,
     syncEvery: 30,
     lastSyncAt: '',
+    // Two settlement accounts already through WeBill365's review, so the account card shows
+    // what a Trusted one looks like beside the Reviewing status every newly added account
+    // carries — and, being two, what switching a loan's KHQR between accounts looks like.
+    // One holds dollars and one riel, which is the reason a book running both currencies
+    // would keep two: a riel loan's code has to resolve to a riel account.
+    // Invented — Trusted is WeBill365's to grant and nothing in this app can award it, so
+    // without these the status has no way of appearing at all. Delete the entries to start on
+    // an empty list; an install that has added accounts of its own keeps those instead.
+    bankAccounts: [
+      {
+        bankName: 'PPCBank',
+        accountNumber: '1-120-00024176-5',
+        accountName: 'Krong Kampuchea',
+        branchName: 'Sen Sok',
+        currency: 'USD',
+        memo: 'VIP',
+        linkDeposits: true,
+        status: 'Trusted',
+        // Trusted, so a loan's KHQR can be generated from it out of the box. An account added
+        // through the card arrives Reviewing and cannot be offered until it is not.
+        useForKhqr: true,
+      },
+      {
+        bankName: 'ABA Bank',
+        accountNumber: '1-120-00024176-1',
+        accountName: 'Krong Kampuchea',
+        branchName: 'Toul Kork',
+        currency: 'KHR',
+        memo: 'Riel collections',
+        linkDeposits: false,
+        status: 'Trusted',
+        useForKhqr: true,
+      },
+      // Still with WeBill365, so the table shows a Reviewing row beside the Trusted ones and
+      // the rule that a KHQR can only come from a Trusted account is visible without adding
+      // an account by hand. Not offered for KHQR, and cannot be until that status changes.
+      {
+        bankName: 'Wing Bank',
+        accountNumber: '1-120-00024176-3',
+        accountName: 'Krong Kampuchea',
+        branchName: 'Chamkarmon',
+        currency: 'USD',
+        memo: '',
+        linkDeposits: false,
+        status: 'Reviewing',
+        useForKhqr: false,
+      },
+    ],
     // The merchant's KHQR, shown on the repayment schedule so a borrower can scan and pay
     // from any Bakong-member app. The code is issued against the WeBill365 merchant account,
     // so it is uploaded from that connection's Connect tab once it is connected, and the

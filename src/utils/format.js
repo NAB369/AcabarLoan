@@ -8,6 +8,39 @@ export function formatVal(amount, currency = 'USD', rate = CONVERSION_RATE) {
   return new Intl.NumberFormat('km-KH', { style: 'currency', currency: 'KHR', maximumFractionDigits: 0 }).format(converted)
 }
 
+export const CURRENCY_SYMBOLS = { USD: '$', KHR: '៛' }
+
+// The riel has no subunit in day-to-day MFI practice — a KHR amount is entered and held in
+// whole riel, so no decimal place is offered on one at all.
+export function currencyDecimals(currency = 'USD') {
+  return currency === 'KHR' ? 0 : 2
+}
+
+// Reduces whatever is in an amount field to something parseFloat can read back: digits and at
+// most one decimal point, capped at the currency's decimals. A decimal point on a whole-riel
+// currency truncates rather than being deleted — dropping the dot out of "1200.50" would
+// silently read it as 120050, which matters when a USD amount is already in the field and the
+// currency is switched to KHR under it.
+export function sanitizeAmountInput(text, currency = 'USD') {
+  const cleaned = String(text ?? '').replace(/[^\d.]/g, '').replace(/^0+(?=\d)/, '')
+  if (currencyDecimals(currency) === 0) return cleaned.split('.')[0]
+  const dot = cleaned.indexOf('.')
+  if (dot === -1) return cleaned
+  return cleaned.slice(0, dot + 1) + cleaned.slice(dot + 1).replace(/\./g, '').slice(0, currencyDecimals(currency))
+}
+
+// Thousand separators for an amount still being typed. Deliberately not formatVal: that one
+// renders a finished figure with fixed decimals, which would fight the person entering it —
+// a half-typed "1200." has to survive as typed, and "1.5" must not jump to "1.50" before the
+// second decimal is pressed.
+export function formatAmountInput(text, currency = 'USD') {
+  const raw = sanitizeAmountInput(text, currency)
+  if (!raw) return ''
+  const dot = raw.indexOf('.')
+  const whole = dot === -1 ? raw : raw.slice(0, dot)
+  return whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',') + (dot === -1 ? '' : raw.slice(dot))
+}
+
 // Loan product max amounts are configured in USD; convert to the loan's own
 // currency before comparing against a native-currency entered amount.
 export function getProductMaxAmount(product, currency, rate = CONVERSION_RATE) {

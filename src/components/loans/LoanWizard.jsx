@@ -1,7 +1,10 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useRef, useLayoutEffect } from 'react'
 import { X, ChevronRight, ChevronLeft, Check, User } from 'lucide-react'
 import { useApp } from '../../context/AppContext'
-import { buildAmortizationData, formatVal, getProductMaxAmount } from '../../utils/format'
+import {
+  buildAmortizationData, formatVal, getProductMaxAmount,
+  formatAmountInput, sanitizeAmountInput, currencyDecimals, CURRENCY_SYMBOLS,
+} from '../../utils/format'
 import { BRANCHES } from '../../data/constants'
 import StatusBadge from '../shared/StatusBadge'
 import SearchableSelect from '../shared/SearchableSelect'
@@ -26,6 +29,62 @@ function getNextLoanRef(loanApplications) {
     return match ? Math.max(max, parseInt(match[1], 10)) : max
   }, 0)
   return `AC-L-${String(maxNum + 1).padStart(6, '0')}`
+}
+
+// A plain number input can't carry thousand separators, so this is a text field that keeps
+// the raw digits in state and renders them grouped. The caret has to be re-placed by hand
+// after every keystroke: inserting a separator shifts everything behind it, and without this
+// the caret would jump to the end of the field the moment an amount crosses a thousand.
+function AmountInput({ value, currency, onChange, className, ...rest }) {
+  const ref = useRef(null)
+  const caret = useRef(null)
+
+  useLayoutEffect(() => {
+    if (caret.current == null || !ref.current) return
+    ref.current.setSelectionRange(caret.current, caret.current)
+    caret.current = null
+  })
+
+  function handleChange(e) {
+    const typed = e.target.value
+    // Count in digits, not characters — that is the position the separators move around.
+    const digitsBefore = typed.slice(0, e.target.selectionStart).replace(/[^\d.]/g, '').length
+    const next = formatAmountInput(typed, currency)
+    let seen = 0
+    caret.current = next.length
+    for (let i = 0; i < next.length; i++) {
+      if (/[\d.]/.test(next[i])) seen++
+      if (seen >= digitsBefore) { caret.current = i + 1; break }
+    }
+    if (digitsBefore === 0) caret.current = 0
+    onChange(sanitizeAmountInput(typed, currency))
+  }
+
+  // Settle a part-typed figure to the currency's decimals once the field is left, so what is
+  // submitted reads the same as the amount shown everywhere after it.
+  function handleBlur() {
+    const amt = parseFloat(value)
+    if (!Number.isFinite(amt)) return onChange('')
+    onChange(amt.toFixed(currencyDecimals(currency)))
+  }
+
+  return (
+    <div className="relative">
+      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-slate-400 pointer-events-none">
+        {CURRENCY_SYMBOLS[currency] || ''}
+      </span>
+      <input
+        {...rest}
+        ref={ref}
+        type="text"
+        inputMode="decimal"
+        value={formatAmountInput(value, currency)}
+        onChange={handleChange}
+        onBlur={handleBlur}
+        className={[className, 'pl-7'].join(' ')}
+      />
+    </div>
+  )
 }
 
 export default function LoanWizard() {
@@ -283,7 +342,12 @@ export default function LoanWizard() {
                   {['USD', 'KHR'].map(c => (
                     <button
                       key={c}
-                      onClick={() => setCurrency(c)}
+                      onClick={() => {
+                        setCurrency(c)
+                        // An amount already typed has to be re-read in the currency now selected —
+                        // switching a USD 1200.50 to riel leaves 1200, not a stray decimal place.
+                        setAmount(prev => sanitizeAmountInput(prev, c))
+                      }}
                       className={[
                         'flex-1 py-2.5 text-sm font-semibold rounded-xl border-2 transition-colors',
                         currency === c
@@ -306,8 +370,9 @@ export default function LoanWizard() {
                 </div>
                 <div>
                   <label className={labelCls}>Loan Amount ({currency}) *</label>
-                  <input
-                    type="number" min="0" step="100" value={amount} onChange={e => setAmount(e.target.value)} placeholder="0.00"
+                  <AmountInput
+                    value={amount} currency={currency} onChange={setAmount}
+                    placeholder={currencyDecimals(currency) === 0 ? '0' : '0.00'}
                     className={[inputCls, amountExceedsMax ? 'border-rose-400 focus:ring-rose-400' : ''].join(' ')}
                   />
                   {selectedProductMax != null && (
