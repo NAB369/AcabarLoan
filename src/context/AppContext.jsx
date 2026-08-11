@@ -8,6 +8,7 @@ import {
   backfillStatementAnalysis
 } from '../data/mockData'
 import { formatDateDisplay, shiftISODate, daysBetweenISO, auditStamp } from '../utils/format'
+import { seedDemoBook } from '../data/demoBook'
 
 // v5: chart-of-accounts replaced by Main Account + sub-accounts (accounts), expenses gained
 // an approval status, incomes gained a source field
@@ -189,6 +190,10 @@ function loadPersistedState() {
       // and falls back to a closed day with no history rather than needing a key bump.
       businessDay: p.businessDay || null,
       batchRuns: p.batchRuns || null,
+      // Whether the demo book has already been offered to this install. Checked rather than
+      // "are the registers empty" so that deleting the demo records sticks — an emptiness
+      // test would seed them again on the next reload.
+      demoSeeded: p.demoSeeded === true,
     }
   } catch { return {} }
 }
@@ -501,6 +506,7 @@ const INITIAL_STATE = {
   // What each batch verified and posted, newest first — the audit trail behind the day.
   // End of Month reads it back to refuse closing a period it has already closed.
   batchRuns: persisted.batchRuns || [],
+  demoSeeded: persisted.demoSeeded,
 }
 
 // Cash moves through the real bank account held in the loan's currency AND branch —
@@ -1905,10 +1911,20 @@ function reducer(state, action) {
   }
 }
 
+// The demo book is folded through the reducer above, so it has to be built down here: the
+// reducer closes over AP_LOAN_CODE and friends, which are `const`s declared after
+// INITIAL_STATE and would still be in their temporal dead zone if this ran up there.
+//
+// Offered once per install, and only whole: an install that has already been offered it keeps
+// exactly what it has, so demo records the operator deleted stay deleted and their own
+// customers and loans are never touched. See seedDemoBook for why it is replayed rather than
+// written out as static arrays.
+const BOOT_STATE = INITIAL_STATE.demoSeeded ? INITIAL_STATE : seedDemoBook(INITIAL_STATE, reducer)
+
 const AppContext = createContext(null)
 
 export function AppProvider({ children }) {
-  const [state, dispatch] = useReducer(reducer, INITIAL_STATE)
+  const [state, dispatch] = useReducer(reducer, BOOT_STATE)
 
   // Persist key data
   useEffect(() => {
@@ -1942,9 +1958,10 @@ export function AppProvider({ children }) {
         bankGroupLabels: state.bankGroupLabels,
         accountingColumns: state.accountingColumns,
         reportColumns: state.reportColumns,
+        demoSeeded: state.demoSeeded,
       }))
     } catch {}
-  }, [state.customerVisibleColumns, state.loanVisibleColumns, state.payrollColumns, state.bankGroupLabels, state.accountingColumns, state.reportColumns, state.systemUsers, state.auditLogs, state.integrations, state.payrollRuns, state.customers, state.loanApplications, state.incomes, state.expenses, state.notifications, state.cashTransfers, state.accounts, state.feeSettings, state.loanProducts, state.activeStatement, state.chartOfAccounts, state.realBankAccounts, state.journalEntries, state.companyProfile, state.employees, state.businessDay, state.batchRuns, state.customGeo])
+  }, [state.customerVisibleColumns, state.loanVisibleColumns, state.payrollColumns, state.bankGroupLabels, state.accountingColumns, state.reportColumns, state.systemUsers, state.auditLogs, state.integrations, state.payrollRuns, state.customers, state.loanApplications, state.incomes, state.expenses, state.notifications, state.cashTransfers, state.accounts, state.feeSettings, state.loanProducts, state.activeStatement, state.chartOfAccounts, state.realBankAccounts, state.journalEntries, state.companyProfile, state.employees, state.businessDay, state.batchRuns, state.customGeo, state.demoSeeded])
 
   // Dark mode
   useEffect(() => {
