@@ -258,7 +258,16 @@ export default function LoanPreview() {
   const hasKhqr = !!loan.khqrImage
   // Binding needs both a live connection and the merchant account the code is keyed on —
   // either missing and there is nothing for the button to fetch.
-  const khqrCanBind = webill365?.status === 'connected' && !!(webill365.account || '').trim()
+  // The accounts WeBill365 offers for KHQR (Integrations → Account → Use for KHQR). More
+  // than one and the schedule picks; the loan remembers which, so regenerating uses the same
+  // account rather than quietly falling back to the connection's default.
+  // Offered AND Trusted: a code built from an account still under review would be a payment
+  // instruction nobody has confirmed can be paid into.
+  const khqrAccounts = (webill365?.bankAccounts || []).filter(a => a.useForKhqr && a.status === 'Trusted')
+  const khqrPick = khqrAccounts.find(a => a.accountNumber === (loan.khqrAccount || webill365?.account))
+    || khqrAccounts[0]
+    || null
+  const khqrCanBind = webill365?.status === 'connected' && !!khqrPick
 
   function setKhqr(khqr) {
     dispatch({ type: 'SET_LOAN_KHQR', ref: loan.ref, khqr })
@@ -268,8 +277,10 @@ export default function LoanPreview() {
   // The connection is a mock with no endpoint (see INITIAL_INTEGRATIONS), so the payload is
   // built locally in the shape Bakong reads rather than fetched — utils/khqr.js covers what
   // that does and does not guarantee.
-  async function handleGenerateKhqr() {
-    const account = (webill365?.account || '').trim()
+  async function handleGenerateKhqr(fromAccount = null) {
+    // The account to build from: the one just picked, otherwise this loan's own.
+    const chosen = fromAccount || khqrPick
+    const account = (chosen?.accountNumber || '').trim()
     // Two separate reasons this can fail, reported separately. They used to share one message
     // that blamed the connection, so a connection that was up but had no Merchant ID on it read
     // as "not connected" and sent the operator to the wrong screen.
@@ -278,7 +289,7 @@ export default function LoanPreview() {
       return
     }
     if (!account) {
-      showToast(`${webill365?.name || 'WeBill365'} has no ${webill365?.accountLabel || 'Merchant ID'} set — add it in Integrations → Connect`, 'error')
+      showToast(`${webill365?.name || 'WeBill365'} has no account offered for KHQR — tick one in Integrations → Account and press Use for KHQR`, 'error')
       return
     }
     setKhqrBusy(true)
@@ -298,9 +309,9 @@ export default function LoanPreview() {
       // The currency drives the badge painted into the middle of the code, so it is passed
       // rather than left to a default that could disagree with the payload's own tag 53.
       const image = await renderKhqrImage(payload, khqrCurrency)
-      setKhqr({ khqrImage: image, khqrEnabled: true, khqrSource: 'webill365', khqrCurrency })
+      setKhqr({ khqrImage: image, khqrEnabled: true, khqrSource: 'webill365', khqrCurrency, khqrAccount: account })
       logActivity('Repayment Schedule', 'KHQR generated',
-        `From ${webill365?.name || 'WeBill365'} · merchant ${account} · ${khqrCurrency}`)
+        `From ${webill365?.name || 'WeBill365'} · ${chosen?.bankName || 'account'} ${account} · ${khqrCurrency}`)
       showToast(`KHQR generated for ${loan.ref} — scan it once to confirm it resolves`, 'success')
     } catch {
       showToast('That KHQR could not be generated', 'error')
@@ -1182,6 +1193,33 @@ export default function LoanPreview() {
                   sit behind a single menu on the right. */}
               <div className="flex flex-wrap items-center gap-2">
                 <div className="flex flex-wrap items-center gap-2 mr-auto">
+                  {/* Which WeBill365 account this loan's code resolves to. Only shown when
+                      there is a choice to make — with one account offered there is nothing to
+                      pick. Switching it regenerates straight away: the account is baked into
+                      the payload, so a code left on screen from the previous one would be a
+                      payment instruction that disagrees with the account named beside it. */}
+                  {khqrAccounts.length > 1 && (
+                    <select
+                      value={khqrPick?.accountNumber || ''}
+                      onChange={e => {
+                        const next = khqrAccounts.find(a => a.accountNumber === e.target.value)
+                        if (!next) return
+                        setKhqr({ khqrAccount: next.accountNumber })
+                        if (loan.khqrEnabled || hasKhqr) handleGenerateKhqr(next)
+                      }}
+                      disabled={khqrBusy}
+                      aria-label="Bank account this KHQR is generated from"
+                      title="Which WeBill365 account a borrower scanning this code pays into"
+                      className="px-2.5 py-1.5 text-xs font-semibold rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-600 dark:text-slate-300 focus:outline-none focus:ring-2 focus:ring-brand-500 disabled:opacity-40"
+                    >
+                      {khqrAccounts.map(a => (
+                        <option key={a.accountNumber} value={a.accountNumber}>
+                          {a.bankName} · {a.accountNumber} ({a.currency || '—'})
+                        </option>
+                      ))}
+                    </select>
+                  )}
+
                   {/* One control for this loan's payment code. Switching it on with nothing on
                       file binds it from WeBill365 as part of the same action, so there is no
                       separate step to know about. Disabled while switched off and the provider

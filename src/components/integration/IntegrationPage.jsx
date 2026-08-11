@@ -727,8 +727,10 @@ export default function IntegrationPage({ embedded = false }) {
         ...(integration.id === 'webill365' ? { status: 'connected' } : {}),
       },
     })
-    // Connecting succeeded, so the account it now belongs to is what comes next.
-    if (integration.id === 'webill365') setWebillAccount(true)
+    // Signing in goes straight to the panel. The account card is where registering ends —
+    // that is the point at which there is something new to look at — but on a sign-in it
+    // would only be a card to dismiss between the operator and what they came for.
+    if (integration.id === 'webill365') setWebillAccount(false)
     log(integration.id, {
       event: 'Signed in',
       direction: 'Outbound',
@@ -743,28 +745,144 @@ export default function IntegrationPage({ embedded = false }) {
   // what the per-loan KHQR is built from (see LoanPreview → buildKhqrPayload), so it is kept
   // in step here — the Merchant ID field it used to come from is gone, and a code built from
   // nothing would be a QR that resolves to no one.
-  function handleActivateBank(integration, bankAccount) {
+  // `replacing` is the account number being edited, if any. Editing only reaches the remark —
+  // the account WeBill365 reviewed is unchanged — so an edit keeps whatever standing it had.
+  // A new account is under review, which is not this side's to skip.
+  function handleActivateBank(integration, bankAccount, replacing = null) {
+    const existing = integration.bankAccounts || []
+    const previous = replacing ? existing.find(a => a.accountNumber === replacing) : null
+    // Never offered for KHQR on arrival: a new account is Reviewing, and a code can only be
+    // built from one WeBill365 has come back Trusted on. Offering it is a separate, deliberate
+    // step once that standing is granted.
+    const saved = {
+      ...previous,
+      ...bankAccount,
+      status: previous?.status || 'Reviewing',
+      useForKhqr: replacing ? previous?.useForKhqr : false,
+    }
     dispatch({
       type: 'UPDATE_INTEGRATION',
       id: integration.id,
-      updates: { bankAccount, account: bankAccount.accountNumber },
+      updates: {
+        bankAccounts: replacing
+          ? existing.map(a => (a.accountNumber === replacing ? saved : a))
+          : [...existing, saved],
+        // `account` is the number the per-loan KHQR is built from (see LoanPreview). Adding
+        // an account no longer claims it — a second account would silently re-point every
+        // KHQR generated afterwards. It is only taken when nothing is linked yet, so the
+        // first account works without a separate step; after that, linking is deliberate.
+        ...(integration.account ? {} : { account: saved.accountNumber }),
+      },
     })
     log(integration.id, {
-      event: 'Bank account activated',
+      event: replacing ? 'Bank account updated' : 'Bank account added',
       direction: 'Outbound',
       records: 0,
       status: 'Success',
-      detail: `${bankAccount.bankName} · ${bankAccount.accountName} · ${bankAccount.accountNumber}`,
+      detail: `${saved.bankName} · ${saved.accountName} · ${saved.accountNumber} — under review`,
     })
-    showToast(`Bank account activated — ${bankAccount.bankName}`, 'success')
+    showToast(
+      `Bank account ${replacing ? 'updated' : 'added'} — ${saved.bankName}, under review`,
+      'success'
+    )
+  }
+
+  // Which accounts a loan's KHQR may be generated from. More than one can be offered — a
+  // dollar account and a riel one, say — and the schedule picks between them at the moment it
+  // generates. Any single code still carries exactly one account; this is the shortlist.
+  function handleLinkKhqr(integration, numbers) {
+    const existing = integration.bankAccounts || []
+    // All of them already on means the operator is turning them off.
+    const turningOff = numbers.every(n => existing.find(a => a.accountNumber === n)?.useForKhqr)
+    // Offering is refused for anything WeBill365 has not come back Trusted on. Withdrawing is
+    // always allowed — taking an account back off is never the risky direction.
+    const underReview = numbers
+      .map(n => existing.find(a => a.accountNumber === n))
+      .filter(a => a && a.status !== 'Trusted')
+    if (!turningOff && underReview.length) {
+      showToast(
+        underReview.length === 1
+          ? 'That account is still under review — a KHQR can only be generated from a Trusted account'
+          : `${underReview.length} of those accounts are still under review — a KHQR can only be generated from a Trusted account`,
+        'error'
+      )
+      return
+    }
+    const bankAccounts = existing.map(a =>
+      (numbers.includes(a.accountNumber) ? { ...a, useForKhqr: !turningOff } : a))
+    const offered = bankAccounts.filter(a => a.useForKhqr && a.status === 'Trusted')
+    dispatch({
+      type: 'UPDATE_INTEGRATION',
+      id: integration.id,
+      updates: {
+        bankAccounts,
+        // `account` is what a schedule falls back to when it has no pick of its own, so it
+        // has to name an account still on the shortlist.
+        account: offered.some(a => a.accountNumber === integration.account)
+          ? integration.account
+          : (offered[0]?.accountNumber || ''),
+      },
+    })
+    log(integration.id, {
+      event: turningOff ? 'KHQR account withdrawn' : 'KHQR account offered',
+      direction: 'Outbound',
+      records: 0,
+      status: 'Success',
+      detail: `${numbers.join(', ')} — ${offered.length} account${offered.length === 1 ? '' : 's'} available for KHQR`,
+    })
+    showToast(
+      turningOff
+        ? 'Withdrawn — a loan’s KHQR can no longer be generated from it'
+        : `Available for KHQR — ${offered.length} account${offered.length === 1 ? '' : 's'} to choose from on a schedule`,
+      'success'
+    )
+  }
+
+  function handleRemoveBankAccounts(integration, numbers) {
+    // Removing the account a schedule falls back to drops that fallback rather than quietly
+    // moving it to another — a KHQR is a payment instruction and must not start resolving
+    // somewhere else on its own. It moves only to another account already offered for KHQR.
+    const bankAccounts = (integration.bankAccounts || []).filter(a => !numbers.includes(a.accountNumber))
+    const offered = bankAccounts.filter(a => a.useForKhqr && a.status === 'Trusted')
+    const lostDefault = numbers.includes(integration.account)
+    dispatch({
+      type: 'UPDATE_INTEGRATION',
+      id: integration.id,
+      updates: {
+        bankAccounts,
+        ...(lostDefault ? { account: offered[0]?.accountNumber || '' } : {}),
+      },
+    })
+    if (lostDefault && !offered.length) {
+      showToast('That account generated the KHQR — offer another to generate more', 'info')
+    }
+    log(integration.id, {
+      event: 'Bank account removed',
+      direction: 'Outbound',
+      records: 0,
+      status: 'Success',
+      detail: numbers.join(', '),
+    })
+    showToast(numbers.length === 1 ? 'Bank account removed' : `${numbers.length} bank accounts removed`, 'info')
   }
 
   function handleSignOut(integration) {
     dispatch({
       type: 'UPDATE_INTEGRATION',
       id: integration.id,
-      updates: { login: { ...integration.login, signedIn: false } },
+      updates: {
+        login: { ...integration.login, signedIn: false },
+        // The mirror of handleSignIn: being signed in is what makes WeBill365 connected, so
+        // signing out closes the connection rather than leaving it reading as established.
+        ...(integration.id === 'webill365' ? { status: 'disconnected', autoSync: false } : {}),
+      },
     })
+    // Back to the Integrations list. Left on the panel, the sign-in screens would come
+    // straight back up over it — signing out is a way out, not a way back to the login.
+    if (integration.id === 'webill365') {
+      setWebillAccount(false)
+      setOpenId(null)
+    }
     log(integration.id, {
       event: 'Signed out',
       direction: 'Outbound',
@@ -827,15 +945,30 @@ export default function IntegrationPage({ embedded = false }) {
   }
 
   function handleDisconnect(integration) {
-    // Auto-sync goes off with the connection: a disconnected provider left on schedule
-    // would report a failed run every interval.
-    dispatch({ type: 'UPDATE_INTEGRATION', id: integration.id, updates: { status: 'disconnected', autoSync: false } })
+    // WeBill365 is connected by being signed in to (see handleSignIn), so closing the
+    // connection signs it out — left signed in, it would sit in a state its own sign-in
+    // cannot produce, with its account still open to anyone who pressed the card.
+    const webill = integration.id === 'webill365'
+    dispatch({
+      type: 'UPDATE_INTEGRATION',
+      id: integration.id,
+      updates: {
+        // Auto-sync goes off with the connection: a disconnected provider left on schedule
+        // would report a failed run every interval.
+        status: 'disconnected',
+        autoSync: false,
+        ...(webill ? { login: { ...integration.login, signedIn: false } } : {}),
+      },
+    })
+    if (webill) setWebillAccount(false)
     log(integration.id, {
       event: 'Disconnected',
       direction: 'Outbound',
       records: 0,
       status: 'Success',
-      detail: 'Connection closed by Admin — credentials kept, automatic sync switched off',
+      detail: webill
+        ? 'Connection closed by Admin — signed out, account and bank details kept, automatic sync switched off'
+        : 'Connection closed by Admin — credentials kept, automatic sync switched off',
     })
     showToast(`${integration.name} disconnected`, 'info')
   }
@@ -1080,7 +1213,9 @@ export default function IntegrationPage({ embedded = false }) {
               onClose={() => { setWebillAccount(false); if (!signedIn) setOpenId(null) }}
               // The merchant account and the profile are the whole of WeBill365's setup now,
               // so both are written straight from the card that shows them.
-              onBankAccountChange={bankAccount => handleActivateBank(active, bankAccount)}
+              onBankAccountChange={(bankAccount, replacing) => handleActivateBank(active, bankAccount, replacing)}
+              onRemoveBankAccounts={numbers => handleRemoveBankAccounts(active, numbers)}
+              onLinkKhqr={number => handleLinkKhqr(active, number)}
               onProfileChange={patch => dispatch({
                 type: 'UPDATE_INTEGRATION',
                 id: active.id,
@@ -1159,7 +1294,9 @@ export default function IntegrationPage({ embedded = false }) {
               integration={active}
               mode="account"
               embedded
-              onBankAccountChange={bankAccount => handleActivateBank(active, bankAccount)}
+              onBankAccountChange={(bankAccount, replacing) => handleActivateBank(active, bankAccount, replacing)}
+              onRemoveBankAccounts={numbers => handleRemoveBankAccounts(active, numbers)}
+              onLinkKhqr={number => handleLinkKhqr(active, number)}
               onProfileChange={patch => dispatch({
                 type: 'UPDATE_INTEGRATION',
                 id: active.id,

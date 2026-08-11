@@ -267,6 +267,26 @@ function mergeSeededBankAccounts(saved) {
 // instead of lingering beside its replacement, keeping whatever it was toggled to.
 // A connection added from the catalogue (Integrations → Add Integration) has no seed to be
 // walked against, so it is carried over whole — it *is* install data, definition included.
+// A provider's bank accounts: everything the install saved, plus any seeded account it has
+// not been offered before — matched on the account number, so an edited one is never
+// duplicated and an install that already had accounts of its own still sees one the build
+// added afterwards.
+//
+// Offered once, not every load. `seededBankAccounts` records which seeded numbers this install
+// has already been given, so deleting one makes it stay deleted; without that record, "never
+// held" and "deliberately removed" look identical and a deleted row would return on the next
+// reload. Adding a new entry to INITIAL_INTEGRATIONS still reaches every install, once.
+function mergeSeededBankList(saved, seeded, alreadyOffered) {
+  const list = Array.isArray(saved) ? saved : []
+  const held = new Set(list.map(a => a.accountNumber))
+  const offered = new Set(alreadyOffered || [])
+  const fresh = (seeded || []).filter(a => !held.has(a.accountNumber) && !offered.has(a.accountNumber))
+  return {
+    bankAccounts: [...list, ...fresh],
+    seededBankAccounts: [...new Set([...offered, ...(seeded || []).map(a => a.accountNumber)])],
+  }
+}
+
 function mergeSeededIntegrations(saved) {
   if (!saved?.length) return INITIAL_INTEGRATIONS
   const added = saved.filter(s => s.fromCatalogue && !INITIAL_INTEGRATIONS.some(seed => seed.id === s.id))
@@ -286,10 +306,18 @@ function mergeSeededIntegrations(saved) {
       // Which provider account this install registered/signed in as — install data, like
       // the credentials beside it. A seeded provider that was signed out stays signed out.
       login: s.login ?? seed.login,
-      // The bank account collected payments settle into (WeBill365's account card). Install
-      // data like the login beside it, and the seed ships none — without carrying it across,
-      // activating an account would last until the next reload.
-      bankAccount: s.bankAccount ?? seed.bankAccount ?? null,
+      // The bank accounts collected payments settle into (WeBill365's account card). Install
+      // data, so what was saved is kept — including an install saved when this held a single
+      // `bankAccount`, which is folded into the list rather than losing the account it had
+      // already activated. Seeded accounts the install has never seen are appended, matched on
+      // the account number, the same way mergeSeededAccounts reconciles the chart of accounts:
+      // an install that already had accounts of its own would otherwise never see an account
+      // the build added afterwards.
+      ...mergeSeededBankList(
+        s.bankAccounts ?? (s.bankAccount ? [s.bankAccount] : null),
+        seed.bankAccounts,
+        s.seededBankAccounts,
+      ),
       // The uploaded KHQR and its on/off switch belong to the install, not the build — the
       // seed ships them empty/off, so without carrying them across every reload would drop
       // the merchant's own code back to nothing.
