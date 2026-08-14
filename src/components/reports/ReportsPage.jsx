@@ -8,7 +8,7 @@ import {
 import jsPDF from 'jspdf'
 import autoTable from 'jspdf-autotable'
 import { useApp } from '../../context/AppContext'
-import { formatVal, buildAmortizationData, formatAddress, daysBetweenISO, CURRENCY_SYMBOLS } from '../../utils/format'
+import { formatVal, buildAmortizationData, formatAddress, daysBetweenISO } from '../../utils/format'
 import { cashGlAccounts, buildCashMovements } from '../../utils/cash'
 import StatusBadge from '../shared/StatusBadge'
 import { useTableColumns, ColumnPicker } from '../shared/DataTableTools'
@@ -993,19 +993,14 @@ export default function ReportsPage() {
   // refused to, printed no total at all — and the figures it did print were run through
   // formatVal's USD→KHR conversion on top of amounts already in their own currency.
   //
+  // Which currency that is comes from the app's own setting rather than a control in this header.
   // Every report below is fed from `loanApplications`, so filtering once here reaches all of them,
-  // and every figure is then native to the chosen currency — hence rate 1 wherever they are
-  // formatted, never the conversion rate.
-  const [reportCurrency, setReportCurrency] = useState(currency || 'USD')
+  // and every figure is then native — hence rate 1 wherever they are formatted, never converted.
+  const reportCurrency = currency || 'USD'
   const loanApplications = useMemo(
     () => allLoanApplications.filter(l => (l.currency || 'USD') === reportCurrency),
     [allLoanApplications, reportCurrency]
   )
-  const loanCurrencyCounts = useMemo(() => allLoanApplications.reduce((acc, l) => {
-    const c = l.currency || 'USD'
-    acc[c] = (acc[c] || 0) + 1
-    return acc
-  }, {}), [allLoanApplications])
   // null | 'loan' | 'financial' — see reportView in AppContext: reducer state so the sidebar
   // returning to this module drops back to the picker rather than leaving it where it was.
   const view = reportView
@@ -1257,30 +1252,6 @@ export default function ReportsPage() {
       {view === 'loan' && (
         // The tab row across the top, the open report underneath.
         <div className="space-y-4">
-          {/* Which currency the whole module is reporting in. Both are always offered — a book
-              with no riel loans yet still has to be able to open the riel report and see it
-              empty, rather than have the option disappear and read as unsupported. */}
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-[11px] font-bold uppercase tracking-wide text-slate-400 dark:text-slate-500">Currency</span>
-            {['USD', 'KHR'].map(c => (
-              <button
-                key={c}
-                onClick={() => setReportCurrency(c)}
-                aria-pressed={reportCurrency === c}
-                className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
-                  reportCurrency === c
-                    ? 'bg-brand-600 border-brand-600 text-white'
-                    : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700'
-                }`}
-              >
-                {CURRENCY_SYMBOLS[c]} {c}
-                <span className={`ml-1.5 font-normal ${reportCurrency === c ? 'text-white/70' : 'text-slate-400 dark:text-slate-500'}`}>
-                  {loanCurrencyCounts[c] || 0}
-                </span>
-              </button>
-            ))}
-          </div>
-
           <ReportTypeTabs value={reportTab} onChange={selectTab} />
 
           <div
