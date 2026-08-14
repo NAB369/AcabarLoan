@@ -937,11 +937,22 @@ const BREAKDOWN_SORT_KEY = {
   product_type: r => r.product,
   // Balance band absorbs the former standalone Repayment Range report.
   balance_band: r => balanceBand(r.bal),
+  // What the loan is secured on, read off its own collateral records. This used to fall back to
+  // the borrower's name like the two below, which is why grouping by Collateral listed people.
+  collateral: r => r.collateral,
   // These sort dimensions aren't captured as discrete fields on a loan/customer
   // record yet, so fall back to a stable, human-readable order by name.
   loan_note: r => r.name,
-  collateral: r => r.name,
   provision: r => r.name,
+}
+
+// The kinds of security behind a loan, as one label: 'Land', 'Land + Vehicle', or 'Unsecured'
+// when nothing is pledged. Types rather than individual items — a report grouping by collateral
+// is asking what class of security the book is lent against, not which particular title deed.
+function collateralLabel(loan) {
+  const list = loan.collaterals || (loan.collateral ? [loan.collateral] : [])
+  const types = [...new Set(list.map(c => (c && c.type) || '').filter(Boolean))].sort()
+  return types.length ? types.join(' + ') : 'Unsecured'
 }
 
 // Band labels don't sort alphabetically into their numeric order ("$10,001" before
@@ -956,7 +967,14 @@ function breakdownKeyCompare(sorting) {
 // Outstanding balance mirrors the other portfolio reports (see buildPortfolioSummaryRows
 // above): per-loan repayment schedules aren't persisted on the loan record, so accrued
 // interest/fees stay 0 and the balance is the disbursed amount until that data exists.
-function buildLoanBreakdownDetailRows(loanApplications, customers, { sorting, from, to }) {
+// What an instalment column has earned up to today — the rows already due, summed. A schedule
+// priced with a collection fee carries it per row; one priced without simply sums to nothing.
+function accruedToDate(loan, todayISO, pick) {
+  return round2(loanSchedule(loan).reduce(
+    (sum, row) => (row.dueDateISO && row.dueDateISO <= todayISO ? sum + (pick(row) || 0) : sum), 0))
+}
+
+function buildLoanBreakdownDetailRows(loanApplications, customers, { sorting, from, to, todayISO }) {
   const rows = loanApplications
     .filter(l => l.status === 'Active' && inDisbursedRange(l, from, to))
     .map(loan => {
@@ -971,8 +989,13 @@ function buildLoanBreakdownDetailRows(loanApplications, customers, { sorting, fr
         address: address || '-',
         disbAmt: loan.amount || 0,
         bal: loan.amount || 0,
-        intAccr: 0,
-        colFeeAccr: 0,
+        // Interest and collection fee earned so far: the instalments already fallen due, read off
+        // the loan's own schedule. Both were hardcoded 0 from before schedules were kept on the
+        // record — the columns printed for every loan and never carried a figure.
+        intAccr: accruedToDate(loan, todayISO, r => r.interest),
+        colFeeAccr: accruedToDate(loan, todayISO, r => r.collectionFee),
+        collateral: collateralLabel(loan),
+        currency: loan.currency || 'USD',
         intRate: loan.interestRate || 0,
         period: loan.installments || 0,
         businessType: loan.borrowerIncomeInfo?.occupation || customer?.occupation || '—',
@@ -1075,8 +1098,8 @@ export default function ReportsPage() {
   const activeSummaryGroup = SUMMARY_GROUPS.find(g => g.value === summaryGroup) || SUMMARY_GROUPS[1]
 
   const breakdownDetailRows = useMemo(
-    () => buildLoanBreakdownDetailRows(loanApplications, customers, { sorting: listingSort, from: listingFrom, to: listingTo }),
-    [loanApplications, customers, listingSort, listingFrom, listingTo]
+    () => buildLoanBreakdownDetailRows(loanApplications, customers, { sorting: listingSort, from: listingFrom, to: listingTo, todayISO }),
+    [loanApplications, customers, listingSort, listingFrom, listingTo, todayISO]
   )
   const breakdownSummaryRows = useMemo(
     () => buildLoanBreakdownSummaryRows(breakdownDetailRows, listingSort),
