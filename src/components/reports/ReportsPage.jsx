@@ -8,7 +8,7 @@ import {
 import jsPDF from 'jspdf'
 import autoTable from 'jspdf-autotable'
 import { useApp } from '../../context/AppContext'
-import { formatVal, buildAmortizationData, formatAddress, daysBetweenISO } from '../../utils/format'
+import { formatVal, buildAmortizationData, formatAddress, daysBetweenISO, CURRENCY_SYMBOLS } from '../../utils/format'
 import { cashGlAccounts, buildCashMovements } from '../../utils/cash'
 import StatusBadge from '../shared/StatusBadge'
 import { useTableColumns, ColumnPicker } from '../shared/DataTableTools'
@@ -986,7 +986,26 @@ function buildLoanBreakdownSummaryRows(detailRows, sorting) {
 
 export default function ReportsPage() {
   const { state, dispatch } = useApp()
-  const { reportTab, reportView, loanApplications, currency, customers } = state
+  const { reportTab, reportView, loanApplications: allLoanApplications, currency, customers } = state
+
+  // A loan report is always run in ONE currency. Dollars and riel are different money and cannot
+  // be added, so a module that mixed them either printed a total of two currencies or, where it
+  // refused to, printed no total at all — and the figures it did print were run through
+  // formatVal's USD→KHR conversion on top of amounts already in their own currency.
+  //
+  // Every report below is fed from `loanApplications`, so filtering once here reaches all of them,
+  // and every figure is then native to the chosen currency — hence rate 1 wherever they are
+  // formatted, never the conversion rate.
+  const [reportCurrency, setReportCurrency] = useState(currency || 'USD')
+  const loanApplications = useMemo(
+    () => allLoanApplications.filter(l => (l.currency || 'USD') === reportCurrency),
+    [allLoanApplications, reportCurrency]
+  )
+  const loanCurrencyCounts = useMemo(() => allLoanApplications.reduce((acc, l) => {
+    const c = l.currency || 'USD'
+    acc[c] = (acc[c] || 0) + 1
+    return acc
+  }, {}), [allLoanApplications])
   // null | 'loan' | 'financial' — see reportView in AppContext: reducer state so the sidebar
   // returning to this module drops back to the picker rather than leaving it where it was.
   const view = reportView
@@ -1238,6 +1257,30 @@ export default function ReportsPage() {
       {view === 'loan' && (
         // The tab row across the top, the open report underneath.
         <div className="space-y-4">
+          {/* Which currency the whole module is reporting in. Both are always offered — a book
+              with no riel loans yet still has to be able to open the riel report and see it
+              empty, rather than have the option disappear and read as unsupported. */}
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[11px] font-bold uppercase tracking-wide text-slate-400 dark:text-slate-500">Currency</span>
+            {['USD', 'KHR'].map(c => (
+              <button
+                key={c}
+                onClick={() => setReportCurrency(c)}
+                aria-pressed={reportCurrency === c}
+                className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
+                  reportCurrency === c
+                    ? 'bg-brand-600 border-brand-600 text-white'
+                    : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700'
+                }`}
+              >
+                {CURRENCY_SYMBOLS[c]} {c}
+                <span className={`ml-1.5 font-normal ${reportCurrency === c ? 'text-white/70' : 'text-slate-400 dark:text-slate-500'}`}>
+                  {loanCurrencyCounts[c] || 0}
+                </span>
+              </button>
+            ))}
+          </div>
+
           <ReportTypeTabs value={reportTab} onChange={selectTab} />
 
           <div
@@ -1259,19 +1302,19 @@ export default function ReportsPage() {
               sub="Disbursed loans currently running"
             />
             <KpiCard
-              label="Total Outstanding" value={formatVal(loanKpis.outstanding, currency)}
+              label="Total Outstanding" value={formatVal(loanKpis.outstanding, reportCurrency, 1)}
               icon={Wallet} iconBg="bg-emerald-50 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400"
               valueClass="text-xl"
               sub="Gross loan portfolio"
             />
             <KpiCard
-              label="Due Today" value={formatVal(loanKpis.dueTodayAmount, currency)}
+              label="Due Today" value={formatVal(loanKpis.dueTodayAmount, reportCurrency, 1)}
               icon={Clock} iconBg="bg-amber-50 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400"
               valueClass="text-xl"
               sub={`${loanKpis.dueTodayCount} installment${loanKpis.dueTodayCount === 1 ? '' : 's'} falling due`}
             />
             <KpiCard
-              label="Total Arrears" value={formatVal(loanKpis.arrears, currency)}
+              label="Total Arrears" value={formatVal(loanKpis.arrears, reportCurrency, 1)}
               icon={AlertTriangle} iconBg="bg-rose-50 text-rose-600 dark:bg-rose-900/30 dark:text-rose-400"
               valueClass="text-xl"
               sub={`${loanKpis.arrearsAccounts} accounts past due`}
@@ -1340,7 +1383,7 @@ export default function ReportsPage() {
                 { key: 'daysLate', label: 'Days Late', right: true, render: r => r.daysLate > 0
                   ? <span className="font-bold text-rose-600">{r.daysLate}</span>
                   : '—' },
-                { key: 'amount', label: 'Amount Due', right: true, render: r => formatVal(r.amount, currency) },
+                { key: 'amount', label: 'Amount Due', right: true, render: r => formatVal(r.amount, reportCurrency, 1) },
                 { key: 'branch', label: 'Branch' },
                 { key: 'creditOfficer', label: 'Credit Officer' },
                 { key: 'status', label: 'Status', render: r => (
@@ -1443,8 +1486,8 @@ export default function ReportsPage() {
               columns={[
                 { key: 'name', label: activeArrearsGroup.column, className: 'font-medium text-slate-700 dark:text-slate-200' },
                 { key: 'accounts', label: '# Accounts', right: true },
-                { key: 'outstanding', label: 'Outstanding', right: true, render: r => formatVal(r.outstanding, currency) },
-                { key: 'arrears', label: 'Arrears', right: true, render: r => formatVal(r.arrears, currency) },
+                { key: 'outstanding', label: 'Outstanding', right: true, render: r => formatVal(r.outstanding, reportCurrency, 1) },
+                { key: 'arrears', label: 'Arrears', right: true, render: r => formatVal(r.arrears, reportCurrency, 1) },
                 { key: 'par', label: 'PAR (%)', right: true, render: r => `${r.outstanding > 0 ? ((r.arrears / r.outstanding) * 100).toFixed(2) : '0.00'}%` },
                 ...(arrearsGroup === 'aging' ? [
                   { key: 'classification', label: 'Classification', render: r => (
@@ -1465,8 +1508,8 @@ export default function ReportsPage() {
               totals={{
                 label: 'Total Portfolio',
                 accounts: arrearsTotals.accounts,
-                outstanding: formatVal(arrearsTotals.outstanding, currency),
-                arrears: formatVal(arrearsTotals.arrears, currency),
+                outstanding: formatVal(arrearsTotals.outstanding, reportCurrency, 1),
+                arrears: formatVal(arrearsTotals.arrears, reportCurrency, 1),
                 par: `${arrearsTotals.outstanding > 0 ? ((arrearsTotals.arrears / arrearsTotals.outstanding) * 100).toFixed(2) : '0.00'}%`,
               }}
             />
@@ -1493,16 +1536,16 @@ export default function ReportsPage() {
                 ) },
                 { key: 'bucket', label: 'Aging Bucket', className: 'font-medium text-slate-700 dark:text-slate-200' },
                 { key: 'accounts', label: '# Accounts', right: true },
-                { key: 'outstanding', label: 'Outstanding', right: true, render: r => formatVal(r.outstanding, currency) },
+                { key: 'outstanding', label: 'Outstanding', right: true, render: r => formatVal(r.outstanding, reportCurrency, 1) },
                 { key: 'rate', label: 'Reserve Rate', right: true, className: 'font-semibold text-slate-700 dark:text-slate-200' },
-                { key: 'provision', label: 'Required Provision', right: true, render: r => formatVal(r.provision, currency), className: 'font-bold text-slate-800 dark:text-slate-100' },
+                { key: 'provision', label: 'Required Provision', right: true, render: r => formatVal(r.provision, reportCurrency, 1), className: 'font-bold text-slate-800 dark:text-slate-100' },
               ]}
               rows={provisionRows}
               totals={{
                 label: 'Total Required',
                 accounts: provisionRows.reduce((s, r) => s + r.accounts, 0),
                 outstanding: formatVal(provisionRows.reduce((s, r) => s + r.outstanding, 0), currency),
-                provision: formatVal(loanKpis.provision, currency),
+                provision: formatVal(loanKpis.provision, reportCurrency, 1),
               }}
             />
           )}
@@ -1531,15 +1574,15 @@ export default function ReportsPage() {
               columns={isListingSummary ? [
                 { key: 'name', label: listingLabel, className: 'font-medium text-slate-700 dark:text-slate-200' },
                 { key: 'accounts', label: '# Accounts', right: true },
-                { key: 'outstanding', label: 'Outstanding', right: true, render: r => formatVal(r.outstanding, currency) },
+                { key: 'outstanding', label: 'Outstanding', right: true, render: r => formatVal(r.outstanding, reportCurrency, 1) },
               ] : [
                 { key: 'cid', label: 'CID', className: 'font-mono' },
                 { key: 'accNo', label: 'AccNo', className: 'font-mono font-bold text-brand-600' },
                 { key: 'name', label: 'Name', className: 'font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap' },
                 { key: 'sex', label: 'Sex' },
                 { key: 'address', label: 'Address', className: 'max-w-[200px] truncate' },
-                { key: 'disbAmt', label: 'Disb Amt', right: true, render: r => formatVal(r.disbAmt, currency) },
-                { key: 'bal', label: 'Balance', right: true, render: r => formatVal(r.bal, currency) },
+                { key: 'disbAmt', label: 'Disb Amt', right: true, render: r => formatVal(r.disbAmt, reportCurrency, 1) },
+                { key: 'bal', label: 'Balance', right: true, render: r => formatVal(r.bal, reportCurrency, 1) },
                 { key: 'intAccr', label: 'Int Accr', right: true, render: r => fmt2(r.intAccr) },
                 { key: 'colFeeAccr', label: 'ColFee Accr', right: true, render: r => fmt2(r.colFeeAccr) },
                 { key: 'intRate', label: 'Int Rate', right: true, render: r => `${fmt2(r.intRate)}%` },
@@ -1575,7 +1618,7 @@ export default function ReportsPage() {
               columns={[
                 { key: 'name', label: activeSummaryGroup.column, className: 'font-medium text-slate-700 dark:text-slate-200' },
                 { key: 'accounts', label: '# Accounts', right: true },
-                { key: 'outstanding', label: 'Outstanding', right: true, render: r => formatVal(r.outstanding, currency) },
+                { key: 'outstanding', label: 'Outstanding', right: true, render: r => formatVal(r.outstanding, reportCurrency, 1) },
                 // Arrears needs per-loan repayment schedules, which aren't persisted on the
                 // loan record yet — these hold their place at zero until that data exists.
                 { key: 'arrAccounts', label: 'Arr. Accounts', right: true, render: () => 0 },
@@ -1616,7 +1659,7 @@ export default function ReportsPage() {
                 { key: 'ref', label: 'Ref #', className: 'font-mono font-bold text-brand-600' },
                 { key: 'customerName', label: 'Customer', className: 'font-medium text-slate-700 dark:text-slate-200' },
                 { key: 'product', label: 'Product' },
-                { key: 'amount', label: 'Amount', right: true, render: r => formatVal(r.amount, currency) },
+                { key: 'amount', label: 'Amount', right: true, render: r => formatVal(r.amount, reportCurrency, 1) },
                 { key: 'disbursementDate', label: 'Disbursement Date', render: r => r.disbursementDate || '—' },
                 { key: 'branch', label: 'Branch' },
                 { key: 'creditOfficer', label: 'Credit Officer' },
@@ -1653,9 +1696,9 @@ export default function ReportsPage() {
                 { key: 'ref', label: 'Ref #', className: 'font-mono font-bold text-brand-600' },
                 { key: 'customer', label: 'Customer', className: 'font-medium text-slate-700 dark:text-slate-200' },
                 { key: 'product', label: 'Product' },
-                { key: 'originalAmount', label: 'Original Amount', right: true, render: r => r.originalAmount != null ? formatVal(r.originalAmount, currency) : '—' },
+                { key: 'originalAmount', label: 'Original Amount', right: true, render: r => r.originalAmount != null ? formatVal(r.originalAmount, reportCurrency, 1) : '—' },
                 { key: 'closureDate', label: 'Closure Date' },
-                { key: 'amount', label: 'Amount at Closure', right: true, render: r => formatVal(r.amount, currency) },
+                { key: 'amount', label: 'Amount at Closure', right: true, render: r => formatVal(r.amount, reportCurrency, 1) },
                 // Paid Off reads as the good outcome, a write-off as the loss it is, and a
                 // refinance as neither. The wording carries it as well as the colour — these
                 // print to PDF and are read by people who cannot rely on hue.
