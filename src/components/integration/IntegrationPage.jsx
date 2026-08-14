@@ -459,6 +459,9 @@ function ConnectionPanel({ integration, onSave, onTest, onDisconnect }) {
         <div>
           <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400 dark:text-slate-500 mb-2">Provider</p>
           <ProviderLogo id={integration.id} name={integration.name} size="sm" />
+          {integration.subtitle && (
+            <p className="text-xs font-semibold text-slate-400 dark:text-slate-500 mt-1.5">({integration.subtitle})</p>
+          )}
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-2 leading-snug">{integration.tagline}</p>
         </div>
         <div className="border-t border-slate-100 dark:border-slate-700 pt-4 space-y-3">
@@ -1057,7 +1060,14 @@ export default function IntegrationPage({ embedded = false }) {
                   </div>
 
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm sm:text-base font-bold text-slate-800 dark:text-slate-100">{item.name}</p>
+                    <p className="text-sm sm:text-base font-bold text-slate-800 dark:text-slate-100">
+                      {item.name}
+                      {item.subtitle && (
+                        <span className="ml-1.5 text-xs sm:text-sm font-semibold text-slate-400 dark:text-slate-500">
+                          ({item.subtitle})
+                        </span>
+                      )}
+                    </p>
                     <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-1 leading-snug">{item.tagline}</p>
                     <div className="flex flex-wrap items-center gap-x-4 gap-y-2 mt-3">
                       <StatusBadge status={item.status} />

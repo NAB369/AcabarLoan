@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { X, CheckCircle, User, FileText, Info } from 'lucide-react'
 import { useApp } from '../../context/AppContext'
 import { EMPTY_ADDRESS, IDENTITY_DOC_TYPES } from '../../data/constants'
@@ -99,7 +99,10 @@ export default function CustomerWizard() {
     return age
   }
 
-  function validateForm() {
+  // The rules on their own, so the same ones decide what to flag on submit and what to clear as
+  // the form is corrected. Split out because they used to live inside validateForm, which only
+  // ran on submit — a 'Required' therefore stayed on screen after the field had been filled.
+  function computeErrors() {
     const errors = {}
     if (!khName.trim()) errors.khName = 'Required'
     if (!enName.trim()) errors.enName = 'Required'
@@ -113,6 +116,26 @@ export default function CustomerWizard() {
       if (dupe) errors.idNo = `Already registered to ${dupe.enName} (CID-${dupe.code})`
     }
     if (!phone.trim()) errors.phone = 'Required'
+    return errors
+  }
+
+  // Clears a message the moment its field is put right, and only then: a key already showing is
+  // kept only while it still fails, and nothing new is raised here. Flagging fields the operator
+  // has not reached yet would put errors under a half-typed form — that stays with submit.
+  useEffect(() => {
+    setFieldErrors(prev => {
+      const keys = Object.keys(prev)
+      if (!keys.length) return prev
+      const current = computeErrors()
+      const next = {}
+      for (const key of keys) if (current[key]) next[key] = current[key]
+      return keys.length === Object.keys(next).length && keys.every(k => next[k] === prev[k]) ? prev : next
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [khName, enName, dob, idNo, phone, customers, code])
+
+  function validateForm() {
+    const errors = computeErrors()
 
     setFieldErrors(errors)
     if (Object.keys(errors).length > 0) {

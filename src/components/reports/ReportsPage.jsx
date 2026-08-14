@@ -1,13 +1,15 @@
 import { useState, useMemo, useRef, useLayoutEffect } from 'react'
 import {
-  FileText, AlertTriangle, Clock, Landmark, ChevronLeft, Calendar, BarChart3, Activity,
+  FileText, AlertTriangle, Clock, Landmark, ChevronLeft, BarChart3, Activity,
   ChevronDown, Printer, Download,
   Users, Banknote, CheckCircle, ClipboardList, Percent, Wallet, ShieldAlert,
+  Receipt, Coins,
 } from 'lucide-react'
 import jsPDF from 'jspdf'
 import autoTable from 'jspdf-autotable'
 import { useApp } from '../../context/AppContext'
 import { formatVal, buildAmortizationData, formatAddress, daysBetweenISO } from '../../utils/format'
+import { cashGlAccounts, buildCashMovements } from '../../utils/cash'
 import StatusBadge from '../shared/StatusBadge'
 import { useTableColumns, ColumnPicker } from '../shared/DataTableTools'
 import { companyLogoSrc } from '../../utils/companyLogo'
@@ -17,21 +19,21 @@ import ReportCard from './ReportCard'
 // One definition drives the report selector, the report listing table and the
 // rendered body below — adding a report here puts it in all three at once.
 const REPORT_TABS = [
-  { id: 'listing',            label: 'Overview',                       icon: ClipboardList,     category: 'Overview',    description: 'Index of every loan report in this module' },
-  { id: 'collection-sheet',   label: 'Collection Sheet — Due & Overdue', icon: Clock,           category: 'Operations',  description: 'Installments due and overdue, for field collection' },
-  { id: 'transactions',       label: 'Transaction Report',             icon: Activity,          category: 'Operations',  description: 'Repayments and disbursements over a date range' },
-  { id: 'arrears',            label: 'Arrears & Portfolio at Risk',    icon: AlertTriangle,     category: 'Credit Risk', description: 'PAR aging and classification, grouped as needed' },
-  { id: 'provision',          label: 'Loan Loss Provision',            icon: ShieldAlert,       category: 'Credit Risk', description: 'Required provision by classification and reserve rate' },
-  { id: 'portfolio-listing',  label: 'Loan Portfolio Listing',         icon: Users,             category: 'Portfolio',   description: 'Borrower-level loan detail or grouped summary' },
-  { id: 'portfolio-summary',  label: 'Portfolio & Risk Summary',       icon: BarChart3,         category: 'Portfolio',   description: 'Accounts, outstanding and arrears by chosen grouping' },
-  { id: 'schedule-maturity',  label: 'Repayment Schedule & Maturity',  icon: Calendar,          category: 'Portfolio',   description: 'Installment schedule and forward maturity projection' },
-  { id: 'disbursement',       label: 'Disbursement Report',            icon: Banknote,          category: 'Lifecycle',   description: 'Disbursed and pending-disbursement loans' },
-  { id: 'closed-loans',       label: 'Closed Loans',                   icon: CheckCircle,       category: 'Lifecycle',   description: 'Loans paid off in full or written off' },
+  { id: 'listing',            label: 'Overview',                       icon: ClipboardList,     category: 'Overview',            description: 'Index of every loan report in this module' },
+  { id: 'portfolio-listing',  label: 'Loan Portfolio Listing',         icon: Users,             category: 'Portfolio',           description: 'Borrower-level loan detail or grouped summary' },
+  { id: 'portfolio-summary',  label: 'Portfolio & Risk Summary',       icon: BarChart3,         category: 'Portfolio',           description: 'Accounts, outstanding and arrears by chosen grouping' },
+  { id: 'repayments',         label: 'Repayment Report',               icon: Receipt,           category: 'Repayment',           description: 'Every collection, how it was allocated and where it was paid in' },
+  { id: 'collection-sheet',   label: 'Due & Overdue',                  icon: Clock,             category: 'Collection',          description: 'Installments due and overdue, for field collection' },
+  { id: 'arrears',            label: 'Arrears & Portfolio at Risk',    icon: AlertTriangle,     category: 'Arrears / PAR',       description: 'PAR aging and classification, grouped as needed' },
+  { id: 'provision',          label: 'Loan Loss Provision',            icon: ShieldAlert,       category: 'Provision',           description: 'Required provision by classification and reserve rate' },
+  { id: 'disbursement',       label: 'Disbursement Report',            icon: Banknote,          category: 'Disbursement',        description: 'Disbursed and pending-disbursement loans' },
+  { id: 'income-report',      label: 'Income Report',                  icon: Percent,           category: 'Income',              description: 'Interest, penalty and fee income by repayment' },
+  { id: 'closed-loans',       label: 'Closed Loans',                   icon: CheckCircle,       category: 'Write-Off / Recovery', description: 'How loans left the book — paid off, refinanced or written off' },
 ]
 
-// The categories above run Overview → Operations → Credit Risk → Portfolio → Lifecycle, and
-// REPORT_TABS is listed in that order. The tab strip renders it as-is, so keep new reports
-// next to their category rather than appending to the end.
+// The categories above run Overview → Operations → Cash & Bank → Credit Risk → Portfolio →
+// Lifecycle, and REPORT_TABS is listed in that order. The tab strip renders it as-is, so keep
+// new reports next to their category rather than appending to the end.
 
 const BREAKDOWN_SORTING_LABELS = {
   gender: 'Gender',
@@ -553,7 +555,7 @@ const dmy = iso => (iso ? new Date(`${iso}T00:00:00`).toLocaleDateString('en-GB'
 function loanSchedule(loan) {
   if (loan.schedule?.length) return loan.schedule
   if (!loan.amount || !loan.interestRate) return []
-  return buildAmortizationData(loan.amount, loan.interestRate, loan.installments || 12, loan.firstInstallment).rows
+  return buildAmortizationData(loan.amount, loan.interestRate, loan.installments || 12, loan.firstInstallment, 0, loan.disbursementDate, loan.currency).rows
 }
 
 const isLive = loan => loan.status === 'Active'
@@ -665,20 +667,226 @@ function buildTransactionRows(loanApplications) {
     .map((r, i) => ({ ...r, date: dmy(r.dateISO), key: `${r.ref}-${r.dateISO}-${i}` }))
 }
 
-// A loan leaves the book one of two ways: paid to the last cent, or refinanced into a
-// replacement. There is no write-off action in the app, so nothing can close that way yet.
+// ── Repayment / cash / income / bank ────────────────────────────────────────
+// One row per collection: what came in, how it was allocated across principal and each kind
+// of income, and which account it was paid into. Collections made before repayments were
+// recorded as transactions of their own live only on the loan's schedule, so those are
+// rebuilt from it — matched on loan/installment so a collection is never listed twice.
+// A rebuilt row can't name a payment account: nothing recorded one at the time.
+function buildRepaymentReportRows(repayments, loanApplications) {
+  const recorded = (repayments || []).map(r => ({
+    key: r.id,
+    id: r.id,
+    dateISO: r.date,
+    customer: r.customerName || r.customerCode || '—',
+    loanRef: r.loanRef,
+    installment: r.installmentNum,
+    total: r.total || 0,
+    principal: r.allocation?.principal || 0,
+    interest: r.allocation?.interest || 0,
+    penalty: r.allocation?.penalty || 0,
+    fee: r.allocation?.fee || 0,
+    method: r.paymentMethod || '—',
+    account: (r.payments || []).map(p => `${p.accountLabel}${(r.payments.length > 1) ? ` (${fmt2(p.amount)})` : ''}`).join(' + ') || '—',
+    currency: r.currency,
+  }))
+
+  const alreadyRecorded = new Set((repayments || []).map(r => `${r.loanRef}#${r.installmentNum}#${r.kind}`))
+  const rebuilt = []
+  for (const loan of loanApplications) {
+    for (const row of loanSchedule(loan)) {
+      if (!isSettled(row) && row.status !== 'Partial') continue
+      const remainder = round2(row.remainderPaid)
+      const collected = round2((row.paid || 0) - remainder)
+      const base = {
+        dateISO: row.paidDate, customer: loan.customerName || loan.customerCode || '—',
+        loanRef: loan.ref, installment: row.num, currency: loan.currency,
+        method: row.paymentMethod || '—', account: '—', fee: 0,
+      }
+      if (collected > 0.005 && !alreadyRecorded.has(`${loan.ref}#${row.num}#installment`)) {
+        const penalty = round2(row.lateFeePaid ?? row.lateFee)
+        const principal = round2((row.principalPaid ?? row.principal) - remainder)
+        rebuilt.push({
+          ...base, key: `${loan.ref}-${row.num}`, id: '—', total: collected,
+          principal, penalty, interest: round2(collected - principal - penalty),
+        })
+      }
+      if (remainder > 0.005 && !alreadyRecorded.has(`${loan.ref}#${row.num}#remainder`)) {
+        rebuilt.push({
+          ...base, key: `${loan.ref}-${row.num}-r`, id: '—',
+          dateISO: row.remainderPaidDate || row.paidDate,
+          method: row.remainderPaymentMethod || '—',
+          total: remainder, principal: remainder, interest: 0, penalty: 0,
+        })
+      }
+    }
+  }
+  return [...recorded, ...rebuilt]
+    .sort((a, b) => (b.dateISO || '').localeCompare(a.dateISO || ''))
+    .map(r => ({ ...r, date: dmy(r.dateISO) }))
+}
+
+// A cashier's day, per till: what moved through it and how the drawer counted against the
+// books at the end of it. A day with movements but no count is still listed — "nobody counted
+// this drawer" is exactly what a cash report should surface — and a count taken on a quiet day
+// is listed too, so a count can never go missing from the report that exists to show it.
+function buildCashReportRows(state, cashAccounts) {
+  const byDay = new Map()
+  const dayKey = (code, date) => `${code}|${date}`
+  for (const account of cashAccounts) {
+    const movements = buildCashMovements(state, account)
+    for (const m of movements) {
+      const key = dayKey(account.code, m.date)
+      const day = byDay.get(key) || {
+        key, dateISO: m.date, account, cashIn: 0, cashOut: 0, balance: 0,
+      }
+      day.cashIn = round2(day.cashIn + m.cashIn)
+      day.cashOut = round2(day.cashOut + m.cashOut)
+      // Movements arrive oldest first, so the last one seen for a day closes it.
+      day.balance = m.balance
+      byDay.set(key, day)
+    }
+  }
+  for (const count of state.cashCounts || []) {
+    const account = cashAccounts.find(a => a.code === count.cashAccountCode)
+    if (!account) continue
+    const key = dayKey(count.cashAccountCode, count.date)
+    const day = byDay.get(key) || { key, dateISO: count.date, account, cashIn: 0, cashOut: 0, balance: count.systemBalance }
+    byDay.set(key, { ...day, count })
+  }
+  return [...byDay.values()]
+    .sort((a, b) => (b.dateISO || '').localeCompare(a.dateISO || ''))
+    .map(day => ({
+      key: day.key,
+      date: dmy(day.dateISO),
+      dateISO: day.dateISO,
+      cashier: day.count?.cashier || '—',
+      accountCode: day.account.code,
+      accountLabel: `${day.account.name} (${day.account.currency || 'USD'})`,
+      currency: day.account.currency || 'USD',
+      cashIn: day.cashIn,
+      cashOut: day.cashOut,
+      // What the books say the drawer holds. The count's own figure is used where one was
+      // taken, so the report shows the comparison the cashier actually made.
+      systemBalance: day.count ? day.count.systemBalance : day.balance,
+      physical: day.count ? day.count.physical : null,
+      difference: day.count ? day.count.difference : null,
+      status: day.count ? day.count.status : 'NOT COUNTED',
+    }))
+}
+
+// What the book earned, by kind. Rows written before repayment income was split by type carry
+// no `incomeType`, so it is read off the category they were filed under.
+const INCOME_TYPE_BY_CATEGORY = {
+  'Repayment Income': 'Interest Income',
+  'Late Penalty Fees': 'Penalty Income',
+  'Loan Fee Income': 'Fee Income',
+  'Refinance Fee': 'Fee Income',
+}
+const incomeTypeOf = i => i.incomeType || INCOME_TYPE_BY_CATEGORY[i.category] || i.category || 'Other Income'
+
+function buildIncomeReportRows(incomes) {
+  return (incomes || [])
+    .map((i, idx) => ({
+      key: `${i.code}-${i.date}-${idx}`,
+      dateISO: i.date,
+      date: dmy(i.date),
+      repaymentId: i.repaymentId || '—',
+      client: i.customerName || i.source || '—',
+      incomeType: incomeTypeOf(i),
+      amount: i.amount || 0,
+      currency: i.currency || 'USD',
+    }))
+    .sort((a, b) => (b.dateISO || '').localeCompare(a.dateISO || ''))
+}
+
+// A real bank account's own statement, one row per movement with the balance it left. Bank
+// repayments are read off the collections themselves (the whole amount received, not the
+// income half of it), which is why the income rows those collections wrote are skipped —
+// counting both would report the interest twice.
+function buildBankReportRows(state, account) {
+  const code = account.glCode
+  const nameOf = c => state.chartOfAccounts.find(a => a.code === c)?.name || c || '—'
+  const rows = [
+    ...(state.repayments || []).flatMap(r => (r.payments || [])
+      .filter(p => p.accountCode === code && p.method === 'Bank')
+      .map(p => ({
+        key: `${r.id}-${p.accountCode}`, dateISO: r.date,
+        reference: r.id, source: `Loan Repayment — ${r.customerName || r.loanRef}`,
+        bankIn: p.amount, bankOut: 0,
+      }))),
+    ...(state.incomes || []).filter(i => i.account === code && !i.repaymentId).map((i, idx) => ({
+      key: `inc-${i.code}-${idx}`, dateISO: i.date,
+      reference: i.code, source: i.category || 'Income',
+      bankIn: i.amount || 0, bankOut: 0,
+    })),
+    ...(state.expenses || []).filter(e => e.status === 'Approved' && e.account === code).map(e => ({
+      key: `exp-${e.code}`, dateISO: e.date,
+      reference: e.code, source: e.category || 'Expense',
+      bankIn: 0, bankOut: e.amount || 0,
+    })),
+    ...(state.cashTransfers || []).filter(t => t.fromCode === code || t.toCode === code).map(t => {
+      const isOut = t.fromCode === code
+      const credited = t.creditedAmount ?? round2((t.amount || 0) * (Number(t.exchangeRate) > 0 ? Number(t.exchangeRate) : 1))
+      return {
+        key: `ct-${t.ref}`, dateISO: t.date, reference: t.ref,
+        source: isOut ? `Transfer to ${nameOf(t.toCode)}` : `Transfer from ${nameOf(t.fromCode)}`,
+        bankIn: isOut ? 0 : credited, bankOut: isOut ? (t.amount || 0) : 0,
+      }
+    }),
+  ].sort((a, b) => (a.dateISO || '').localeCompare(b.dateISO || ''))
+
+  // Walked forward from the opening balance these movements imply, so the last row lands on
+  // the balance the chart of accounts holds — see buildCashMovements for the same reasoning.
+  const glBalance = state.chartOfAccounts.find(a => a.code === code)?.balance || 0
+  const net = rows.reduce((s, r) => s + r.bankIn - r.bankOut, 0)
+  let running = round2(glBalance - net)
+  return rows
+    .map(r => {
+      running = round2(running + r.bankIn - r.bankOut)
+      return { ...r, balance: running, date: dmy(r.dateISO) }
+    })
+    .reverse()
+}
+
+// Totals for a report whose rows each state their own currency. Dollars and riel are
+// different money and are never added together (see architecture.md), so a mixed result set
+// gets no footer at all rather than one summing two currencies into a meaningless number —
+// filter the report to one currency to total it.
+function singleCurrencyTotals(rows, columns) {
+  const currencies = new Set(rows.map(r => r.currency || 'USD'))
+  if (currencies.size !== 1) return null
+  const currency = [...currencies][0]
+  return Object.fromEntries(
+    columns.map(key => [key, formatVal(rows.reduce((s, r) => s + (r[key] || 0), 0), currency, 1)])
+  )
+}
+
+// A loan leaves the book one of three ways: paid to the last cent, refinanced into a
+// replacement, or written off as uncollectable.
+//
+// A write-off is recognised off `status === 'Written Off'`. Nothing in the app sets that yet —
+// there is a `write_off` permission in the role matrix but no action behind it — so the
+// category reports nothing until one exists. It is handled here rather than left out because
+// a write-off is the closure a loan book is actually judged on: a report that can only show
+// the two happy endings overstates how the portfolio ended.
+const WRITTEN_OFF = 'Written Off'
+
 function buildClosedLoanRows(loanApplications) {
   const rows = []
   loanApplications.forEach(loan => {
     const schedule = loanSchedule(loan)
     const settled = schedule.filter(isSettled)
     const paidOff = isLive(loan) && schedule.length > 0 && settled.length === schedule.length
-    if (!paidOff && loan.status !== 'Refinanced') return
+    const writtenOff = loan.status === WRITTEN_OFF
+    if (!paidOff && !writtenOff && loan.status !== 'Refinanced') return
     const last = settled[settled.length - 1]
     const closureISO = paidOff ? last?.paidDate : (loan.closedDate || loan.disbursementDate)
-    // Amount at closure is what was cleared to close it: the payment that settled the last
-    // installment, or — for a refinance — the principal the replacement loan took over.
+    // Amount at closure is what left the book to close it: the payment that settled the last
+    // installment, the principal a replacement loan took over, or — for a write-off — the
+    // principal still outstanding, since that is the loss recognised.
     const principalPaid = schedule.reduce((s, r) => s + (r.principalPaid || 0), 0)
+    const outstanding = Math.max(round2((loan.amount || 0) - principalPaid), 0)
     rows.push({
       key: loan.ref,
       ref: loan.ref,
@@ -687,33 +895,19 @@ function buildClosedLoanRows(loanApplications) {
       originalAmount: loan.amount || null,
       closureISO: closureISO || '',
       closureDate: dmy(closureISO),
-      amount: paidOff ? round2(last?.paid) : Math.max(round2((loan.amount || 0) - principalPaid), 0),
-      closure: paidOff ? 'Paid Off' : 'Refinanced',
+      amount: paidOff ? round2(last?.paid) : outstanding,
+      closure: paidOff ? 'Paid Off' : writtenOff ? WRITTEN_OFF : 'Refinanced',
       detail: paidOff
         ? (last?.paymentMethod || '—')
-        : `Refinanced into ${loan.refinancedToRef || 'a replacement loan'}`,
-      approvedBy: loan.approvedBy || '—',
+        : writtenOff
+          ? (loan.writeOffReason || 'Written off as uncollectable')
+          : `Refinanced into ${loan.refinancedToRef || 'a replacement loan'}`,
+      approvedBy: (writtenOff ? loan.writtenOffBy : loan.approvedBy) || loan.approvedBy || '—',
     })
   })
   return rows.sort((a, b) => (b.closureISO || '').localeCompare(a.closureISO || ''))
 }
 
-// Forward liquidity view: installments still to fall due, totalled by month.
-function buildMaturityProjection(schedule, todayISO) {
-  const byMonth = new Map()
-  schedule.filter(r => r.dueDateISO >= todayISO).forEach(r => {
-    const key = r.dueDateISO.slice(0, 7)
-    const entry = byMonth.get(key) || { key, installments: 0, principal: 0, interest: 0, totalDue: 0 }
-    entry.installments += 1
-    entry.principal += r.principal
-    entry.interest += r.interest
-    entry.totalDue += r.totalDue
-    byMonth.set(key, entry)
-  })
-  return Array.from(byMonth.values())
-    .sort((a, b) => a.key.localeCompare(b.key))
-    .map(e => ({ ...e, month: new Date(`${e.key}-01T00:00:00`).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) }))
-}
 
 const BREAKDOWN_SORT_KEY = {
   gender: r => r.gender,
@@ -786,15 +980,6 @@ function buildLoanBreakdownSummaryRows(detailRows, sorting) {
   return Array.from(byGroup.values()).sort((a, b) => cmp(a.name, b.name))
 }
 
-function buildCombinedSchedule(loanApplications) {
-  const rows = []
-  loanApplications.filter(isLive).forEach(loan => {
-    loanSchedule(loan).forEach(row => {
-      rows.push({ ...row, ref: loan.ref, customer: loan.customerName, product: loan.product })
-    })
-  })
-  return rows.sort((a, b) => a.dueDateISO.localeCompare(b.dueDateISO))
-}
 
 export default function ReportsPage() {
   const { state, dispatch } = useApp()
@@ -823,14 +1008,21 @@ export default function ReportsPage() {
   const [summaryGroup, setSummaryGroup] = useState('officer')
   const [summaryFrom, setSummaryFrom] = useState('')
   const [summaryTo, setSummaryTo] = useState('')
+  // Repayment / cash / income / bank filters. Each opens on everything, like every other
+  // report here, so the first thing an operator sees is the whole picture.
+  const [repayMethod, setRepayMethod] = useState('all')
+  const [repayFrom, setRepayFrom] = useState('')
+  const [repayTo, setRepayTo] = useState('')
+  const [cashAccount, setCashAccount] = useState('all')
+  const [cashStatus, setCashStatus] = useState('all')
+  const [incomeType, setIncomeType] = useState('all')
+  const [bankAccountId, setBankAccountId] = useState('')
 
   const todayISO = new Date().toISOString().split('T')[0]
   const todayLabel = new Date().toLocaleDateString('en-GB')
 
-  const combinedSchedule = useMemo(() => buildCombinedSchedule(loanApplications), [loanApplications])
   const disbursementRows = useMemo(() => buildDisbursementRows(loanApplications), [loanApplications])
   const transactionRows = useMemo(() => buildTransactionRows(loanApplications), [loanApplications])
-  const maturityRows = useMemo(() => buildMaturityProjection(combinedSchedule, todayISO), [combinedSchedule, todayISO])
 
   const summaryRows = useMemo(
     () => buildPortfolioSummaryRows(loanApplications, { groupBy: summaryGroup, from: summaryFrom, to: summaryTo }),
@@ -852,6 +1044,46 @@ export default function ReportsPage() {
     const active = loanApplications.filter(l => l.status === 'Active')
     return { accounts: active.length, outstanding: active.reduce((sum, l) => sum + (l.amount || 0), 0) }
   }, [loanApplications])
+
+  // ── Repayment, cash, income and bank rows ─────────────────────────────────
+  const repaymentReportRows = useMemo(
+    () => buildRepaymentReportRows(state.repayments, loanApplications),
+    [state.repayments, loanApplications]
+  )
+  const filteredRepayments = useMemo(() => repaymentReportRows.filter(r =>
+    (repayMethod === 'all'
+      || (repayMethod === 'Split' && /split/i.test(r.method))
+      || (repayMethod === 'Cash' && /^cash$/i.test(r.method))
+      || (repayMethod === 'Bank' && !/split/i.test(r.method) && !/^cash$/i.test(r.method))) &&
+    (!repayFrom || (r.dateISO || '') >= repayFrom) &&
+    (!repayTo || (r.dateISO || '') <= repayTo)
+  ), [repaymentReportRows, repayMethod, repayFrom, repayTo])
+
+  const cashAccounts = useMemo(() => cashGlAccounts(state.chartOfAccounts), [state.chartOfAccounts])
+  const cashReportRows = useMemo(() => buildCashReportRows(state, cashAccounts), [state, cashAccounts])
+  const filteredCashRows = useMemo(() => cashReportRows.filter(r =>
+    (cashAccount === 'all' || r.accountCode === cashAccount) &&
+    (cashStatus === 'all' || r.status === cashStatus)
+  ), [cashReportRows, cashAccount, cashStatus])
+
+  const incomeReportRows = useMemo(() => buildIncomeReportRows(state.incomes), [state.incomes])
+  const incomeTypes = useMemo(
+    () => [...new Set(incomeReportRows.map(r => r.incomeType))].sort(),
+    [incomeReportRows]
+  )
+  const filteredIncomeRows = useMemo(
+    () => incomeReportRows.filter(r => incomeType === 'all' || r.incomeType === incomeType),
+    [incomeReportRows, incomeType]
+  )
+
+  // Every real bank account is reported on its own — a USD account and its KHR sibling are
+  // separate accounts holding separate money and must never be added together.
+  const reportBankAccounts = state.realBankAccounts || []
+  const selectedReportBank = reportBankAccounts.find(a => a.id === bankAccountId) || reportBankAccounts[0] || null
+  const bankReportRows = useMemo(
+    () => (selectedReportBank ? buildBankReportRows(state, selectedReportBank) : []),
+    [state, selectedReportBank]
+  )
 
   // ── Rows derived from the loan register ───────────────────────────────────
   const allCollectionRows = useMemo(() => buildCollectionRows(loanApplications, todayISO), [loanApplications, todayISO])
@@ -1042,11 +1274,48 @@ export default function ReportsPage() {
           </div>
           )}
 
-          {/* Collection Sheet — Due & Overdue */}
+          {/* The index this tab is named for. `category` on REPORT_TABS had never been rendered
+              anywhere, so the areas a loan book is reported on — portfolio, repayment, collection,
+              arrears, provision, disbursement, income, write-off — existed only as metadata and an
+              officer had to know which of thirteen tabs held what. Grouped in the order the tabs
+              are declared, so the strip above and this index read the same way round. */}
+          {reportTab === 'listing' && (
+          <div className="mt-6 space-y-6">
+            {REPORT_TABS.filter(t => t.id !== 'listing').reduce((groups, t) => {
+              const last = groups[groups.length - 1]
+              if (last && last.category === t.category) last.items.push(t)
+              else groups.push({ category: t.category, items: [t] })
+              return groups
+            }, []).map(group => (
+              <div key={group.category}>
+                <p className="text-[11px] font-bold uppercase tracking-wide text-slate-400 dark:text-slate-500 mb-2">
+                  {group.category}
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {group.items.map(t => (
+                    <button
+                      key={t.id}
+                      onClick={() => selectTab(t.id)}
+                      className="flex items-start gap-3 text-left p-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:border-brand-300 dark:hover:border-brand-600 hover:bg-slate-50 dark:hover:bg-slate-700/50 transition-colors"
+                    >
+                      <t.icon className="w-4 h-4 mt-0.5 flex-shrink-0 text-brand-600 dark:text-brand-400" />
+                      <span className="min-w-0">
+                        <span className="block text-xs font-bold text-slate-800 dark:text-slate-100">{t.label}</span>
+                        <span className="block text-[11px] text-slate-500 dark:text-slate-400 leading-snug mt-0.5">{t.description}</span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+          )}
+
+          {/* Due & Overdue */}
           {reportTab === 'collection-sheet' && (
             <SimpleReportTable
               tableId="collection-sheet"
-              reportTitle="Collection Sheet - Due & Overdue"
+              reportTitle="Due & Overdue"
               meta={`Status: ${collectionStatus === 'all' ? 'All' : collectionStatus} · Officer: ${collectionOfficer === 'all' ? 'All' : collectionOfficer} · Branch: ${collectionBranch === 'all' ? 'All' : collectionBranch}`}
               count={collectionRows.length}
               toolbar={<>
@@ -1085,51 +1354,86 @@ export default function ReportsPage() {
                   </span>
                 ) },
               ]}
-              rows={collectionRows.map(r => ({ ...r, key: r.ref }))}
+              rows={
+                // Passed straight through, keeping the key buildCollectionRows assigned
+                // (`ref-installment`). This used to re-key each row to the loan ref alone, so
+                // every installment of one loan shared a React key — and with duplicate keys
+                // React cannot tell the rows apart when the list changes. Filtering by officer
+                // then left the previous officer's rows on screen and repeated installments,
+                // while the record count and total beside them stayed right, being read off
+                // the data rather than the DOM.
+                collectionRows
+              }
               totals={{ amount: formatVal(collectionRows.reduce((s, r) => s + r.amount, 0), currency) }}
               emptyMessage="Nothing to collect for the selected filters."
             />
           )}
-
-          {/* Transaction Report */}
-          {reportTab === 'transactions' && (
+          {/* Repayment Report — the collection, its allocation and where it was paid in */}
+          {reportTab === 'repayments' && (
             <SimpleReportTable
-              tableId="transactions"
-              reportTitle="Transaction Report"
-              meta={`${effectiveTxFrom} to ${effectiveTxTo} · Type: ${txType === 'all' ? 'All' : txType}`}
-              count={filteredTransactions.length}
+              tableId="repayments"
+              reportTitle="Repayment Report"
+              meta={`${repayFrom || 'earliest'} to ${repayTo || 'today'} · Method: ${repayMethod === 'all' ? 'All' : repayMethod}`}
+              count={filteredRepayments.length}
               toolbar={<>
                 <FilterSelect
-                  label="Type" value={txType} onChange={setTxType} width="w-36"
+                  label="Method" value={repayMethod} onChange={setRepayMethod} width="w-36"
                   options={[
-                    { value: 'all', label: 'All Types' },
-                    { value: 'Repayment', label: 'Repayment' },
-                    { value: 'Disbursement', label: 'Disbursement' },
+                    { value: 'all', label: 'All Methods' },
+                    { value: 'Cash', label: 'Cash' },
+                    { value: 'Bank', label: 'Bank' },
+                    { value: 'Split', label: 'Split' },
                   ]}
                 />
-                <DateRangeFilter label="Date" from={effectiveTxFrom} to={effectiveTxTo} onFrom={setTxFrom} onTo={setTxTo} />
+                <DateRangeFilter label="Date" from={repayFrom} to={repayTo} onFrom={setRepayFrom} onTo={setRepayTo} />
               </>}
               columns={[
+                { key: 'id', label: 'Repayment ID', className: 'font-mono font-bold text-brand-600' },
                 { key: 'date', label: 'Date' },
-                { key: 'time', label: 'Time' },
-                { key: 'ref', label: 'Ref #', className: 'font-mono font-bold text-brand-600' },
-                { key: 'customer', label: 'Customer', className: 'font-medium text-slate-700 dark:text-slate-200' },
-                { key: 'type', label: 'Type', render: r => (
-                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${r.type === 'Disbursement' ? 'bg-brand-50 text-brand-700 border-brand-200/50' : 'bg-emerald-50 text-emerald-700 border-emerald-200/50'}`}>
-                    {r.type}
-                  </span>
-                ) },
-                { key: 'amount', label: 'Amount', right: true, render: r => formatVal(r.amount, currency) },
-                { key: 'method', label: 'Method' },
-                { key: 'balanceAfter', label: 'Balance After', right: true, render: r => r.balanceAfter != null ? formatVal(r.balanceAfter, currency) : '—' },
-                { key: 'officer', label: 'Teller / Officer' },
+                { key: 'customer', label: 'Client', className: 'font-medium text-slate-700 dark:text-slate-200' },
+                { key: 'loanRef', label: 'Loan ID', className: 'font-mono' },
+                { key: 'total', label: 'Total', right: true, render: r => formatVal(r.total, r.currency, 1) },
+                { key: 'principal', label: 'Principal', right: true, render: r => formatVal(r.principal, r.currency, 1) },
+                { key: 'interest', label: 'Interest', right: true, render: r => formatVal(r.interest, r.currency, 1) },
+                { key: 'penalty', label: 'Penalty', right: true, render: r => (r.penalty > 0.005 ? formatVal(r.penalty, r.currency, 1) : '—') },
+                { key: 'fee', label: 'Fee', right: true, render: r => (r.fee > 0.005 ? formatVal(r.fee, r.currency, 1) : '—') },
+                { key: 'method', label: 'Payment Method' },
+                { key: 'account', label: 'Payment Account' },
               ]}
-              rows={filteredTransactions}
-              totals={{ amount: formatVal(filteredTransactions.reduce((s, r) => s + r.amount, 0), currency) }}
-              emptyMessage="No transactions in the selected range."
+              rows={filteredRepayments}
+              totals={singleCurrencyTotals(filteredRepayments, ['total', 'principal', 'interest', 'penalty', 'fee'])}
+              emptyMessage="No repayments collected in the selected range."
             />
           )}
-
+          {/* Income Report — what the book earned, by kind */}
+          {reportTab === 'income-report' && (
+            <SimpleReportTable
+              tableId="income-report"
+              reportTitle="Income Report"
+              meta={`Type: ${incomeType === 'all' ? 'All income types' : incomeType}`}
+              count={filteredIncomeRows.length}
+              toolbar={
+                <FilterSelect
+                  label="Income Type" value={incomeType} onChange={setIncomeType} width="w-52"
+                  options={[
+                    { value: 'all', label: 'All Income Types' },
+                    ...incomeTypes.map(t => ({ value: t, label: t })),
+                  ]}
+                />
+              }
+              columns={[
+                { key: 'date', label: 'Date' },
+                { key: 'repaymentId', label: 'Repayment ID', className: 'font-mono text-slate-500' },
+                { key: 'client', label: 'Client', className: 'font-medium text-slate-700 dark:text-slate-200' },
+                { key: 'incomeType', label: 'Income Type' },
+                { key: 'amount', label: 'Amount', right: true, render: r => formatVal(r.amount, r.currency, 1) },
+                { key: 'currency', label: 'Currency' },
+              ]}
+              rows={filteredIncomeRows}
+              totals={singleCurrencyTotals(filteredIncomeRows, ['amount'])}
+              emptyMessage="No income recorded yet."
+            />
+          )}
           {/* Arrears & Portfolio at Risk */}
           {reportTab === 'arrears' && (
             <SimpleReportTable
@@ -1297,50 +1601,6 @@ export default function ReportsPage() {
             />
           )}
 
-          {/* Repayment Schedule & Maturity Projection */}
-          {reportTab === 'schedule-maturity' && (
-            <div className="space-y-4">
-              <SimpleReportTable
-                tableId="maturity"
-                reportTitle="Maturity Projection"
-                meta={`Installments falling due from ${todayLabel}`}
-                count={maturityRows.length}
-                  columns={[
-                  { key: 'month', label: 'Month', className: 'font-semibold text-slate-700 dark:text-slate-200' },
-                  { key: 'installments', label: '# Installments', right: true },
-                  { key: 'principal', label: 'Principal', right: true, render: r => formatVal(r.principal, currency) },
-                  { key: 'interest', label: 'Interest', right: true, render: r => formatVal(r.interest, currency) },
-                  { key: 'totalDue', label: 'Total Due', right: true, render: r => formatVal(r.totalDue, currency), className: 'font-bold text-slate-800 dark:text-slate-100' },
-                ]}
-                rows={maturityRows}
-                totals={{
-                  installments: maturityRows.reduce((s, r) => s + r.installments, 0),
-                  principal: formatVal(maturityRows.reduce((s, r) => s + r.principal, 0), currency),
-                  interest: formatVal(maturityRows.reduce((s, r) => s + r.interest, 0), currency),
-                  totalDue: formatVal(maturityRows.reduce((s, r) => s + r.totalDue, 0), currency),
-                }}
-                emptyMessage="No future installments scheduled."
-              />
-              <SimpleReportTable
-                tableId="installment-schedule"
-                reportTitle="Installment Schedule"
-                meta="Combined installment schedule across active loan accounts"
-                count={combinedSchedule.length}
-                columns={[
-                  { key: 'ref', label: 'Ref #', className: 'font-mono font-bold text-brand-600' },
-                  { key: 'customer', label: 'Customer', className: 'font-medium text-slate-700 dark:text-slate-200' },
-                  { key: 'num', label: 'Inst. #', right: true },
-                  { key: 'dueDate', label: 'Due Date' },
-                  { key: 'principal', label: 'Principal', right: true, render: r => formatVal(r.principal, currency) },
-                  { key: 'interest', label: 'Interest', right: true, render: r => formatVal(r.interest, currency) },
-                  { key: 'totalDue', label: 'Total Due', right: true, render: r => formatVal(r.totalDue, currency) },
-                  { key: 'status', label: 'Status', render: r => <StatusBadge status={r.status} size="xs" /> },
-                ]}
-                rows={combinedSchedule}
-                emptyMessage="No active loans with a repayment schedule yet."
-              />
-            </div>
-          )}
 
           {/* Disbursement Report — disbursed and pending in one list */}
           {reportTab === 'disbursement' && (
@@ -1391,6 +1651,7 @@ export default function ReportsPage() {
                   { value: 'all', label: 'All Closures' },
                   { value: 'Paid Off', label: 'Paid Off' },
                   { value: 'Refinanced', label: 'Refinanced' },
+                  { value: 'Written Off', label: 'Written Off' },
                 ]}
               /></>}
               columns={[
@@ -1400,8 +1661,14 @@ export default function ReportsPage() {
                 { key: 'originalAmount', label: 'Original Amount', right: true, render: r => r.originalAmount != null ? formatVal(r.originalAmount, currency) : '—' },
                 { key: 'closureDate', label: 'Closure Date' },
                 { key: 'amount', label: 'Amount at Closure', right: true, render: r => formatVal(r.amount, currency) },
+                // Paid Off reads as the good outcome, a write-off as the loss it is, and a
+                // refinance as neither. The wording carries it as well as the colour — these
+                // print to PDF and are read by people who cannot rely on hue.
                 { key: 'closure', label: 'Closure Type', render: r => (
-                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${r.closure === 'Paid Off' ? 'bg-emerald-50 text-emerald-700 border-emerald-200/50' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>
+                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                    r.closure === 'Paid Off' ? 'bg-emerald-50 text-emerald-700 border-emerald-200/50'
+                      : r.closure === 'Written Off' ? 'bg-rose-50 text-rose-700 border-rose-200/50'
+                        : 'bg-slate-100 text-slate-600 border-slate-200'}`}>
                     {r.closure}
                   </span>
                 ) },

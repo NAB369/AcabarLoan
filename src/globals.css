@@ -194,13 +194,13 @@ body, header, aside, main,
      and the profile printed its name at 9px for exactly the same reason until it was marked up
      the same way. */
   .printable-area > .doc-letterhead .letterhead-name p { line-height: 1.45 !important; }
-  .printable-area > .doc-letterhead .letterhead-name p:first-child { font-size: 18px !important; }
-  .printable-area > .doc-letterhead .letterhead-name p:last-child { font-size: 14px !important; }
+  .printable-area > .doc-letterhead .letterhead-name p:first-child { font-size: 24px !important; }
+  .printable-area > .doc-letterhead .letterhead-name p:last-child { font-size: 17px !important; }
   /* The document title sits inside the letterhead's centre column so it fills the height the
      KHQR card takes rather than being pushed below it. That puts it inside the reach of the
      generic `> .flex p` rule, which would print it at 9px — smaller than the company name it
      is meant to sit under. */
-  .printable-area > .doc-letterhead .doc-title { font-size: 16px !important; line-height: 1.45 !important; }
+  .printable-area > .doc-letterhead .doc-title { font-size: 19px !important; line-height: 1.5 !important; }
   .printable-area > .doc-letterhead { break-inside: avoid; page-break-inside: avoid; }
   /* The borrower's KHQR card sits in the schedule letterhead's right slot. Sized in absolute
      units so the code has enough module area on paper for a phone to lock on regardless of how
@@ -288,3 +288,41 @@ body, header, aside, main,
 .dark .bg-orange-50                 { background-color: rgba(124,45,18,0.35) !important; }
 .dark .bg-blue-50                   { background-color: rgba(23,37,84,0.5) !important; }
 .dark .bg-white.rounded-2xl         { background-color: #1e293b !important; }
+
+@media print {
+  /* The printed schedule must come out looking like the schedule on screen — the red instalment
+     numbers, the blue dates and column headings are how a loan officer finds a row on paper.
+     Browsers drop author colours when printing unless told not to, so this asks for them back
+     rather than repainting the sheet: an earlier attempt forced the whole table near-black for
+     legibility and flattened exactly the colour coding that makes it readable. */
+  .printable-area.schedule-sheet,
+  .printable-area.schedule-sheet * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+  /* Only the genuinely pale greys are darkened — they are labels, not colour coding, and
+     slate-400 prints as almost nothing. */
+  .printable-area.schedule-sheet .text-slate-400 { color: #4b5563 !important; }
+  /* Table rules print mid-grey rather than the near-invisible slate-300. */
+  .printable-area.schedule-sheet table td,
+  .printable-area.schedule-sheet table th { border-color: #9ca3af !important; }
+}
+
+@media print {
+  /* The size rules above are written as `.printable-area > .doc-letterhead ...`, so one extra
+     wrapper between the sheet and its letterhead drops them and the generic 9px meta rule takes
+     the company name back over. These repeat them as descendant selectors so the letterhead
+     prints as a heading wherever it sits in the sheet, on every document that carries one. */
+  .printable-area .letterhead-name p { line-height: 1.5 !important; }
+  .printable-area .letterhead-name p:first-child { font-size: 24px !important; }
+  .printable-area .letterhead-name p:last-child { font-size: 17px !important; }
+  .printable-area .doc-title { font-size: 19px !important; line-height: 1.5 !important; }
+  /* The letterhead is a heading block, so it must outrank the generic `> .flex p { 9px }` meta
+     rule no matter how the sheet is nested. Matching on the element as well as the class raises
+     specificity past anything that rule can reach, and the logo grows with the type it sits beside
+     so the block stays balanced. */
+  .printable-area div.letterhead-name p:first-child { font-size: 24px !important; }
+  .printable-area div.letterhead-name p:last-child { font-size: 17px !important; }
+  .printable-area p.doc-title { font-size: 19px !important; }
+  .printable-area.schedule-sheet .doc-logo { width: 92px !important; height: 92px !important; }
+}
