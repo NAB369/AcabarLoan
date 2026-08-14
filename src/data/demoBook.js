@@ -98,14 +98,17 @@ const LOANS = [
   {
     // The riel side of the register, and deliberately stopped before disbursement.
     //
-    // Cash routing is currency-aware (fundingGLCode picks 1021 for a riel loan), but the loan
-    // control accounts are not: DISBURSE_LOAN and RECORD_REPAYMENT post to AR_LOAN_CODE '1130'
-    // and income to '5010' whatever the loan's currency, even though the chart carries 1131
-    // and 5021 for the riel side. A disbursed riel loan therefore adds 20,000,000 to the same
-    // balance holding dollars, and Account Receivable reads as a number in no currency at all.
-    // That is a reducer defect, not a seeding one, and fixing it is an accounting change with
-    // a migration behind it — so the demo book shows riel origination without walking into it.
-    // Once the control accounts are routed by currency this can carry `stage: 'active'`.
+    // Cash routing is currency-aware (fundingGLCode picks 1021 for a riel loan, and a cash
+    // collection lands in the riel till), and repayment income now follows the loan's currency
+    // too — interest to 5010/5011, penalties to 5040/5041. The loan *control* accounts still
+    // do not: DISBURSE_LOAN and RECORD_REPAYMENT post principal to AR_LOAN_CODE '1130' and
+    // approvals to '2030' whatever the currency, even though the chart carries 1131 for the
+    // riel receivable. A disbursed riel loan would therefore add 20,000,000 to the same balance
+    // holding dollars, and Account Receivable would read as a number in no currency at all.
+    // That is a reducer defect, not a seeding one, and fixing it is an accounting change with a
+    // migration behind it (both sides of the payable/receivable pair have to move together) —
+    // so the demo book shows riel origination without walking into it. Once the control
+    // accounts are routed by currency this can carry `stage: 'active'`.
     customer: 2, product: 'SME Loan', rate: 12, currency: 'KHR', amount: 20000000,
     installments: 12, firstInstallmentMonthsBack: -1, officer: 'Meas Bopha', stage: 'reviewed',
   },
@@ -195,7 +198,7 @@ export function seedDemoBook(baseState, reducer) {
     const customer = state.customers.find(c => c.code === customerCode(l.customer))
     const first = monthsBack(l.firstInstallmentMonthsBack, 5)
     const disbursed = monthsBack(l.firstInstallmentMonthsBack + 1, 5)
-    const { emi, rows } = buildAmortizationData(l.amount, l.rate, l.installments, first)
+    const { emi, rows } = buildAmortizationData(l.amount, l.rate, l.installments, first, 0, disbursed, l.currency)
 
     run({
       type: 'SUBMIT_LOAN',

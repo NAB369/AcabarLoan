@@ -27,6 +27,7 @@ export default function App() {
       if (state.loanPreviewOpen) dispatch({ type: 'CLOSE_LOAN_PREVIEW' })
       if (state.loanOverviewOpen) dispatch({ type: 'CLOSE_LOAN_OVERVIEW' })
       if (state.loanQuickPreviewOpen) dispatch({ type: 'CLOSE_LOAN_QUICK_PREVIEW' })
+      if (state.cashCountModalOpen) dispatch({ type: 'CLOSE_CASH_COUNT_MODAL' })
     }
     document.addEventListener('keydown', handleKey)
     return () => document.removeEventListener('keydown', handleKey)

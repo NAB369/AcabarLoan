@@ -55,6 +55,14 @@ export async function openPdf(file) {
   return pdfjsLib.getDocument({ data: buf }).promise
 }
 
+// The same document from bytes already in hand rather than from a File. An uploaded document is
+// stored as a data URL, so re-reading one to print it never involves a File at all. Opening
+// still goes through here because this module owns the worker configuration — a second entry
+// point elsewhere would have to duplicate it.
+export async function openPdfBytes(data) {
+  return pdfjsLib.getDocument({ data }).promise
+}
+
 export async function readPdfRows(pdf) {
   const cells = []
   for (let n = 1; n <= pdf.numPages; n++) {

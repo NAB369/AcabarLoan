@@ -31,6 +31,7 @@ function todayISO() {
 // log line says the record was edited, and the record itself shows what it now holds.
 const AUDITED_FIELDS = [
   ['salary', 'salary'],
+  ['deduction', 'deduction'],
   ['position', 'position'],
   ['employeeNo', 'employee no.'],
   ['accountNumber', 'account no.'],
@@ -87,6 +88,7 @@ export default function EmployeeForm({ employee, onDone }) {
     nationality: employee?.nationality || 'Cambodian',
     position: employee?.position || '',
     salary: employee?.salary ?? '',
+    deduction: employee?.deduction ?? '',
     // The bank account the salary is paid into.
     accountNumber: employee?.accountNumber || '',
     mobileCode: employee?.mobileCode || '+855', mobileNo: employee?.mobileNo || '',
@@ -157,6 +159,7 @@ export default function EmployeeForm({ employee, onDone }) {
       // Monthly gross, in USD like every other configured amount in the app. A payroll run
       // only picks up employees that carry one.
       salary: form.salary === '' ? 0 : Number(form.salary),
+      deduction: form.deduction === '' ? 0 : Number(form.deduction),
       accountNumber: form.accountNumber.trim(),
       // Office No. is no longer collected here, but a record that already carries one keeps
       // it — the register lists it and the preview reads it, and an edit through a form that
@@ -326,6 +329,17 @@ export default function EmployeeForm({ employee, onDone }) {
                 type="number" min="0" step="0.01" value={form.salary}
                 onChange={e => set('salary', e.target.value)}
                 placeholder="e.g. 600" className={`${INPUT} sm:max-w-[220px]`}
+              />
+            </Row>
+
+            {/* Standing monthly deduction — an advance being repaid, staff loan, whatever is
+                held back every month. Net is not a field: it is salary less this, worked out
+                where it is shown so the two can never disagree. */}
+            <Row label="Deduction (USD)">
+              <Input
+                type="number" min="0" step="0.01" value={form.deduction}
+                onChange={e => set('deduction', e.target.value)}
+                placeholder="e.g. 50" className={`${INPUT} sm:max-w-[220px]`}
               />
             </Row>
 

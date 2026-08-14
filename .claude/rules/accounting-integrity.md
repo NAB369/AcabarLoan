@@ -3,7 +3,9 @@
 The app models real double-entry bookkeeping. Money-moving reducer cases in
 [AppContext.jsx](../../src/context/AppContext.jsx) — `UPDATE_LOAN`, `ADVANCE_APPROVAL`,
 `DISBURSE_LOAN`, `RECORD_REPAYMENT`, `RECORD_REMAINDER`, `ADD_INCOME`, `APPROVE_EXPENSE`,
-`ADD_CASH_TRANSFER` — must keep the books consistent. Treat any change to these cases,
+`ADD_CASH_TRANSFER` — must keep the books consistent. (`ADD_CASH_COUNT` deliberately moves
+nothing: a cash count states what was in the drawer, and a difference is an incident to
+investigate rather than a posting to make.) Treat any change to these cases,
 or any new case that moves money, as accounting-critical: see the
 [accounting-reviewer](../agents/accounting-reviewer.md) agent and
 `/review-money-flow` command before merging.
@@ -25,19 +27,30 @@ or any new case that moves money, as accounting-critical: see the
    - Disbursing moves the amount from AP to AR (`DISBURSE_LOAN`).
    - Each repayment credits AR back down by the **principal portion only** — interest
      and late fees are income, not principal, and must not touch AR.
-4. **Funding account follows loan currency.** Cash in/out must be posted against the
+4. **A repayment has a payment side and an allocation side, and they are never mixed.**
+   The payment side is *where the money physically landed* and is always debited: a cash
+   float (1010 USD / 1011 KHR, or a per-cashier sub-account of one) for cash, the selected
+   real bank account's GL for a transfer, and one debit line per part when a collection is
+   split across both. The allocation side is *what the money settled* and is always
+   credited: principal to AR, interest to 5010/5011, penalties to 5040/5041, fees to
+   4010/4011. `buildRepaymentPosting` derives both from one decomposition of the same
+   total, which is what keeps the entry balanced — don't post one side without the other,
+   and never credit an income account with the gross payment.
+5. **Funding account follows loan currency.** Cash in/out must be posted against the
    real bank account matching the loan's currency via `fundingGLCode(...)`, not a
    hardcoded bucket — a USD loan's disbursement/repayment must not land on a KHR
-   account's GL code.
-5. **Rounding**: monetary values are rounded with `Math.round(x * 100) / 100`, and
+   account's GL code. The income accounts a repayment credits follow the same rule
+   (see `incomeCodeFor`). The loan control accounts are the known exception: AP/AR are
+   still '2030'/'1130' whatever the currency — see the note in `demoBook.js`.
+6. **Rounding**: monetary values are rounded with `Math.round(x * 100) / 100`, and
    balance/threshold comparisons use a half-cent tolerance (`+ 0.005` /
    `> 0.005`) to absorb float drift. Follow this convention exactly — a bare `===` or
    `>` on a computed monetary value will intermittently misfire.
-6. **Overdraft is refused, not clamped.** `canFundExpense` / `APPROVE_EXPENSE` reject an
+7. **Overdraft is refused, not clamped.** `canFundExpense` / `APPROVE_EXPENSE` reject an
    action that would take a funding account negative rather than flooring it at zero
    with `Math.max(0, ...)` — a floored balance silently loses the shortfall with no
    record it happened. Any new money-out path must refuse the same way, not clamp.
-7. **Idempotency on re-save**: status-transition logic (see
+8. **Idempotency on re-save**: status-transition logic (see
    [state-and-persistence.md](state-and-persistence.md)) exists specifically so that
    re-dispatching an update to an already-transitioned record doesn't double-post. Any
    new transition-driven posting must branch on `prevStatus !== nextStatus`, not on

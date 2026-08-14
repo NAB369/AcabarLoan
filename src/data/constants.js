@@ -60,3 +60,19 @@ export const COUNTRIES = [
   'Malaysia', 'Philippines', 'Singapore', 'Thailand', 'United Kingdom',
   'United States', 'Vietnam', 'Other',
 ]
+
+// ─── Cash count: notes and coins a till is counted in ─────────────────────────
+// Highest first, so a cashier counts down the drawer the way they stack it. Riel
+// circulates as notes only; the US coins below the dollar are listed because a branch
+// taking dollar cash over the counter does receive them as change.
+//
+// The cent has to be on the list even though US coins barely circulate in Cambodia:
+// an amortized installment lands on figures like 582.88, so a drawer holding one can
+// only be counted exactly if every cent of it is countable. Without the 1¢ row the
+// smallest step would be 5¢ and such a till would report SHORT or OVER however
+// carefully it was counted. Where the branch settles the odd cents in riel instead,
+// they are counted in the riel till — the two drawers are counted separately.
+export const CASH_DENOMINATIONS = {
+  USD: [100, 50, 20, 10, 5, 2, 1, 0.5, 0.25, 0.1, 0.05, 0.01],
+  KHR: [100000, 50000, 20000, 10000, 5000, 2000, 1000, 500, 100],
+}

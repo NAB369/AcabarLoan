@@ -2,7 +2,9 @@ import { useMemo, useState } from 'react'
 import { X, Users, AlertTriangle } from 'lucide-react'
 import { useApp, expenseFundingAccount } from '../../context/AppContext'
 import { auditStamp, formatVal } from '../../utils/format'
-import { employeeName, isOnPayroll, periodBounds, periodLabel } from '../../utils/employee'
+import {
+  employeeName, isOnPayroll, periodBounds, periodLabel, employeeDeduction, employeeNetSalary,
+} from '../../utils/employee'
 
 // A run pays one calendar month, so its period is a month and its posting date is the last
 // day of it.
@@ -15,15 +17,25 @@ function currentMonth() {
 // with a salary set. The whole run posts as ONE expense against the payroll account — the
 // per-employee lines are kept on the run itself, so the ledger carries a single salary
 // posting per month while the breakdown behind it stays recoverable.
-export default function PayrollRunModal({ accountCode, accountLabel, onClose }) {
+// `initialPeriod` and `initialEmployeeIds` carry through what the register was showing when
+// Process Payroll was pressed: the month it was filtered to, and the names ticked in it. Both
+// are starting points the operator can still change here — the modal remains the place the run
+// is settled, not a confirmation of a decision already made.
+export default function PayrollRunModal({ accountCode, accountLabel, initialPeriod, initialEmployeeIds, onClose }) {
   const { state, dispatch, showToast, can } = useApp()
   const { employees, payrollRuns, currency } = state
 
-  const [month, setMonth] = useState(currentMonth())
+  const [month, setMonth] = useState(() => initialPeriod || currentMonth())
   // Who is being left out of this run, by employee id. Held as exclusions rather than
   // selections so the run defaults to paying everyone — the normal case is the whole payroll,
   // and someone added to the register mid-draft should be in it, not silently missed.
-  const [excluded, setExcluded] = useState(() => new Set())
+  // A selection made on the register inverts into exclusions here: ticking three names means
+  // everyone else is left out, which is the same statement in this modal's terms.
+  const [excluded, setExcluded] = useState(() => {
+    const picked = new Set(initialEmployeeIds || [])
+    if (!picked.size) return new Set()
+    return new Set((employees || []).filter(e => !picked.has(e.id)).map(e => e.id))
+  })
   const { start, end } = periodBounds(month)
 
   // A different month is a different set of staff, so nothing carries over from the last one.
@@ -37,10 +49,15 @@ export default function PayrollRunModal({ accountCode, accountLabel, onClose }) 
     [employees, start, end]
   )
   // Someone on staff without a salary can't be paid — reported rather than silently dropped.
+  // Judged on the gross: an employee whose deduction happens to cancel their salary still has
+  // a salary set, and belongs in the run at zero rather than being reported as unpayable.
   const payable = useMemo(() => eligible.filter(e => Number(e.salary) > 0), [eligible])
   const lines = useMemo(() => payable.filter(e => !excluded.has(e.id)), [payable, excluded])
   const missingSalary = eligible.length - payable.length
-  const total = lines.reduce((s, e) => s + Number(e.salary), 0)
+  // The run is worth what it pays out, which is net of deductions.
+  const total = Math.round(lines.reduce((s, e) => s + employeeNetSalary(e), 0) * 100) / 100
+  const totalGross = Math.round(lines.reduce((s, e) => s + Number(e.salary || 0), 0) * 100) / 100
+  const totalDeducted = Math.round((totalGross - total) * 100) / 100
   const leftOut = payable.length - lines.length
 
   const allSelected = payable.length > 0 && leftOut === 0
@@ -87,7 +104,11 @@ export default function PayrollRunModal({ accountCode, accountLabel, onClose }) 
         createdBy: state.currentRole, createdAt: auditStamp(),
         lines: lines.map(e => ({
           employeeId: e.id, employeeNo: e.employeeNo, name: employeeName(e),
-          position: e.position || '', amount: Number(e.salary),
+          position: e.position || '',
+          // What the line pays, plus what it was worked out from — a payslip has to show
+          // the gross and the deduction, and the run is the only record of what they were
+          // on the day it was made. Editing the employee later must not restate a run.
+          gross: Number(e.salary || 0), deduction: employeeDeduction(e), amount: employeeNetSalary(e),
         })),
       },
     })
@@ -214,6 +235,8 @@ export default function PayrollRunModal({ accountCode, accountLabel, onClose }) 
                     <th className={th}>Name</th>
                     <th className={th}>Position</th>
                     <th className={`${th} !text-right`}>Salary</th>
+                    <th className={`${th} !text-right`}>Deduction</th>
+                    <th className={`${th} !text-right`}>Net Pay</th>
                   </tr>
                 </thead>
                 {/* Every payable employee is listed, ticked or not — an unticked row has to
@@ -241,8 +264,14 @@ export default function PayrollRunModal({ accountCode, accountLabel, onClose }) 
                         <td className="px-4 py-2.5 text-xs font-mono text-slate-500 dark:text-slate-400">{e.employeeNo}</td>
                         <td className="px-4 py-2.5 text-xs font-semibold text-slate-700 dark:text-slate-200 whitespace-nowrap">{employeeName(e)}</td>
                         <td className="px-4 py-2.5 text-xs text-slate-600 dark:text-slate-300">{e.position || '—'}</td>
+                        <td className="px-4 py-2.5 text-xs text-slate-600 dark:text-slate-300 text-right whitespace-nowrap">
+                          {formatVal(Number(e.salary || 0), currency)}
+                        </td>
+                        <td className="px-4 py-2.5 text-xs text-right whitespace-nowrap text-rose-600 dark:text-rose-400">
+                          {employeeDeduction(e) ? formatVal(employeeDeduction(e), currency) : '—'}
+                        </td>
                         <td className="px-4 py-2.5 text-xs font-bold text-slate-700 dark:text-slate-200 text-right whitespace-nowrap">
-                          {formatVal(Number(e.salary), currency)}
+                          {formatVal(employeeNetSalary(e), currency)}
                         </td>
                       </tr>
                     )
@@ -257,6 +286,14 @@ export default function PayrollRunModal({ accountCode, accountLabel, onClose }) 
                     <tr className="border-t-2 border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700">
                       <td colSpan={4} className="px-4 py-2.5 text-xs font-bold text-slate-700 dark:text-slate-200">
                         Total Payroll{leftOut > 0 ? ` — ${lines.length} of ${payable.length} selected` : ''}
+                      </td>
+                      {/* Gross and deductions total under their own columns, so the net reads
+                          as the arithmetic of the two above it rather than as a bare figure. */}
+                      <td className="px-4 py-2.5 text-xs font-semibold text-slate-600 dark:text-slate-300 text-right whitespace-nowrap">
+                        {formatVal(totalGross, currency)}
+                      </td>
+                      <td className="px-4 py-2.5 text-xs font-semibold text-right whitespace-nowrap text-rose-600 dark:text-rose-400">
+                        {totalDeducted ? formatVal(totalDeducted, currency) : '—'}
                       </td>
                       <td className="px-4 py-2.5 text-xs font-bold text-slate-800 dark:text-slate-100 text-right whitespace-nowrap">
                         {formatVal(total, currency)}
