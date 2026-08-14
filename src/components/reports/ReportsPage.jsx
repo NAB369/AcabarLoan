@@ -577,6 +577,9 @@ function buildCollectionRows(loanApplications, todayISO) {
       rows.push({
         key: `${loan.ref}-${row.num ?? i + 1}`,
         ref: loan.ref,
+        // Each row states the money it is in, so a report holding both prints every figure in
+        // its own currency instead of one global guess.
+        currency: loan.currency || 'USD',
         customer: loan.customerName || loan.customerCode || '—',
         product: loan.product || '—',
         installment: row.num ?? i + 1,
@@ -610,6 +613,7 @@ function buildLoanArrears(loanApplications, todayISO) {
     })
     return {
       loan,
+      currency: loan.currency || 'USD',
       outstanding: Math.max(round2((loan.amount || 0) - principalPaid), 0),
       arrears: round2(arrears),
       daysLate,
@@ -856,6 +860,20 @@ function buildBankReportRows(state, account) {
 // different money and are never added together (see architecture.md), so a mixed result set
 // gets no footer at all rather than one summing two currencies into a meaningless number —
 // filter the report to one currency to total it.
+// A figure summed over rows that may be in different currencies. Dollars and riel are never
+// added: each currency is totalled on its own and they are printed side by side, so a book
+// holding both reads "$4,200.00 · ៛20,000,000" rather than one number that is neither.
+function perCurrencyTotal(rows, pick) {
+  const totals = new Map()
+  for (const r of rows || []) {
+    const c = r.currency || 'USD'
+    totals.set(c, (totals.get(c) || 0) + (pick(r) || 0))
+  }
+  const parts = [...totals.entries()].filter(([, v]) => Math.abs(v) > 0.005)
+  if (!parts.length) return formatVal(0, 'USD', 1)
+  return parts.map(([c, v]) => formatVal(v, c, 1)).join(' · ')
+}
+
 function singleCurrencyTotals(rows, columns) {
   const currencies = new Set(rows.map(r => r.currency || 'USD'))
   if (currencies.size !== 1) return null
@@ -993,13 +1011,19 @@ export default function ReportsPage() {
   // refused to, printed no total at all — and the figures it did print were run through
   // formatVal's USD→KHR conversion on top of amounts already in their own currency.
   //
-  // Which currency that is comes from the app's own setting rather than a control in this header.
-  // Every report below is fed from `loanApplications`, so filtering once here reaches all of them,
-  // and every figure is then native — hence rate 1 wherever they are formatted, never converted.
-  const reportCurrency = currency || 'USD'
-  const loanApplications = useMemo(
-    () => allLoanApplications.filter(l => (l.currency || 'USD') === reportCurrency),
-    [allLoanApplications, reportCurrency]
+  // So the reports show every loan and print each figure in the money it is actually in: rows
+  // carry their own currency and are formatted from it at rate 1, never converted. Filtering to
+  // one currency instead would hide the other — a riel loan disbursed today simply would not
+  // appear — and there is no currency control in the app to switch with.
+  //
+  // Totals are the one thing that cannot be mixed: singleCurrencyTotals gives a footer only when
+  // every row agrees, rather than adding dollars to riel (see architecture.md).
+  const loanApplications = allLoanApplications
+  // Which currencies the book actually holds — a figure that cannot be split by currency is
+  // stated only when there is one of them.
+  const bookCurrencies = useMemo(
+    () => [...new Set(allLoanApplications.map(l => l.currency || 'USD'))],
+    [allLoanApplications]
   )
   // null | 'loan' | 'financial' — see reportView in AppContext: reducer state so the sidebar
   // returning to this module drops back to the picker rather than leaving it where it was.
@@ -1273,19 +1297,19 @@ export default function ReportsPage() {
               sub="Disbursed loans currently running"
             />
             <KpiCard
-              label="Total Outstanding" value={formatVal(loanKpis.outstanding, reportCurrency, 1)}
+              label="Total Outstanding" value={perCurrencyTotal(loanArrears, r => r.outstanding)}
               icon={Wallet} iconBg="bg-emerald-50 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400"
               valueClass="text-xl"
               sub="Gross loan portfolio"
             />
             <KpiCard
-              label="Due Today" value={formatVal(loanKpis.dueTodayAmount, reportCurrency, 1)}
+              label="Due Today" value={perCurrencyTotal(allCollectionRows.filter(r => r.status === 'Due Today'), r => r.amount)}
               icon={Clock} iconBg="bg-amber-50 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400"
               valueClass="text-xl"
               sub={`${loanKpis.dueTodayCount} installment${loanKpis.dueTodayCount === 1 ? '' : 's'} falling due`}
             />
             <KpiCard
-              label="Total Arrears" value={formatVal(loanKpis.arrears, reportCurrency, 1)}
+              label="Total Arrears" value={perCurrencyTotal(loanArrears, r => r.arrears)}
               icon={AlertTriangle} iconBg="bg-rose-50 text-rose-600 dark:bg-rose-900/30 dark:text-rose-400"
               valueClass="text-xl"
               sub={`${loanKpis.arrearsAccounts} accounts past due`}
@@ -1354,7 +1378,7 @@ export default function ReportsPage() {
                 { key: 'daysLate', label: 'Days Late', right: true, render: r => r.daysLate > 0
                   ? <span className="font-bold text-rose-600">{r.daysLate}</span>
                   : '—' },
-                { key: 'amount', label: 'Amount Due', right: true, render: r => formatVal(r.amount, reportCurrency, 1) },
+                { key: 'amount', label: 'Amount Due', right: true, render: r => formatVal(r.amount, r.currency || 'USD', 1) },
                 { key: 'branch', label: 'Branch' },
                 { key: 'creditOfficer', label: 'Credit Officer' },
                 { key: 'status', label: 'Status', render: r => (
@@ -1457,8 +1481,8 @@ export default function ReportsPage() {
               columns={[
                 { key: 'name', label: activeArrearsGroup.column, className: 'font-medium text-slate-700 dark:text-slate-200' },
                 { key: 'accounts', label: '# Accounts', right: true },
-                { key: 'outstanding', label: 'Outstanding', right: true, render: r => formatVal(r.outstanding, reportCurrency, 1) },
-                { key: 'arrears', label: 'Arrears', right: true, render: r => formatVal(r.arrears, reportCurrency, 1) },
+                { key: 'outstanding', label: 'Outstanding', right: true, render: r => formatVal(r.outstanding, r.currency || 'USD', 1) },
+                { key: 'arrears', label: 'Arrears', right: true, render: r => formatVal(r.arrears, r.currency || 'USD', 1) },
                 { key: 'par', label: 'PAR (%)', right: true, render: r => `${r.outstanding > 0 ? ((r.arrears / r.outstanding) * 100).toFixed(2) : '0.00'}%` },
                 ...(arrearsGroup === 'aging' ? [
                   { key: 'classification', label: 'Classification', render: r => (
@@ -1479,8 +1503,8 @@ export default function ReportsPage() {
               totals={{
                 label: 'Total Portfolio',
                 accounts: arrearsTotals.accounts,
-                outstanding: formatVal(arrearsTotals.outstanding, reportCurrency, 1),
-                arrears: formatVal(arrearsTotals.arrears, reportCurrency, 1),
+                outstanding: perCurrencyTotal(loanArrears, r => r.outstanding),
+                arrears: perCurrencyTotal(loanArrears, r => r.arrears),
                 par: `${arrearsTotals.outstanding > 0 ? ((arrearsTotals.arrears / arrearsTotals.outstanding) * 100).toFixed(2) : '0.00'}%`,
               }}
             />
@@ -1507,16 +1531,22 @@ export default function ReportsPage() {
                 ) },
                 { key: 'bucket', label: 'Aging Bucket', className: 'font-medium text-slate-700 dark:text-slate-200' },
                 { key: 'accounts', label: '# Accounts', right: true },
-                { key: 'outstanding', label: 'Outstanding', right: true, render: r => formatVal(r.outstanding, reportCurrency, 1) },
+                { key: 'outstanding', label: 'Outstanding', right: true, render: r => formatVal(r.outstanding, r.currency || 'USD', 1) },
                 { key: 'rate', label: 'Reserve Rate', right: true, className: 'font-semibold text-slate-700 dark:text-slate-200' },
-                { key: 'provision', label: 'Required Provision', right: true, render: r => formatVal(r.provision, reportCurrency, 1), className: 'font-bold text-slate-800 dark:text-slate-100' },
+                { key: 'provision', label: 'Required Provision', right: true, render: r => formatVal(r.provision, r.currency || 'USD', 1), className: 'font-bold text-slate-800 dark:text-slate-100' },
               ]}
               rows={provisionRows}
               totals={{
                 label: 'Total Required',
                 accounts: provisionRows.reduce((s, r) => s + r.accounts, 0),
                 outstanding: formatVal(provisionRows.reduce((s, r) => s + r.outstanding, 0), currency),
-                provision: formatVal(loanKpis.provision, reportCurrency, 1),
+                // The aging bands this is derived from group by lateness, not by currency, so a
+                // book holding both has no single provision figure to state — it is suppressed
+                // rather than printed as a sum of dollars and riel. The bands themselves still
+                // show, and a single-currency book still gets its total.
+                provision: bookCurrencies.length === 1
+                  ? formatVal(loanKpis.provision, bookCurrencies[0], 1)
+                  : '—',
               }}
             />
           )}
@@ -1545,15 +1575,15 @@ export default function ReportsPage() {
               columns={isListingSummary ? [
                 { key: 'name', label: listingLabel, className: 'font-medium text-slate-700 dark:text-slate-200' },
                 { key: 'accounts', label: '# Accounts', right: true },
-                { key: 'outstanding', label: 'Outstanding', right: true, render: r => formatVal(r.outstanding, reportCurrency, 1) },
+                { key: 'outstanding', label: 'Outstanding', right: true, render: r => formatVal(r.outstanding, r.currency || 'USD', 1) },
               ] : [
                 { key: 'cid', label: 'CID', className: 'font-mono' },
                 { key: 'accNo', label: 'AccNo', className: 'font-mono font-bold text-brand-600' },
                 { key: 'name', label: 'Name', className: 'font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap' },
                 { key: 'sex', label: 'Sex' },
                 { key: 'address', label: 'Address', className: 'max-w-[200px] truncate' },
-                { key: 'disbAmt', label: 'Disb Amt', right: true, render: r => formatVal(r.disbAmt, reportCurrency, 1) },
-                { key: 'bal', label: 'Balance', right: true, render: r => formatVal(r.bal, reportCurrency, 1) },
+                { key: 'disbAmt', label: 'Disb Amt', right: true, render: r => formatVal(r.disbAmt, r.currency || 'USD', 1) },
+                { key: 'bal', label: 'Balance', right: true, render: r => formatVal(r.bal, r.currency || 'USD', 1) },
                 { key: 'intAccr', label: 'Int Accr', right: true, render: r => fmt2(r.intAccr) },
                 { key: 'colFeeAccr', label: 'ColFee Accr', right: true, render: r => fmt2(r.colFeeAccr) },
                 { key: 'intRate', label: 'Int Rate', right: true, render: r => `${fmt2(r.intRate)}%` },
@@ -1589,7 +1619,7 @@ export default function ReportsPage() {
               columns={[
                 { key: 'name', label: activeSummaryGroup.column, className: 'font-medium text-slate-700 dark:text-slate-200' },
                 { key: 'accounts', label: '# Accounts', right: true },
-                { key: 'outstanding', label: 'Outstanding', right: true, render: r => formatVal(r.outstanding, reportCurrency, 1) },
+                { key: 'outstanding', label: 'Outstanding', right: true, render: r => formatVal(r.outstanding, r.currency || 'USD', 1) },
                 // Arrears needs per-loan repayment schedules, which aren't persisted on the
                 // loan record yet — these hold their place at zero until that data exists.
                 { key: 'arrAccounts', label: 'Arr. Accounts', right: true, render: () => 0 },
@@ -1630,7 +1660,7 @@ export default function ReportsPage() {
                 { key: 'ref', label: 'Ref #', className: 'font-mono font-bold text-brand-600' },
                 { key: 'customerName', label: 'Customer', className: 'font-medium text-slate-700 dark:text-slate-200' },
                 { key: 'product', label: 'Product' },
-                { key: 'amount', label: 'Amount', right: true, render: r => formatVal(r.amount, reportCurrency, 1) },
+                { key: 'amount', label: 'Amount', right: true, render: r => formatVal(r.amount, r.currency || 'USD', 1) },
                 { key: 'disbursementDate', label: 'Disbursement Date', render: r => r.disbursementDate || '—' },
                 { key: 'branch', label: 'Branch' },
                 { key: 'creditOfficer', label: 'Credit Officer' },
@@ -1667,9 +1697,9 @@ export default function ReportsPage() {
                 { key: 'ref', label: 'Ref #', className: 'font-mono font-bold text-brand-600' },
                 { key: 'customer', label: 'Customer', className: 'font-medium text-slate-700 dark:text-slate-200' },
                 { key: 'product', label: 'Product' },
-                { key: 'originalAmount', label: 'Original Amount', right: true, render: r => r.originalAmount != null ? formatVal(r.originalAmount, reportCurrency, 1) : '—' },
+                { key: 'originalAmount', label: 'Original Amount', right: true, render: r => r.originalAmount != null ? formatVal(r.originalAmount, r.currency || 'USD', 1) : '—' },
                 { key: 'closureDate', label: 'Closure Date' },
-                { key: 'amount', label: 'Amount at Closure', right: true, render: r => formatVal(r.amount, reportCurrency, 1) },
+                { key: 'amount', label: 'Amount at Closure', right: true, render: r => formatVal(r.amount, r.currency || 'USD', 1) },
                 // Paid Off reads as the good outcome, a write-off as the loss it is, and a
                 // refinance as neither. The wording carries it as well as the colour — these
                 // print to PDF and are read by people who cannot rely on hue.
