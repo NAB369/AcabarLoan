@@ -102,12 +102,16 @@ function loadPersistedState() {
     // "Car Loan" was renamed to "Vehicle Loan" — carry the rename forward for installs that already saved the old name.
     // Vehicle Loan was also missing from the seed product list for a while, so backfill it into
     // any saved install that doesn't already have it (renamed or otherwise).
+    // The late penalty became a per-product setting; before that every new loan was written with a
+    // fixed 5%. A saved product carries no penaltyRate, and reading that as 0 would quietly stop
+    // charging penalties on new loans — so it is backfilled with the rate they were actually getting.
     const loanProducts = p.loanProducts
       ? (() => {
           const renamed = p.loanProducts.map(prod => prod.name === 'Car Loan' ? { ...prod, name: 'Vehicle Loan' } : prod)
-          return renamed.some(prod => prod.name === 'Vehicle Loan')
-            ? renamed
-            : [...renamed, { name: 'Vehicle Loan', rate: 13, maxAmount: 30000 }]
+          const withPenalty = renamed.map(prod => prod.penaltyRate == null ? { ...prod, penaltyRate: 5 } : prod)
+          return withPenalty.some(prod => prod.name === 'Vehicle Loan')
+            ? withPenalty
+            : [...withPenalty, { name: 'Vehicle Loan', rate: 13, maxAmount: 30000, penaltyRate: 5 }]
         })()
       : null
     // Repayment income, its late fees, and the seed interest/fee/penalty demo rows used to
@@ -164,6 +168,15 @@ function loadPersistedState() {
       expenses: p.expenses || null,
       notifications: p.notifications || null,
       cashTransfers: p.cashTransfers || null,
+      // The collections themselves and the till lines/counts behind them. Purely additive —
+      // an install saved before repayments were recorded as their own transaction has none
+      // of the three and starts them empty, which is why this needed no STORAGE_KEY bump:
+      // nothing already saved changed shape. What such an install already collected still
+      // reads back off each loan's schedule (see the Repayment Report's schedule fallback).
+      repayments: p.repayments || null,
+      cashSheet: p.cashSheet || null,
+      cashCounts: p.cashCounts || null,
+      recoveries: p.recoveries || null,
       accounts,
       feeSettings,
       loanProducts,
@@ -230,6 +243,59 @@ function renumberFeeIncome(chartOfAccounts, journalEntries) {
 
 const persisted = loadPersistedState()
 
+// The remarks the chart of accounts shipped with before every account was made to name its own
+// currency. A USD account and its KHR sibling were told apart only by a "(KHR)" suffix on the
+// name — and half the USD accounts carried no remark at all — so an operator reading the
+// Description column could not tell which of a pair a posting would land in.
+//
+// Only saved rows still holding one of these exact strings (or nothing) are refreshed. A remark
+// the operator has written themselves matches none of them and is left alone, which is the
+// point: this backfills the seed's own text without overwriting anyone's edit.
+const PREVIOUS_SEED_DESCRIPTIONS = {
+  '1000': 'Everything the branch owns: cash, bank balances, the loan book and what is owed to it.',
+  '1010': 'Notes and coins held in the branch, in US dollars.',
+  '1011': 'Notes and coins held in the branch, in Khmer Riel.',
+  '1021': 'Bank account balance held in Khmer Riel.',
+  '1100': 'Roll-up of all outstanding loan principal across products.',
+  '1110': 'Contra-asset — offsets Loans Receivable for expected credit losses.',
+  '1120': 'Interest earned but not yet collected. Debited by the End of Day accrual, cleared as repayments come in.',
+  '1121': 'Interest earned but not yet collected on riel loans. Debited by the End of Day accrual.',
+  '1130': 'Principal out with borrowers. Debited when a loan is disbursed, credited by the principal each repayment retires.',
+  '1131': 'Principal out with borrowers on riel loans. Debited on disbursement, credited by the principal each repayment retires.',
+  '1132': 'Contra-asset offsetting 1130. Credited by the End of Month provisioning run as the required allowance rises.',
+  '1133': 'Contra-asset offsetting 1131, provisioned at End of Month.',
+  '2000': 'Everything the branch owes: payables, tax, and depreciation accumulated against its assets.',
+  '2030': 'Approved loan principal the company still owes borrowers. Credited on final approval, debited when the loan is disbursed.',
+  '2040': 'Tax assessed or withheld and not yet paid to the authority.',
+  '2041': 'Tax assessed or withheld and not yet paid, in Khmer Riel.',
+  '2050': 'Depreciation accumulated to date against fixed assets.',
+  '3000': 'Capital put in and profit kept back.',
+  '4000': 'What the loan earns in fees, kept apart from interest.',
+  '4010': 'Fees earned on refinancing and other restructuring.',
+  '4011': 'Restructuring fees earned on riel loans.',
+  '5000': 'What the loan book earns: repayment and interest income.',
+  // An account whose seed text has been rewritten more than once lists every previous
+  // version: an install that saved the second one is just as much "still holding the seed's
+  // own words" as one that saved the first, and only the operator's own wording should win.
+  '5010': [
+    'Receives all borrower loan repayments.',
+    'USD. Interest and fees collected from borrowers, in US dollars. Cash actually received, as opposed to the 5020 accrual of what has been earned.',
+  ],
+  '5020': 'Interest earned on outstanding principal, recognised daily by the End of Day batch.',
+  '5021': 'Interest earned on outstanding riel principal, recognised daily by the End of Day batch.',
+  '6000': 'What it costs to run the book and the branch.',
+  '6010': 'Funds loan principal on disbursement.',
+  '6020': 'Funds staff salaries.',
+  '6021': 'Funds staff salaries paid in Khmer Riel.',
+  '6030': 'Funds utility bills.',
+  '6031': 'Water supply charges for the branch.',
+  '6032': 'Electricity charges for the branch.',
+  '6033': 'Fuel for branch vehicles and field visits.',
+  '6040': 'Funds general operating expenses.',
+  '6050': 'Charge recognised when the required loan-loss allowance rises at End of Month.',
+  '6051': 'Provision charge on riel loans, recognised at End of Month.',
+}
+
 // An install that already saved a chart of accounts keeps every account and balance it
 // has — but accounts added to the seed since then are appended, so a new control account
 // (the loan payable/receivable pair, say) reaches existing installs instead of only
@@ -247,11 +313,22 @@ function mergeSeededAccounts(saved) {
   // NO parent takes the seed's. One the operator has deliberately re-parented is left alone:
   // an empty parentCode is the only thing read as "never filed", not as a choice.
   const seededParent = new Map(INITIAL_CHART_OF_ACCOUNTS.map(a => [a.code, a.parentCode]))
-  return merged.map(a => (
-    (a.parentCode || '').trim() || !seededParent.get(a.code)
+  const seededDescription = new Map(INITIAL_CHART_OF_ACCOUNTS.map(a => [a.code, a.description]))
+  return merged.map(a => {
+    const next = (a.parentCode || '').trim() || !seededParent.get(a.code)
       ? a
       : { ...a, parentCode: seededParent.get(a.code) }
-  ))
+    // See PREVIOUS_SEED_DESCRIPTIONS: a remark the install never had, or still holds exactly as
+    // the seed last wrote it, takes the current seed text so existing installs get the
+    // currency-naming remarks too. Anything else is the operator's own wording and stays.
+    const savedText = (next.description || '').trim()
+    const previous = PREVIOUS_SEED_DESCRIPTIONS[next.code]
+    const stale = !savedText || (Array.isArray(previous) ? previous.includes(savedText) : savedText === previous)
+    const seedText = seededDescription.get(next.code)
+    return stale && seedText && seedText !== next.description
+      ? { ...next, description: seedText }
+      : next
+  })
 }
 
 // Same idea for the real bank accounts: a saved install keeps the cards it has (renames,
@@ -340,13 +417,15 @@ function mergeSeededIntegrations(saved) {
 }
 
 const INITIAL_LOAN_PRODUCTS = [
-  { name: 'Business Loan',     rate: 12, maxAmount: 50000 },
-  { name: 'Agricultural Loan', rate: 10, maxAmount: 20000 },
-  { name: 'Personal Loan',     rate: 15, maxAmount: 10000 },
-  { name: 'SME Loan',          rate: 12, maxAmount: 50000 },
-  { name: 'Housing Loan',      rate: 10, maxAmount: 100000 },
-  { name: 'Land Loan',         rate: 11, maxAmount: 80000 },
-  { name: 'Vehicle Loan',      rate: 13, maxAmount: 30000 },
+  // penaltyRate is the late penalty charged once on an overdue instalment (see systemOperations'
+  // End of Day); 0 sells the product without one.
+  { name: 'Business Loan',     rate: 12, maxAmount: 50000,  penaltyRate: 5 },
+  { name: 'Agricultural Loan', rate: 10, maxAmount: 20000,  penaltyRate: 5 },
+  { name: 'Personal Loan',     rate: 15, maxAmount: 10000,  penaltyRate: 5 },
+  { name: 'SME Loan',          rate: 12, maxAmount: 50000,  penaltyRate: 5 },
+  { name: 'Housing Loan',      rate: 10, maxAmount: 100000, penaltyRate: 5 },
+  { name: 'Land Loan',         rate: 11, maxAmount: 80000,  penaltyRate: 5 },
+  { name: 'Vehicle Loan',      rate: 13, maxAmount: 30000,  penaltyRate: 5 },
 ]
 
 const INITIAL_STATE = {
@@ -419,6 +498,7 @@ const INITIAL_STATE = {
   transactionModalOpen: false,
   transactionModalType: 'Income',
   cashTransferModalOpen: false,
+  cashCountModalOpen: false,
   accountHistoryCode: null,
   accountHistoryCurrency: null,
   glFilter: 'all',
@@ -443,6 +523,18 @@ const INITIAL_STATE = {
   // Same length check as journalEntries — an install that never made a transfer gets the
   // seeded ones, one that did keeps its own.
   cashTransfers: persisted.cashTransfers?.length ? persisted.cashTransfers : INITIAL_CASH_TRANSFERS,
+  // One record per collection — what was paid, through which till or bank account, and how
+  // it was allocated across principal and each kind of income. The loan's schedule says what
+  // an installment owes; this says what actually came in against it, which is what the
+  // repayment/cash/income/bank reports are built from.
+  repayments: persisted.repayments || [],
+  // Physical cash movements through the branch tills, each carrying the repayment it came
+  // from, and the denomination counts a cashier takes against them. A count never moves
+  // money: it records what was in the drawer next to what the books say should be.
+  cashSheet: persisted.cashSheet || [],
+  cashCounts: persisted.cashCounts || [],
+  // Money collected on loans already written off — see RECORD_RECOVERY.
+  recoveries: persisted.recoveries || [],
   accounts: persisted.accounts || INITIAL_ACCOUNTS,
   // Sign-in accounts, editable in Settings → User Management → User Accounts. Kept across
   // reloads for the same reason the audit trail is: an account added here would otherwise be
@@ -540,6 +632,42 @@ export function hasFundingAccount(realBankAccounts, currency, branch) {
   return list.some(a => a.branch === branch || !a.branch)
 }
 
+// Cash collected over the counter never touches a bank: it sits in the branch till until
+// someone banks it. 1010 holds the dollar float and 1011 the riel one — the chart's
+// "KHR sibling takes the USD code + 1" convention. A branch running more than one till
+// files each cashier as a sub-account of those ("Cashier A — USD", parentCode 1010), so
+// a sub-account is a cash account too and can be paid into directly.
+const CASH_GL_ROOT = { USD: '1010', KHR: '1011' }
+
+export function cashAccountOptions(chartOfAccounts, currency) {
+  const root = CASH_GL_ROOT[currency] || CASH_GL_ROOT.USD
+  return (chartOfAccounts || []).filter(a =>
+    (a.code === root || a.parentCode === root) && a.status !== 'INACTIVE'
+  )
+}
+
+// Real bank accounts a borrower's transfer can actually be received into. The Receivable
+// and Payroll cards are lenses on the loan control account and the salary GL rather than
+// accounts money arrives in, so they are not offered as a repayment destination — see
+// BANK_CARD_GROUPS in AccountingPage. A card tagged to another branch is left out for the
+// same reason fundingGLCode refuses it.
+export function repaymentBankOptions(realBankAccounts, currency, branch) {
+  return (realBankAccounts || []).filter(a =>
+    a.currency === currency &&
+    a.glCode &&
+    a.group !== 'receivable' && a.group !== 'payroll' &&
+    (!a.branch || !branch || a.branch === branch)
+  )
+}
+
+// A repayment method is either cash over the counter or money that arrived in a bank
+// account. Callers have spelled the bank side several ways over time ('Transfer',
+// 'Bank Transfer', 'Bank', 'KHQR'), so cash is what is matched and everything else is
+// treated as a bank receipt rather than the other way round.
+export function isCashMethod(method) {
+  return /cash/i.test(method || '')
+}
+
 // The two loan-book control accounts in the chart of accounts. Account Payable carries
 // principal the company has approved but not yet handed over; Account Receivable carries
 // principal already out with borrowers. Together they cover a loan's whole life: approval
@@ -547,6 +675,227 @@ export function hasFundingAccount(realBankAccounts, currency, branch) {
 // the receivable back down by whatever principal it retired.
 const AP_LOAN_CODE = '2030'
 const AR_LOAN_CODE = '1130'
+
+// Where each half of a repayment's *allocation* is recognised. Principal retires the
+// receivable above; everything else the borrower hands over is income, and each kind of
+// income keeps its own account so a book heavy on penalties reads apart from one heavy on
+// interest. Keyed by the loan's currency — a riel collection must not credit a dollar
+// income account (5010/5011, 5040/5041, 4010/4011 are the same USD/KHR pairs the rest of
+// the chart uses).
+const INTEREST_INCOME_CODE = { USD: '5010', KHR: '5011' }
+const PENALTY_INCOME_CODE = { USD: '5040', KHR: '5041' }
+const FEE_INCOME_CODE = { USD: '4010', KHR: '4011' }
+// Collected on a loan already written off. Income rather than a reversal: the receivable went
+// when the loan left the book, so there is no asset left for a later payment to credit back.
+const RECOVERY_INCOME_CODE = { USD: '5050', KHR: '5051' }
+// The status a written-off loan carries. Reports read the same string — see ReportsPage.
+const WRITTEN_OFF_STATUS = 'Written Off'
+// Principal still owed: what was disbursed less the principal each instalment has actually
+// retired. Read off the schedule rather than the running `balance` column so a loan part-way
+// through a partial payment is measured on money received, not on what the row expected.
+function outstandingPrincipal(loan) {
+  const paid = (loan.schedule || []).reduce((sum, r) => sum + (r.principalPaid || 0), 0)
+  return Math.max(0, Math.round(((loan.amount || 0) - paid) * 100) / 100)
+}
+// The allowance a write-off consumes, and the expense any uncovered part falls to — the same
+// pair End of Month provisioning builds up (see PROVISION_GL in utils/systemOperations).
+const LOAN_LOSS_ALLOWANCE_CODE = { USD: '1132', KHR: '1133' }
+const LOAN_LOSS_EXPENSE_CODE = { USD: '6050', KHR: '6051' }
+const incomeCodeFor = (map, currency) => map[currency] || map.USD
+
+// Record numbers for the collections themselves and the cash-sheet/count lines they
+// produce. Read off the highest number already issued rather than the list length, so
+// deleting a record can never hand its number out a second time.
+function nextRecordId(list, prefix) {
+  const pattern = new RegExp(`^${prefix}-(\\d+)$`)
+  const highest = (list || []).reduce((max, r) => {
+    const m = pattern.exec(r?.id || '')
+    return m ? Math.max(max, Number(m[1])) : max
+  }, 0)
+  return `${prefix}-${String(highest + 1).padStart(6, '0')}`
+}
+
+// The payment side of a repayment: where the money physically arrived, as opposed to what
+// it was used for. One collection can arrive through more than one door (part cash at the
+// counter, part transferred), so this always resolves to a list — a caller naming only a
+// paymentMethod (the demo book, or any older screen) gets a single part covering the whole
+// amount, routed the way that method would have been routed before.
+//
+// Returns null — and the caller refuses the whole repayment — when an account can't be
+// resolved or the parts don't add up to what was collected. Refusing rather than falling
+// back to "whatever account is first on file" is the same rule fundingGLCode follows: money
+// landing in the wrong account is worse than a payment that has to be re-entered.
+function resolvePaymentParts(state, loan, total, action) {
+  const raw = Array.isArray(action.payments) && action.payments.length
+    ? action.payments
+    : [{
+        method: action.paymentMethod || 'Cash',
+        amount: total,
+        cashAccountCode: action.cashAccountCode,
+        bankAccountId: action.bankAccountId,
+      }]
+  const currency = loan.currency
+  const parts = []
+  for (const p of raw) {
+    const amount = Math.round((Number(p.amount) || 0) * 100) / 100
+    if (amount <= 0.005) continue
+    const method = p.method || 'Cash'
+    if (isCashMethod(method)) {
+      const tills = cashAccountOptions(state.chartOfAccounts, currency)
+      const till = tills.find(a => a.code === p.cashAccountCode) || tills[0]
+      if (!till) return null
+      parts.push({
+        kind: 'Cash', method, amount,
+        glCode: till.code, accountLabel: till.name, bankAccountId: null,
+      })
+    } else {
+      const banks = repaymentBankOptions(state.realBankAccounts, currency, loan.branch)
+      const bank = banks.find(a => a.id === p.bankAccountId) || null
+      const glCode = bank?.glCode || fundingGLCode(state.realBankAccounts, currency, loan.branch, 'ACC-REPAYMENT')
+      if (!glCode) return null
+      const label = bank
+        ? `${bank.name} — ${bank.currency}`
+        : (state.chartOfAccounts.find(a => a.code === glCode)?.name || glCode)
+      parts.push({
+        kind: 'Bank', method, amount,
+        glCode, accountLabel: label,
+        bankAccountId: bank?.id || (state.realBankAccounts || []).find(a => a.glCode === glCode && a.currency === currency)?.id || null,
+      })
+    }
+  }
+  if (!parts.length) return null
+  const collected = Math.round(parts.reduce((s, p) => s + p.amount, 0) * 100) / 100
+  if (Math.abs(collected - total) > 0.005) return null
+  return parts
+}
+
+// Posts one collection. The payment side debits wherever the money landed — a till for
+// cash, the real bank account for a transfer — and the allocation side credits what it was
+// used for: principal off the receivable, interest/penalty/fee to their own income
+// accounts. The two sides are built from one decomposition of the same total, which is what
+// keeps every entry balanced however the payment was split.
+//
+// Everything it produces (the repayment record, its cash-sheet lines, its income rows and
+// its journal entry) carries the repayment id, so a later reversal can find every posting a
+// collection caused instead of guessing at it.
+function buildRepaymentPosting(state, { loan, parts, allocation, date, memo, installmentNum, kind, receipt }) {
+  const round2 = n => Math.round((n || 0) * 100) / 100
+  const { principal, interest, penalty, fee } = allocation
+  const total = round2(parts.reduce((s, p) => s + p.amount, 0))
+  const currency = loan.currency
+  const interestCode = incomeCodeFor(INTEREST_INCOME_CODE, currency)
+  const penaltyCode = incomeCodeFor(PENALTY_INCOME_CODE, currency)
+  const feeCode = incomeCodeFor(FEE_INCOME_CODE, currency)
+  const repaymentId = nextRecordId(state.repayments, 'RPY')
+  const methodSummary = parts.length > 1
+    ? `Split (${parts.map(p => p.kind).join(' + ')})`
+    : parts[0].method
+
+  const repayment = {
+    id: repaymentId,
+    date,
+    loanRef: loan.ref,
+    customerCode: loan.customerCode,
+    customerName: loan.customerName,
+    currency,
+    branch: loan.branch || '',
+    installmentNum,
+    kind,
+    total,
+    allocation: { principal, interest, penalty, fee },
+    payments: parts.map(p => ({
+      method: p.kind, methodLabel: p.method, amount: p.amount,
+      accountCode: p.glCode, accountLabel: p.accountLabel, bankAccountId: p.bankAccountId,
+    })),
+    paymentMethod: methodSummary,
+    memo,
+    ...receipt,
+    createdAt: new Date().toISOString(),
+  }
+
+  // One cash-sheet line per cash part, never more: the till only moves for the money
+  // actually handed over the counter, and a bank transfer moves no physical cash at all.
+  let cashSheetSoFar = state.cashSheet
+  const cashSheetLines = parts.filter(p => p.kind === 'Cash').map(p => {
+    const line = {
+      id: nextRecordId(cashSheetSoFar, 'CS'),
+      date,
+      direction: 'IN',
+      amount: p.amount,
+      currency,
+      cashAccountCode: p.glCode,
+      cashAccountName: p.accountLabel,
+      source: 'Loan Repayment',
+      repaymentId,
+      reference: loan.ref,
+      installmentNum,
+      customerCode: loan.customerCode,
+      customerName: loan.customerName,
+      memo: memo || `${kind === 'remainder' ? 'Remaining balance of installment' : 'Installment'} #${installmentNum} collected in cash`,
+      createdAt: new Date().toISOString(),
+    }
+    cashSheetSoFar = [line, ...cashSheetSoFar]
+    return line
+  })
+
+  // The income register records what was *earned*, so principal is absent from it — the
+  // borrower handing back money they were lent is not income. `account` stays the account
+  // the cash landed in (the till, or the bank) so the account-history panels keep reading
+  // as before; `incomeAccount` is what the ledger credited, which is what the Income
+  // Report reports on.
+  const primaryAccount = parts.reduce((a, b) => (b.amount > a.amount ? b : a), parts[0])
+  const incomeRow = (amount, category, incomeType, code, glCode, description) => ({
+    category, incomeType, amount, code,
+    date, description,
+    account: primaryAccount.glCode,
+    incomeAccount: glCode,
+    source: `${description} via ${methodSummary}`,
+    customerCode: loan.customerCode, customerName: loan.customerName,
+    paymentMethod: methodSummary, currency, repaymentId, loanRef: loan.ref,
+  })
+  const newIncomes = [
+    ...(interest > 0.005 ? [incomeRow(interest, 'Repayment Income', 'Interest Income', `RP-${loan.ref}`, interestCode, `Interest collected on installment #${installmentNum}`)] : []),
+    ...(penalty > 0.005 ? [incomeRow(penalty, 'Late Penalty Fees', 'Penalty Income', `LF-${loan.ref}-${installmentNum}`, penaltyCode, `Late penalty on installment #${installmentNum}`)] : []),
+    ...(fee > 0.005 ? [incomeRow(fee, 'Loan Fee Income', 'Fee Income', `FE-${loan.ref}-${installmentNum}`, feeCode, `Fee collected with installment #${installmentNum}`)] : []),
+  ]
+
+  const entryMemo = `Loan repayment ${repaymentId} — ${loan.customerName || loan.ref} (${kind === 'remainder' ? `remaining balance of installment #${installmentNum}` : `installment #${installmentNum}`}, via ${methodSummary})${memo ? ` — ${memo}` : ''}`
+  const journalEntry = {
+    id: `rp-${repaymentId}`,
+    entryType: 'Loan Repayment',
+    date,
+    transactionNo: repaymentId,
+    trnRef: loan.ref,
+    repaymentId,
+    memo: entryMemo,
+    amount: total,
+    lines: [
+      ...parts.map(p => ({
+        accountCode: p.glCode, debit: p.amount, credit: 0,
+        memo: `${p.kind === 'Cash' ? 'Cash received' : 'Bank receipt'} — ${p.accountLabel}`,
+      })),
+      ...(principal > 0.005 ? [{ accountCode: AR_LOAN_CODE, debit: 0, credit: principal, memo: `Principal collected — installment #${installmentNum}` }] : []),
+      ...(interest > 0.005 ? [{ accountCode: interestCode, debit: 0, credit: interest, memo: `Interest income — installment #${installmentNum}` }] : []),
+      ...(penalty > 0.005 ? [{ accountCode: penaltyCode, debit: 0, credit: penalty, memo: `Penalty income — installment #${installmentNum}` }] : []),
+      ...(fee > 0.005 ? [{ accountCode: feeCode, debit: 0, credit: fee, memo: `Fee income — installment #${installmentNum}` }] : []),
+    ],
+    createdAt: new Date().toISOString(),
+  }
+
+  // Balances move exactly as the entry's lines say they do. Debit-normal accounts (the
+  // tills, the bank accounts) rise by what they were debited; the credit-normal income
+  // accounts rise by what they were credited, and the receivable — debit-normal — falls by
+  // the principal credited against it.
+  const movements = {}
+  const add = (code, delta) => { movements[code] = round2((movements[code] || 0) + delta) }
+  parts.forEach(p => add(p.glCode, p.amount))
+  add(AR_LOAN_CODE, -principal)
+  add(interestCode, interest)
+  add(penaltyCode, penalty)
+  add(feeCode, fee)
+
+  return { repayment, cashSheetLines, newIncomes, journalEntry, movements }
+}
 
 // The account an expense is funded from lives in one of two places: the chart of accounts by
 // GL code, or the legacy ACC-* sub-account list that older postings still name. Whichever
@@ -616,6 +965,7 @@ function reducer(state, action) {
       reportTab: 'listing',
       accountHistoryCode: null,
       cashTransferModalOpen: false,
+      cashCountModalOpen: false,
       transactionModalOpen: false,
       customerWizardOpen: false,
       previewCustomerCode: null,
@@ -896,13 +1246,140 @@ function reducer(state, action) {
         journalEntries: [disbursementJournalEntry, ...state.journalEntries],
       }
     }
+    // A loan judged uncollectable leaves the book. The receivable is removed against the
+    // allowance End of Month has been building for exactly this, and anything the allowance does
+    // not cover falls straight to provision expense — the shortfall is recognised, never absorbed
+    // by flooring the allowance at zero and losing it.
+    //
+    //   Dr  Loan loss allowance   (up to what is held)
+    //   Dr  Provision expense     (whatever is left)
+    //   Cr  Account receivable    (the principal still outstanding)
+    //
+    // Branching on the status transition, not the status: re-dispatching against a loan already
+    // written off must not remove the same receivable twice.
+    case 'WRITE_OFF_LOAN': {
+      const loan = state.loanApplications.find(l => l.ref === action.ref)
+      if (!loan || loan.status === WRITTEN_OFF_STATUS) return state
+      // Only a disbursed loan has a receivable to remove; anything earlier never opened one.
+      if (loan.status !== 'Active') return state
+
+      const round2 = n => Math.round((n || 0) * 100) / 100
+      const outstanding = round2(outstandingPrincipal(loan))
+      if (outstanding <= 0.005) return state
+
+      const currency = loan.currency || 'USD'
+      const allowanceCode = incomeCodeFor(LOAN_LOSS_ALLOWANCE_CODE, currency)
+      const expenseCode = incomeCodeFor(LOAN_LOSS_EXPENSE_CODE, currency)
+      const held = round2(state.chartOfAccounts.find(a => a.code === allowanceCode)?.balance || 0)
+      const fromAllowance = round2(Math.min(Math.max(held, 0), outstanding))
+      const fromExpense = round2(outstanding - fromAllowance)
+
+      const date = action.date || new Date().toISOString().split('T')[0]
+      const writtenOffLoan = {
+        ...loan,
+        status: WRITTEN_OFF_STATUS,
+        writeOffReason: action.reason || '',
+        writtenOffBy: action.by || state.currentRole,
+        writtenOffDate: date,
+        writtenOffAmount: outstanding,
+      }
+      const chartOfAccounts = applyGlMovements(state.chartOfAccounts, {
+        [allowanceCode]: -fromAllowance,
+        [expenseCode]: fromExpense,
+        [AR_LOAN_CODE]: -outstanding,
+      })
+      const entry = {
+        id: `wof-${loan.ref}`,
+        entryType: 'Loan Write-Off',
+        date,
+        transactionNo: loan.ref,
+        memo: `Written off — ${loan.ref} · ${loan.customerName}${action.reason ? ` · ${action.reason}` : ''}`,
+        amount: outstanding,
+        lines: [
+          ...(fromAllowance > 0.005
+            ? [{ accountCode: allowanceCode, debit: fromAllowance, credit: 0, memo: `Allowance applied — ${loan.ref}` }]
+            : []),
+          ...(fromExpense > 0.005
+            ? [{ accountCode: expenseCode, debit: fromExpense, credit: 0, memo: `Uncovered by allowance — ${loan.ref}` }]
+            : []),
+          { accountCode: AR_LOAN_CODE, debit: 0, credit: outstanding, memo: `Receivable written off — ${loan.ref}` },
+        ],
+        createdAt: new Date().toISOString(),
+      }
+      return {
+        ...state,
+        loanApplications: state.loanApplications.map(l => l.ref === loan.ref ? writtenOffLoan : l),
+        activeLoan: state.activeLoan?.ref === loan.ref ? writtenOffLoan : state.activeLoan,
+        chartOfAccounts,
+        journalEntries: [entry, ...state.journalEntries],
+      }
+    }
+
+    // Money that comes in after a loan was written off.
+    //
+    //   Dr  Cash float / bank account   (where it physically landed)
+    //   Cr  Recovery income             (5050/5051)
+    //
+    // It does not touch AR: that receivable was removed at write-off, and crediting it again
+    // would recreate an asset the institution has already said it does not expect to collect.
+    case 'RECORD_RECOVERY': {
+      const loan = state.loanApplications.find(l => l.ref === action.ref)
+      if (!loan || loan.status !== WRITTEN_OFF_STATUS) return state
+      const amount = Math.round((Number(action.amount) || 0) * 100) / 100
+      if (amount <= 0.005) return state
+
+      const currency = loan.currency || 'USD'
+      const landedCode = action.glCode || fundingGLCode(state.realBankAccounts, currency, loan.branch, CASH_GL_ROOT[currency] || CASH_GL_ROOT.USD)
+      if (!landedCode) return state
+      const recoveryCode = incomeCodeFor(RECOVERY_INCOME_CODE, currency)
+      const date = action.date || new Date().toISOString().split('T')[0]
+
+      const recovery = {
+        id: nextRecordId(state.recoveries, 'RCV'),
+        date,
+        loanRef: loan.ref,
+        customerCode: loan.customerCode,
+        customerName: loan.customerName,
+        currency,
+        branch: loan.branch || '',
+        amount,
+        method: action.method || 'Cash',
+        accountCode: landedCode,
+        memo: action.memo || '',
+        recordedBy: action.by || state.currentRole,
+        createdAt: new Date().toISOString(),
+      }
+      const chartOfAccounts = applyGlMovements(state.chartOfAccounts, {
+        [landedCode]: amount,
+        [recoveryCode]: amount,
+      })
+      const entry = {
+        id: `rcv-${recovery.id}`,
+        entryType: 'Write-Off Recovery',
+        date,
+        transactionNo: recovery.id,
+        memo: `Recovered on written-off loan ${loan.ref} · ${loan.customerName}`,
+        amount,
+        lines: [
+          { accountCode: landedCode, debit: amount, credit: 0, memo: `Recovery collected — ${loan.ref}` },
+          { accountCode: recoveryCode, debit: 0, credit: amount, memo: `Recovery income — ${loan.ref}` },
+        ],
+        createdAt: new Date().toISOString(),
+      }
+      return {
+        ...state,
+        recoveries: [recovery, ...(state.recoveries || [])],
+        chartOfAccounts,
+        journalEntries: [entry, ...state.journalEntries],
+      }
+    }
+
     case 'RECORD_REPAYMENT': {
       if (!state.activeLoan) return state
       const loan = state.activeLoan
       const idx = action.idx
       const row = loan.schedule[idx]
       const lateFee = row.lateFee || 0
-      const paymentMethod = action.paymentMethod || 'Cash'
       const paymentDate = action.date || new Date().toISOString().split('T')[0]
       const amt = action.amount != null ? action.amount : row.totalDue + lateFee
       const memo = action.memo || ''
@@ -923,13 +1400,25 @@ function reducer(state, action) {
         ? ` — received ${new Intl.NumberFormat('km-KH', { style: 'currency', currency: 'KHR', maximumFractionDigits: 0 }).format(Math.round(amt * exchangeRate))} cash @ ${exchangeRate} KHR/USD`
         : ''
 
+      // How the collection is allocated. Penalty and any fee collected are settled first and
+      // can never exceed what was actually handed over — a borrower paying $5 against a $20
+      // penalty has paid $5 of penalty, not $20 of it — so that principal + interest +
+      // penalty + fee always adds back up to the payment, whatever it covered.
+      const penaltyPaid = Math.round(Math.min(lateFee, amt) * 100) / 100
+      const enteredFeePaid = Math.round(Math.min(Math.max(action.fee || 0, 0), Math.max(amt - penaltyPaid, 0)) * 100) / 100
+      // A collection fee priced into the instalment is settled here too, alongside the penalty and
+      // any fee keyed in by hand — it is fee income, so it must not be left to fall through into
+      // the principal/interest split below, where it would pay down AR as though it were principal.
+      const scheduledCollectionFee = Math.round((row.collectionFee || 0) * 100) / 100
+      const collectionFeePaid = Math.round(
+        Math.min(scheduledCollectionFee, Math.max(amt - penaltyPaid - enteredFeePaid, 0)) * 100) / 100
+      const feePaid = Math.round((enteredFeePaid + collectionFeePaid) * 100) / 100
       // Principal actually retired this period may differ from what the original
       // schedule assumed (e.g. borrower could only afford the interest this month).
       // Interest is settled first; whatever is left over pays down principal.
       const balanceBefore = idx === 0 ? loan.amount : (loan.schedule[idx - 1].balance ?? loan.amount)
-      const installmentPayment = Math.max(amt - lateFee, 0)
+      const installmentPayment = Math.max(amt - penaltyPaid - feePaid, 0)
       const principalPaid = Math.min(Math.max(installmentPayment - row.interest, 0), balanceBefore)
-      const interestPaid = Math.round((installmentPayment - principalPaid) * 100) / 100
       const newBalance = Math.round((balanceBefore - principalPaid) * 100) / 100
       // What was collected is compared against the scheduled principal with both sides
       // rounded to the cent, and a residual of a cent or less counts as settled. Schedules
@@ -940,7 +1429,19 @@ function reducer(state, action) {
       const SETTLED_TOLERANCE = 0.015
       const scheduledPrincipal = Math.round((row.principal || 0) * 100) / 100
       const principalPaidRounded = Math.round(principalPaid * 100) / 100
+      // Taken off the rounded principal, not the raw one, so the four allocations add back
+      // up to the payment exactly — the journal entry below balances on that identity.
+      const interestPaid = Math.round((installmentPayment - principalPaidRounded) * 100) / 100
       const status = principalPaidRounded < scheduledPrincipal - SETTLED_TOLERANCE ? 'Partial' : 'Paid'
+
+      // Where the money came in. Refused outright — nothing is written — when an account
+      // can't be resolved or a split doesn't add up to what was collected; see
+      // resolvePaymentParts.
+      const parts = resolvePaymentParts(state, loan, Math.round(amt * 100) / 100, action)
+      if (!parts) return state
+      const paymentSummary = parts.length > 1
+        ? `Split (${parts.map(p => p.kind).join(' + ')})`
+        : parts[0].method
 
       // principalPaid/interestPaid capture what THIS payment actually covered (e.g. interest-only),
       // as distinct from row.principal/row.interest which is what the schedule originally called for —
@@ -948,8 +1449,8 @@ function reducer(state, action) {
       let schedule = loan.schedule.map((r, i) =>
         i === idx
           ? {
-              ...r, paid: amt, status, paidDate: paymentDate, paymentMethod, balance: newBalance, memo, bankName, receivedCurrency, exchangeRate,
-              principalPaid: principalPaidRounded, interestPaid, lateFeePaid: lateFee,
+              ...r, paid: amt, status, paidDate: paymentDate, paymentMethod: paymentSummary, balance: newBalance, memo, bankName, receivedCurrency, exchangeRate,
+              principalPaid: principalPaidRounded, interestPaid, lateFeePaid: penaltyPaid, feePaid,
               trxId, referenceNo, payerName, outlet, remark, toAccount, txnHash,
             }
           : r
@@ -978,75 +1479,36 @@ function reducer(state, action) {
             : r
         )
       }
-      const repaymentIncomeAmount = Math.max(amt - lateFee, 0)
-      // Cash physically lands in a real bank account the moment a repayment is
-      // recorded, so the income is posted against that account's linked GL code —
-      // not just the internal ACC-REPAYMENT bucket — so it shows up as Cash In and
-      // in that bank's transaction history right away. Routed by the loan's own branch
-      // — see fundingGLCode — and refused outright if that branch has no usable account.
-      const fundingBankGL = fundingGLCode(state.realBankAccounts, loan.currency, loan.branch, 'ACC-REPAYMENT')
-      if (!fundingBankGL) return state
-      const newIncomes = [
-        {
-          category:'Repayment Income', amount: repaymentIncomeAmount, code:`RP-${state.activeLoan.ref}`,
-          date: paymentDate, description: memo, account: fundingBankGL, source:`Borrower loan repayment via ${paymentMethod}${exchangeNote}`,
-          customerCode: state.activeLoan.customerCode, customerName: state.activeLoan.customerName, paymentMethod,
+      // The payment side (which till or bank account took the money) and the allocation
+      // side (what it settled) are posted together — see buildRepaymentPosting.
+      const posting = buildRepaymentPosting(state, {
+        loan,
+        parts,
+        allocation: {
+          principal: principalPaidRounded,
+          interest: interestPaid,
+          penalty: penaltyPaid,
+          fee: feePaid,
         },
-        ...(lateFee > 0 ? [{
-          category:'Late Penalty Fees', amount: lateFee, code:`LF-${state.activeLoan.ref}-${row.num}`,
-          date: paymentDate, description:`Late fee — installment #${row.num}`, account: fundingBankGL, source:'Overdue borrower penalty',
-          customerCode: state.activeLoan.customerCode, customerName: state.activeLoan.customerName, paymentMethod,
-        }] : []),
-      ]
-      const accounts = state.accounts.map(a => a.code === 'ACC-REPAYMENT' ? { ...a, balance: (a.balance || 0) + amt } : a)
-      // Chart of Accounts' Repayment Account (5010) tracks total repayments received
-      // internally, and the funding bank's own GL is credited too so its balance/history
-      // reflect the money in — both update immediately, same as disbursement (6010).
-      // Only the principal portion comes off Account Receivable — interest and late fees
-      // are income the borrower never owed as principal, so they leave the receivable
-      // untouched and land in 5010 with the rest of the payment.
-      const principalRetired = Math.round(principalPaid * 100) / 100
-      // 5010 takes the income half of the payment only. It used to take the gross amount
-      // while Account Receivable was *also* credited the principal, which made every
-      // repayment entry's credits exceed its debits by exactly that principal — the payment
-      // was being recognised twice, once as income and once as principal recovered. The
-      // bank still receives the full amount; that is the one real cash movement.
-      const repaymentIncomeGl = Math.round((amt - principalRetired) * 100) / 100
-      const chartOfAccounts = applyGlMovements(
-        state.chartOfAccounts.map(a => {
-          if (a.code === '5010') return { ...a, balance: (a.balance || 0) + repaymentIncomeGl }
-          if (a.code === fundingBankGL) return { ...a, balance: (a.balance || 0) + amt }
-          return a
-        }),
-        { [AR_LOAN_CODE]: -principalRetired }
-      )
-      const repaymentMemo = `Loan repayment — ${state.activeLoan.customerName || state.activeLoan.ref} (installment #${row.num}, via ${paymentMethod})${exchangeNote}${memo ? ` — ${memo}` : ''}`
-      const repaymentJournalEntry = {
-        id: `rp-${state.activeLoan.ref}-${row.num}-${Date.now()}`,
-        entryType: 'Loan Repayment',
         date: paymentDate,
-        transactionNo: `RP-${state.activeLoan.ref}`,
-        memo: repaymentMemo,
-        amount: amt,
-        lines: [
-          ...(repaymentIncomeGl > 0.005
-            ? [{ accountCode: '5010', debit: 0, credit: repaymentIncomeGl, memo: repaymentMemo }]
-            : []),
-          { accountCode: fundingBankGL, debit: amt, credit: 0, memo: repaymentMemo },
-          ...(principalRetired > 0.005
-            ? [{ accountCode: AR_LOAN_CODE, debit: 0, credit: principalRetired, memo: `Principal collected — installment #${row.num}` }]
-            : []),
-        ],
-        createdAt: new Date().toISOString(),
-      }
+        memo: `${memo}${exchangeNote}`.trim(),
+        installmentNum: row.num,
+        kind: 'installment',
+        receipt: { bankName, receivedCurrency, exchangeRate, trxId, referenceNo, payerName, outlet, remark, toAccount, txnHash },
+      })
+      // ACC-REPAYMENT is the legacy operational bucket mirroring what has been collected in
+      // total; it is not part of the double entry above and takes the gross payment as before.
+      const accounts = state.accounts.map(a => a.code === 'ACC-REPAYMENT' ? { ...a, balance: (a.balance || 0) + amt } : a)
       return {
         ...state,
         activeLoan: { ...state.activeLoan, schedule },
         loanApplications: state.loanApplications.map(a => a.ref === state.activeLoan.ref ? { ...a, schedule } : a),
-        incomes: [...newIncomes, ...state.incomes],
+        repayments: [posting.repayment, ...state.repayments],
+        cashSheet: [...posting.cashSheetLines, ...state.cashSheet],
+        incomes: [...posting.newIncomes, ...state.incomes],
         accounts,
-        chartOfAccounts,
-        journalEntries: [repaymentJournalEntry, ...state.journalEntries],
+        chartOfAccounts: applyGlMovements(state.chartOfAccounts, posting.movements),
+        journalEntries: [posting.journalEntry, ...state.journalEntries],
       }
     }
     // Settles the principal remainder an underpaid installment left behind (e.g.
@@ -1059,7 +1521,6 @@ function reducer(state, action) {
       const loan = state.activeLoan
       const idx = action.idx
       const row = loan.schedule[idx]
-      const paymentMethod = action.paymentMethod || 'Cash'
       const paymentDate = action.date || new Date().toISOString().split('T')[0]
       const memo = action.memo || ''
       const bankName = action.bankName || ''
@@ -1079,7 +1540,14 @@ function reducer(state, action) {
 
       const outstanding = Math.round(((row.principal || 0) - (row.principalPaid || 0)) * 100) / 100
       if (outstanding <= 0.005) return state
-      const amt = Math.min(action.amount != null ? action.amount : outstanding, outstanding)
+      const amt = Math.round(Math.min(action.amount != null ? action.amount : outstanding, outstanding) * 100) / 100
+      // Where the money came in, same as an installment collection — refused outright if it
+      // can't be resolved or a split doesn't add up. See resolvePaymentParts.
+      const parts = resolvePaymentParts(state, loan, amt, action)
+      if (!parts) return state
+      const paymentSummary = parts.length > 1
+        ? `Split (${parts.map(p => p.kind).join(' + ')})`
+        : parts[0].method
       const balanceBefore = idx === 0 ? loan.amount : (loan.schedule[idx - 1].balance ?? loan.amount)
       const newPrincipalPaid = Math.round(((row.principalPaid || 0) + amt) * 100) / 100
       const newBalance = Math.round((balanceBefore - newPrincipalPaid) * 100) / 100
@@ -1093,7 +1561,7 @@ function reducer(state, action) {
               principalPaid: newPrincipalPaid,
               remainderPaid: Math.round(((r.remainderPaid || 0) + amt) * 100) / 100,
               remainderPaidDate: paymentDate,
-              remainderPaymentMethod: paymentMethod,
+              remainderPaymentMethod: paymentSummary,
               remainderMemo: memo,
               remainderBankName: bankName,
               remainderReceivedCurrency: receivedCurrency,
@@ -1124,50 +1592,30 @@ function reducer(state, action) {
         )
       }
 
-      // Routed by the loan's own branch — see fundingGLCode — and refused outright if
-      // that branch has no usable account.
-      const fundingBankGL = fundingGLCode(state.realBankAccounts, loan.currency, loan.branch, 'ACC-REPAYMENT')
-      if (!fundingBankGL) return state
-      const newIncomes = [{
-        category: 'Repayment Income', amount: amt, code: `RP-${loan.ref}`,
-        date: paymentDate, description: memo, account: fundingBankGL,
-        source: `Borrower principal remainder for installment #${row.num} via ${paymentMethod}${exchangeNote}`,
-        customerCode: loan.customerCode, customerName: loan.customerName, paymentMethod,
-      }]
-      const accounts = state.accounts.map(a => a.code === 'ACC-REPAYMENT' ? { ...a, balance: (a.balance || 0) + amt } : a)
-      // A remainder payment is principal and nothing else, so the whole amount comes
-      // off Account Receivable — and none of it is income. 5010 is deliberately left alone
-      // here: crediting it the gross amount alongside the full receivable credit was what
-      // made these entries carry twice the credit of their debit.
-      const chartOfAccounts = applyGlMovements(
-        state.chartOfAccounts.map(a => {
-          if (a.code === fundingBankGL) return { ...a, balance: (a.balance || 0) + amt }
-          return a
-        }),
-        { [AR_LOAN_CODE]: -amt }
-      )
-      const remainderMemo = `Loan repayment — ${loan.customerName || loan.ref} (remaining balance of installment #${row.num}, via ${paymentMethod})${exchangeNote}${memo ? ` — ${memo}` : ''}`
-      const remainderJournalEntry = {
-        id: `rpr-${loan.ref}-${row.num}-${Date.now()}`,
-        entryType: 'Loan Repayment',
+      // A remainder payment is principal and nothing else, so the whole amount comes off
+      // Account Receivable and none of it is recognised as income — allocating it to an
+      // income account would recognise money the borrower is handing back, not earning us.
+      const posting = buildRepaymentPosting(state, {
+        loan,
+        parts,
+        allocation: { principal: amt, interest: 0, penalty: 0, fee: 0 },
         date: paymentDate,
-        transactionNo: `RP-${loan.ref}`,
-        memo: remainderMemo,
-        amount: amt,
-        lines: [
-          { accountCode: fundingBankGL, debit: amt, credit: 0, memo: remainderMemo },
-          { accountCode: AR_LOAN_CODE, debit: 0, credit: amt, memo: `Principal remainder collected — installment #${row.num}` },
-        ],
-        createdAt: new Date().toISOString(),
-      }
+        memo: `${memo}${exchangeNote}`.trim(),
+        installmentNum: row.num,
+        kind: 'remainder',
+        receipt: { bankName, receivedCurrency, exchangeRate, trxId, referenceNo, payerName, outlet, remark, toAccount, txnHash },
+      })
+      const accounts = state.accounts.map(a => a.code === 'ACC-REPAYMENT' ? { ...a, balance: (a.balance || 0) + amt } : a)
       return {
         ...state,
         activeLoan: { ...state.activeLoan, schedule },
         loanApplications: state.loanApplications.map(a => a.ref === state.activeLoan.ref ? { ...a, schedule } : a),
-        incomes: [...newIncomes, ...state.incomes],
+        repayments: [posting.repayment, ...state.repayments],
+        cashSheet: [...posting.cashSheetLines, ...state.cashSheet],
+        incomes: [...posting.newIncomes, ...state.incomes],
         accounts,
-        chartOfAccounts,
-        journalEntries: [remainderJournalEntry, ...state.journalEntries],
+        chartOfAccounts: applyGlMovements(state.chartOfAccounts, posting.movements),
+        journalEntries: [posting.journalEntry, ...state.journalEntries],
       }
     }
     // ─── restructuring an active loan ────────────────────────────────────
@@ -1492,6 +1940,31 @@ function reducer(state, action) {
       )
       return { ...state, expenses, accounts, chartOfAccounts }
     }
+    // The other answer to a posting awaiting approval. Deliberately moves no money and touches
+    // no account: rejecting is a decision not to pay, so there is nothing to post — the
+    // commitment simply never becomes a payment. Only the status and the reason change.
+    //
+    // Guarded against re-rejecting and against overturning an approval: once funds have been
+    // released, marking the posting rejected would leave the money gone with the record saying
+    // it never went. Reversing a payment is a fresh entry, not an edit of this one.
+    case 'REJECT_EXPENSE': {
+      const exp = state.expenses.find(e => e.code === action.code)
+      if (!exp || exp.status === 'Approved' || exp.status === 'Rejected') return state
+      return {
+        ...state,
+        expenses: state.expenses.map(e => e.code === action.code
+          ? {
+              ...e,
+              status: 'Rejected',
+              // Why is required by the UI that dispatches this — a rejection nobody explained
+              // leaves whoever raised the run with nothing to correct.
+              rejectionReason: action.reason || '',
+              rejectedBy: action.by || state.currentRole,
+              rejectedDate: new Date().toISOString().split('T')[0],
+            }
+          : e),
+      }
+    }
     // The Income / Expense tabs record entries through the same modal, so it needs an
     // opener that carries which of the two is being recorded.
     case 'OPEN_TRANSACTION_MODAL': return {
@@ -1518,6 +1991,21 @@ function reducer(state, action) {
     }
     case 'OPEN_CASH_TRANSFER_MODAL': return { ...state, cashTransferModalOpen: true }
     case 'CLOSE_CASH_TRANSFER_MODAL': return { ...state, cashTransferModalOpen: false }
+
+    case 'OPEN_CASH_COUNT_MODAL': return { ...state, cashCountModalOpen: true }
+    case 'CLOSE_CASH_COUNT_MODAL': return { ...state, cashCountModalOpen: false }
+    // A count is a statement of what was physically in the drawer against what the books say
+    // should be. It deliberately posts nothing: a drawer that is short is an incident to
+    // investigate, and writing the difference into the ledger would erase the evidence of it.
+    // Correcting the cash itself is a cash transfer or an expense, entered on its own.
+    case 'ADD_CASH_COUNT': {
+      if (!action.count) return state
+      return {
+        ...state,
+        cashCounts: [{ ...action.count, id: nextRecordId(state.cashCounts, 'CC') }, ...state.cashCounts],
+        cashCountModalOpen: false,
+      }
+    }
 
     case 'OPEN_ACCOUNT_HISTORY': return { ...state, accountHistoryCode: action.code, accountHistoryCurrency: action.currency || null }
     case 'CLOSE_ACCOUNT_HISTORY': return { ...state, accountHistoryCode: null, accountHistoryCurrency: null }
@@ -1936,6 +2424,10 @@ export function AppProvider({ children }) {
         expenses: state.expenses,
         notifications: state.notifications,
         cashTransfers: state.cashTransfers,
+        repayments: state.repayments,
+        cashSheet: state.cashSheet,
+        cashCounts: state.cashCounts,
+        recoveries: state.recoveries,
         accounts: state.accounts,
         feeSettings: state.feeSettings,
         loanProducts: state.loanProducts,
@@ -1961,7 +2453,7 @@ export function AppProvider({ children }) {
         demoSeeded: state.demoSeeded,
       }))
     } catch {}
-  }, [state.customerVisibleColumns, state.loanVisibleColumns, state.payrollColumns, state.bankGroupLabels, state.accountingColumns, state.reportColumns, state.systemUsers, state.auditLogs, state.integrations, state.payrollRuns, state.customers, state.loanApplications, state.incomes, state.expenses, state.notifications, state.cashTransfers, state.accounts, state.feeSettings, state.loanProducts, state.activeStatement, state.chartOfAccounts, state.realBankAccounts, state.journalEntries, state.companyProfile, state.employees, state.businessDay, state.batchRuns, state.customGeo, state.demoSeeded])
+  }, [state.customerVisibleColumns, state.loanVisibleColumns, state.payrollColumns, state.bankGroupLabels, state.accountingColumns, state.reportColumns, state.systemUsers, state.auditLogs, state.integrations, state.payrollRuns, state.customers, state.loanApplications, state.incomes, state.expenses, state.notifications, state.cashTransfers, state.repayments, state.cashSheet, state.cashCounts, state.recoveries, state.accounts, state.feeSettings, state.loanProducts, state.activeStatement, state.chartOfAccounts, state.realBankAccounts, state.journalEntries, state.companyProfile, state.employees, state.businessDay, state.batchRuns, state.customGeo, state.demoSeeded])
 
   // Dark mode
   useEffect(() => {
