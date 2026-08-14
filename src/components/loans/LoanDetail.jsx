@@ -3,10 +3,11 @@ import jsPDF from 'jspdf'
 import html2canvas from 'html2canvas'
 import { X, Pencil, User, Building, CreditCard, TrendingUp, DollarSign, FileText, Calculator, Briefcase, Wallet, Trash2, Scale, ShieldAlert, Send, Check, Calendar, LayoutDashboard, History, Plus, ArrowDownLeft, Eye, Printer, Download, Upload, PiggyBank } from 'lucide-react'
 import { useApp } from '../../context/AppContext'
-import { formatVal, buildAmortizationData, formatAddress, getProductMaxAmount, splitTimestamp, formatFileSize, formatDateDisplay } from '../../utils/format'
+import { formatVal, num2, formatKhDMY, buildAmortizationData, formatAddress, getProductMaxAmount, splitTimestamp, formatFileSize, formatDateDisplay } from '../../utils/format'
 import StatusBadge from '../shared/StatusBadge'
 import { downloadSheetPdf } from '../../utils/exportPdf'
 import { companyLogoSrc } from '../../utils/companyLogo'
+import { benefitCustomFeeItems, chargedCollectionRate, collectionFeeSchedule, installmentTotal, scheduleTotals, isCollectionFee, loanCustomFeeItems, selectedBuiltInFeeKeys } from '../../utils/benefitFees'
 import { InfoRow, InfoCard } from '../shared/InfoCard'
 import { KH_PROVINCES, getDistricts, getCommunes } from '../../data/geoData'
 import { EMPTY_ADDRESS, OCCUPATIONS, RELATIONS, IDENTITY_DOC_TYPES, REGISTRATION_STATUSES, LAND_TITLE_TYPES, LAND_USE_TYPES, HOUSE_TYPES, CONSTRUCTION_TYPES, ENCUMBRANCE_STATUSES, getCollateralDocTypes, BRANCHES } from '../../data/constants'
@@ -326,11 +327,15 @@ export default function LoanDetail() {
 
   const currency = loan.currency || state.currency
 
+  // The rate the instalment is priced at when a collection fee is charged the annuity way, so a
+  // freshly built schedule quotes the same level payment a saved one does.
+  const scheduleCollectionRate = chargedCollectionRate(loan, state.feeSettings || {})
+
   // Use existing schedule or compute one
   const schedule = loan.schedule && loan.schedule.length > 0
     ? loan.schedule
     : (loan.amount && loan.interestRate
-        ? buildAmortizationData(loan.amount, loan.interestRate, loan.installments || 12, loan.firstInstallment).rows
+        ? buildAmortizationData(loan.amount, loan.interestRate, loan.installments || 12, loan.firstInstallment, scheduleCollectionRate, loan.disbursementDate, currency).rows
         : [])
 
   const emi = loan.emi || (schedule.length > 0 ? schedule[0].totalDue : 0)
@@ -340,13 +345,9 @@ export default function LoanDetail() {
 
   // Benefit to the Bank: every fee is auto-calculated, never manually entered.
   // Interest fee comes from the loan's own schedule; the rest are rates configured in System Settings.
-  // Which fees apply depends on the loan product: Personal Loan only carries interest + admin;
-  // vehicle loans (Vehicle Loan) swap the generic ministry fee for the transport-ministry fee and drop the lawyer fee;
-  // every other product shows the full fee set.
+  // Which fees apply is the officer's choice in the Benefit Rate panel below; the loan product
+  // only supplies the default ticks (see productDefaultFeeKeys in utils/benefitFees).
   const feeSettings = state.feeSettings || {}
-  const productLower = (loan.product || '').toLowerCase()
-  const isPersonalLoan = productLower.includes('personal')
-  const isVehicleLoan = productLower.includes('car') || productLower.includes('vehicle')
 
   // Lawyer and ministry fees are per land title registered as collateral — each additional
   // land parcel needs its own legal/ministry filing, so the fee scales with the land count.
@@ -379,46 +380,48 @@ export default function LoanDetail() {
   const configurableFeeItems = [adminFee, insuranceFee, lawyerFee, ministryFee, transportMinistryFee]
     .filter(b => !removedFeeKeys.includes(b.rateKey))
 
-  // Default ticks for a loan that hasn't been customised yet — the fees that classically apply to
-  // its product. Once the officer saves a selection it's stored on the loan (loan.benefitFeeKeys).
-  const productDefaultFeeKeys = isPersonalLoan
-    ? ['adminFeeRate']
-    : isVehicleLoan
-    ? ['adminFeeRate', 'insuranceFeeRate', 'transportMinistryFeeRate']
-    : ['adminFeeRate', 'insuranceFeeRate', 'lawyerFeeRate', 'ministryFeeRate']
-  const selectedFeeKeys = Array.isArray(loan.benefitFeeKeys) ? loan.benefitFeeKeys : productDefaultFeeKeys
+  // The officer's ticks once they've saved a selection; until then the fees that classically apply
+  // to the product. Shared with the Loan Preview / Overview screens so all three print one answer.
+  const selectedFeeKeys = selectedBuiltInFeeKeys(loan)
 
   // Skip any custom fee that duplicates a built-in category (e.g. someone adding "Ministry of
   // Public Works and Transport" as a custom fee on top of the built-in one)
   const baseFeeCategories = new Set([interestFee, ...configurableFeeItems].map(b => b.category.toLowerCase()))
-  const customFees = (feeSettings.customFees || [])
-    .filter(f => !baseFeeCategories.has((f.name || '').toLowerCase()))
-    .map(f => ({
-      category: f.name,
-      amount: (loan.amount || 0) * ((f.rate || 0) / 100),
-    }))
+  // Institution-wide custom fees (Loan Setting → Benefit Fees). Each gets a synthetic rate key so
+  // the per-loan Benefit Rate panel can untick or re-rate it exactly like a built-in fee. Unlike
+  // the built-ins these are tracked by *exclusion*: a loan saved before they were tickable carries
+  // no record of them, and must keep charging them rather than silently dropping the fee.
+  const excludedFeeKeys = loan.excludedBenefitFeeKeys || []
+  const customFeeItems = loanCustomFeeItems(loan, feeSettings, baseFeeCategories, schedule)
 
-  // Per-loan custom fees added by the credit officer in the Benefit Rate panel. Like the built-in
-  // fees, each carries a tick — only ticked ones show as Benefit cards.
-  const loanCustomFees = (loan.customBenefitFees || [])
-    .filter(f => (f.name || '').trim() && f.included !== false)
-    .map(f => ({
-      category: f.name,
-      rate: f.rate || 0,
-      amount: (loan.amount || 0) * ((f.rate || 0) / 100),
-    }))
+  // The custom fees this loan carries: the institution's, minus the ones unticked here, plus the
+  // officer's own from the Benefit Rate panel — one card per fee name, never two.
+  const customFees = benefitCustomFeeItems(loan, feeSettings, baseFeeCategories, schedule)
+  // The collection fee is charged like interest — an annual rate accruing per installment on the
+  // principal still outstanding — so each candidate term carries its own collection-fee column in
+  // the schedule sheet, worked out over that term's amortisation. See utils/benefitFees.
+  const collectionFee = customFees.find(f => isCollectionFee(f.category))
+  const collectionFeeRate = collectionFee?.rate || 0
 
   // Benefit cards: interest always counts; the ticked configurable fees; plus any custom fees.
   const benefitItems = [
     interestFee,
     ...configurableFeeItems.filter(b => selectedFeeKeys.includes(b.rateKey)),
     ...customFees,
-    ...loanCustomFees,
   ]
   const totalBenefitToBank = benefitItems.reduce((sum, b) => sum + b.amount, 0)
 
-  // The Benefit Rate panel lists every configurable fee (checkbox + editable rate), regardless of product.
-  const relevantFeeRateFields = configurableFeeItems.map(b => ({ key: b.rateKey, label: b.category, rate: b.rate, multiplier: b.multiplier }))
+  // The Benefit Rate panel lists every configurable fee (checkbox + editable rate), regardless of
+  // product — the built-ins first, then the institution's own custom fees.
+  const relevantFeeRateFields = [...configurableFeeItems, ...customFeeItems]
+    .map(b => ({ key: b.rateKey, label: b.category, rate: b.rate, multiplier: b.multiplier }))
+  // What the panel opens with: the ticked built-ins plus every institution fee this loan isn't
+  // excluding. Only the institution fees carry a rate key — the officer's own custom fees are
+  // edited in the list below the checkboxes, not ticked here.
+  const tickedFeeKeys = [
+    ...selectedFeeKeys,
+    ...customFeeItems.filter(f => !excludedFeeKeys.includes(f.rateKey)).map(f => f.rateKey),
+  ]
 
   // Two figures, deliberately: `declared` is what the parties stated, `assessable` is that
   // capped by what their bank statements actually demonstrate — see utils/statementIncome.
@@ -449,7 +452,7 @@ export default function LoanDetail() {
     : INSTALLMENT_OPTIONS
   const termOptions = (loan.amount && loan.interestRate)
     ? termChoices.map(term => {
-        const { emi: termEmi, rows: termRows } = buildAmortizationData(loan.amount, loan.interestRate, term, loan.firstInstallment)
+        const { emi: termEmi, rows: termRows } = buildAmortizationData(loan.amount, loan.interestRate, term, loan.firstInstallment, scheduleCollectionRate, loan.disbursementDate, currency)
         const totalInterest = termRows.reduce((sum, r) => sum + (r.interest || 0), 0)
         const leftAmount = availableForRepayment - termEmi
         return { term, emi: termEmi, totalInterest, leftAmount, affordable: leftAmount >= 0, rows: termRows }
@@ -512,7 +515,7 @@ export default function LoanDetail() {
   // so tweaking rates here doesn't get tangled up with amount/term/officer edits.
   const [assessmentRateForm, setAssessmentRateForm] = useState({ interestRate: loan.interestRate?.toString() || '', installments: loan.installments?.toString() || '' })
   const [editingAssessmentRate, setEditingAssessmentRate] = useState(false)
-  const [benefitFeeForm, setBenefitFeeForm] = useState(selectedFeeKeys)
+  const [benefitFeeForm, setBenefitFeeForm] = useState(tickedFeeKeys)
   // Editable rate per configurable fee, seeded from the loan's effective rates.
   const [benefitRateForm, setBenefitRateForm] = useState(
     () => Object.fromEntries(relevantFeeRateFields.map(f => [f.key, f.rate.toString()]))
@@ -523,6 +526,8 @@ export default function LoanDetail() {
   )
   const [editingBenefitRate, setEditingBenefitRate] = useState(false)
   const [scheduleModalTerm, setScheduleModalTerm] = useState(null)
+  // The open term option's collection-fee column, accrued over that term's own rows.
+  const termCollectionFeeRows = collectionFeeSchedule(scheduleModalTerm?.rows, collectionFeeRate, collectionFee?.method, loan.amount || 0)
   // The term option's schedule sheet, for exporting it as a PDF / printing it on its own.
   const scheduleSheetRef = useRef(null)
   const [scheduleDownloading, setScheduleDownloading] = useState(false)
@@ -692,7 +697,7 @@ export default function LoanDetail() {
     if (!rate || rate <= 0) { showToast('Please enter a valid interest rate', 'error'); return }
     if (!term || term <= 0) { showToast('Please enter a valid number of installments', 'error'); return }
 
-    const { emi: newEmi, rows } = buildAmortizationData(amt, rate, term, loan.firstInstallment)
+    const { emi: newEmi, rows } = buildAmortizationData(amt, rate, term, loan.firstInstallment, scheduleCollectionRate, loan.disbursementDate, currency)
     const updatedLoan = {
       ...loan,
       product: loanInfoForm.product,
@@ -713,7 +718,7 @@ export default function LoanDetail() {
   }
 
   function handleApplyTerm(term) {
-    const { emi: newEmi, rows } = buildAmortizationData(loan.amount, loan.interestRate, term, loan.firstInstallment)
+    const { emi: newEmi, rows } = buildAmortizationData(loan.amount, loan.interestRate, term, loan.firstInstallment, scheduleCollectionRate, loan.disbursementDate, currency)
     const updatedLoan = {
       ...loan,
       installments: term,
@@ -731,7 +736,7 @@ export default function LoanDetail() {
     if (!rate || rate <= 0) { showToast('Please enter a valid interest rate', 'error'); return }
     const term = parseInt(assessmentRateForm.installments, 10)
     if (!term || term <= 0) { showToast('Please select a valid installment term', 'error'); return }
-    const { emi: newEmi, rows } = buildAmortizationData(loan.amount, rate, term, loan.firstInstallment)
+    const { emi: newEmi, rows } = buildAmortizationData(loan.amount, rate, term, loan.firstInstallment, scheduleCollectionRate, loan.disbursementDate, currency)
     const updatedLoan = { ...loan, interestRate: rate, installments: term, termSelected: true, emi: newEmi, schedule: mergeSchedule(rows, loan.schedule) }
     dispatch({ type: 'UPDATE_LOAN', loan: updatedLoan })
     logActivity('Loan Suggestion', 'Interest rate and term changed', `${rate}% p.a. · ${term} months`)
@@ -746,13 +751,17 @@ export default function LoanDetail() {
     const rates = Object.fromEntries(
       relevantFeeRateFields.map(f => [f.key, Math.max(0, parseFloat(benefitRateForm[f.key]) || 0)])
     )
+    // Built-in fees are stored as the ones that apply; institution-wide custom fees as the ones
+    // that don't, so an untouched loan keeps charging whatever the institution has configured.
+    const builtInKeys = ordered.filter(k => !customFeeItems.some(f => f.rateKey === k))
+    const excluded = customFeeItems.map(f => f.rateKey).filter(k => !benefitFeeForm.includes(k))
     // Keep only named custom fees, clamping rates to >= 0.
     const custom = benefitCustomFeesForm
       .filter(f => f.name.trim())
       .map(f => ({ name: f.name.trim(), rate: Math.max(0, parseFloat(f.rate) || 0), included: f.included !== false }))
-    dispatch({ type: 'UPDATE_LOAN', loan: { ...loan, benefitFeeKeys: ordered, benefitFeeRates: rates, customBenefitFees: custom } })
+    dispatch({ type: 'UPDATE_LOAN', loan: { ...loan, benefitFeeKeys: builtInKeys, excludedBenefitFeeKeys: excluded, benefitFeeRates: rates, customBenefitFees: custom } })
     logActivity('Loan Suggestion', 'Benefit fees updated',
-      `${ordered.length} built-in fee${ordered.length === 1 ? '' : 's'} applied, ${custom.length} custom`)
+      `${builtInKeys.length} built-in fee${builtInKeys.length === 1 ? '' : 's'} applied, ${custom.length} custom`)
     showToast('Benefit fees updated', 'success')
     setEditingBenefitRate(false)
   }
@@ -763,7 +772,7 @@ export default function LoanDetail() {
   }
 
   function handleCancelBenefitRates() {
-    setBenefitFeeForm(selectedFeeKeys)
+    setBenefitFeeForm(tickedFeeKeys)
     setBenefitRateForm(Object.fromEntries(relevantFeeRateFields.map(f => [f.key, f.rate.toString()])))
     setBenefitCustomFeesForm((loan.customBenefitFees || []).map(f => ({ name: f.name || '', rate: (f.rate ?? '').toString(), included: f.included !== false })))
     setEditingBenefitRate(false)
@@ -2912,19 +2921,21 @@ export default function LoanDetail() {
           <div className="p-4 sm:p-6 overflow-y-auto flex-1">
             <div
               ref={scheduleSheetRef}
-              className="printable-area bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl p-6 mx-auto w-full max-w-[210mm] shadow-sm"
+              className="printable-area schedule-sheet bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl p-6 mx-auto w-full max-w-[210mm] shadow-sm"
               style={{ fontFamily: "'Kantumruy Pro', 'Outfit', sans-serif" }}
             >
-              {/* Header */}
-              <div className="flex items-center gap-3">
-                <img src={companyLogoSrc(state.companyProfile)} alt={state.companyProfile.name} className="w-14 h-14 object-contain flex-shrink-0" />
-                <div className="flex-1 text-center">
+              {/* Header. Carries doc-letterhead / letterhead-name / doc-logo so the print rules
+                  size the company name as a heading — without them the generic `> .flex p` rule
+                  shrinks both lines to 9px. This is the sheet a Pending Approval loan prints. */}
+              <div className="doc-letterhead flex items-center gap-3">
+                <img src={companyLogoSrc(state.companyProfile)} alt={state.companyProfile.name} className="doc-logo w-14 h-14 object-contain flex-shrink-0" />
+                <div className="letterhead-name flex-1 text-center">
                   <p className="text-lg font-bold text-slate-800 dark:text-slate-100">{state.companyProfile.nameKh}</p>
                   <p className="text-sm font-bold tracking-wide text-slate-700 dark:text-slate-200">{state.companyProfile.name.toUpperCase()}</p>
                 </div>
                 <div className="w-14 h-14 flex-shrink-0" aria-hidden="true" />
               </div>
-              <p className="text-center text-base font-bold text-slate-800 dark:text-slate-100 mt-1 mb-5">តារាងកាលវិភាគសងប្រាក់</p>
+              <p className="doc-title text-center text-base font-bold text-slate-800 dark:text-slate-100 mt-1 mb-5">តារាងកាលវិភាគសងប្រាក់</p>
 
               {/* Borrower / loan info */}
               <div className="flex flex-col sm:flex-row gap-x-8 gap-y-1.5 text-xs mb-3">
@@ -2939,7 +2950,7 @@ export default function LoanDetail() {
                 <div className="space-y-1.5 flex-1">
                   <ScheduleField label="ទំហំកម្ចី (Amount)" value={`${currency} ${(loan.amount || 0).toFixed(2)}`} />
                   <ScheduleField label="ថ្ងៃបើកប្រាក់ (Disb Date)" value={formatDMY(loan.disbursementDate)} />
-                  <ScheduleField label="អត្រា (Rate)" value={`${loan.interestRate}% p.a.`} />
+                  <ScheduleField label="អត្រា (Rate)" value={`${loan.interestRate}% per year · ${((Number(loan.interestRate) || 0) / 12).toFixed(2)}% per month`} />
                   <ScheduleField label="រយៈពេល (Period)" value={`${scheduleModalTerm.term} ${loan.repaymentType || 'Monthly'}`} />
                   <ScheduleField label="ជុំទី (Loan Seq)" value={loan.loanCycle === '1' ? 'New' : `Renewal (Cycle ${loan.loanCycle})`} />
                   <ScheduleField label="សេវា (Admin Fee)" value="0.00 % = 0.00" />
@@ -2956,31 +2967,46 @@ export default function LoanDetail() {
               <table className="w-full text-[11px] border-separate border-spacing-0 border-t border-l border-slate-300 dark:border-slate-600">
                 <thead>
                   <tr>
-                    <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-slate-700 dark:text-slate-200">លេខ<br />No</th>
-                    <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-slate-700 dark:text-slate-200">ថ្ងៃបង់ប្រាក់<br />Repayment Date</th>
-                    <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-slate-700 dark:text-slate-200">ប្រាក់ដើម<br />Principle</th>
-                    <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-slate-700 dark:text-slate-200">ការប្រាក់<br />Interest</th>
-                    <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-slate-700 dark:text-slate-200">សេវាមូល<br />Col Fee</th>
-                    <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-slate-700 dark:text-slate-200">សរុប<br />Total</th>
-                    <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-slate-700 dark:text-slate-200">ប្រាក់ដើមនៅសល់<br />Balance</th>
-                    <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-slate-700 dark:text-slate-200">ប្រាក់ផាកពិន័យ<br />Penalty Payoff</th>
+                    <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-[#0047ab] dark:text-blue-400">លេខ<br />No</th>
+                    <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-[#0047ab] dark:text-blue-400">ថ្ងៃបង់ប្រាក់<br />Repayment Date</th>
+                    <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-[#0047ab] dark:text-blue-400">ប្រាក់ដើម<br />Principle</th>
+                    <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-[#0047ab] dark:text-blue-400">ការប្រាក់<br />Interest</th>
+                    <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-[#0047ab] dark:text-blue-400">សេវាមូល<br />Col Fee</th>
+                    <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-[#0047ab] dark:text-blue-400">សរុប<br />Total</th>
+                    <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-[#0047ab] dark:text-blue-400">ប្រាក់ដើមនៅសល់<br />Balance</th>
+                    <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-[#0047ab] dark:text-blue-400">ប្រាក់ផាកពិន័យ<br />Penalty Payoff</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {scheduleModalTerm.rows.map(row => (
+                  {scheduleModalTerm.rows.map((row, idx) => (
                     <tr key={row.num}>
-                      <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-center text-slate-700 dark:text-slate-200">{row.num}</td>
-                      <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-center whitespace-nowrap text-slate-700 dark:text-slate-200">
-                        {formatDMY(row.dueDateISO)}
+                      <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-center font-semibold text-rose-600 dark:text-rose-400">{row.num}</td>
+                      <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-center whitespace-nowrap text-[#0047ab] dark:text-blue-400">
+                        {formatKhDMY(row.dueDateISO)}
                       </td>
-                      <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">{row.principal.toFixed(2)}</td>
-                      <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">{row.interest.toFixed(2)}</td>
-                      <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">0.00</td>
-                      <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right font-semibold text-slate-800 dark:text-slate-100">{row.totalDue.toFixed(2)}</td>
-                      <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">{row.balance.toFixed(2)}</td>
+                      <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">{num2(row.principal)}</td>
+                      <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">{num2(row.interest)}</td>
+                      <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">
+                        {num2(termCollectionFeeRows[idx])}
+                      </td>
+                      <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right font-semibold text-slate-800 dark:text-slate-100">{num2(installmentTotal(row, termCollectionFeeRows[idx]))}</td>
+                      <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">{num2(row.balance)}</td>
                       <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">0.00</td>
                     </tr>
                   ))}
+                  {(() => {
+                    const t = scheduleTotals(scheduleModalTerm.rows, termCollectionFeeRows)
+                    return (
+                      <tr className="font-semibold bg-slate-50 dark:bg-slate-800/60">
+                        <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-center text-slate-700 dark:text-slate-200" colSpan={2}>សរុប (Total)</td>
+                        <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-800 dark:text-slate-100">{num2(t.principal)}</td>
+                        <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-800 dark:text-slate-100">{num2(t.interest)}</td>
+                        <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-800 dark:text-slate-100">{num2(t.collectionFee)}</td>
+                        <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-800 dark:text-slate-100">{num2(t.total)}</td>
+                        <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1" />
+                        <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1" />
+                      </tr>)
+                  })()}
                 </tbody>
               </table>
 

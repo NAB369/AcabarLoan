@@ -2,9 +2,10 @@ import { useState, useRef } from 'react'
 import { X, Bell, Calendar, DollarSign, Phone, Printer, Download } from 'lucide-react'
 import { useApp } from '../../context/AppContext'
 import { buildReminderRecipients, buildSampleReminderMessage, daysUntilDue as daysUntilDueISO, weumsSignedIn } from '../../utils/reminders'
-import { formatVal, formatAddress } from '../../utils/format'
+import { formatVal, num2, formatKhDMY, formatAddress } from '../../utils/format'
 import { downloadSheetPdf } from '../../utils/exportPdf'
 import { companyLogoSrc } from '../../utils/companyLogo'
+import { benefitCustomFeeItems, collectionFeeSchedule, installmentPenalty, penaltyPayoffSchedule, loanPenaltyTerms, installmentTotal, scheduleTotals, isCollectionFee } from '../../utils/benefitFees'
 import { InfoRow, InfoCard } from '../shared/InfoCard'
 import WeumsGateModal from '../shared/WeumsGateModal'
 import RepaymentTracking from './RepaymentTracking'
@@ -29,7 +30,18 @@ function RepaymentScheduleContent({ loan }) {
   const { state } = useApp()
   const currency = loan.currency || state.currency
   const schedule = loan.schedule || []
+  // The penalty period: the loan's own if it carries one, else the product it was sold under.
+  const { rate: penaltyRate, months: penaltyMonths } = loanPenaltyTerms(loan, state.loanProducts)
+  // The Penalty Payoff column is a running balance, opening at the whole penalty and drawn down
+  // to zero — see penaltyPayoffSchedule.
+  const penaltyPayoffRows = penaltyPayoffSchedule(schedule, penaltyRate, penaltyMonths)
+
   const customer = state.customers.find(c => c.code === loan.customerCode)
+  // Same document as Loan Preview's schedule, so the Col Fee column is charged the same way:
+  // an annual rate accruing per installment on the outstanding principal — see utils/benefitFees.
+  const collectionFee = benefitCustomFeeItems(loan, state.feeSettings || {}, new Set(), schedule)
+    .find(f => isCollectionFee(f.category))
+  const collectionFeeRows = collectionFeeSchedule(schedule, collectionFee?.rate || 0, collectionFee?.method, loan.amount || 0)
   const sheetRef = useRef(null)
   const [downloading, setDownloading] = useState(false)
 
@@ -65,19 +77,19 @@ function RepaymentScheduleContent({ loan }) {
 
       <div
         ref={sheetRef}
-        className="printable-area bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl p-6 mx-auto w-full max-w-[210mm] shadow-sm"
+        className="printable-area schedule-sheet bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl p-6 mx-auto w-full max-w-[210mm] shadow-sm"
         style={{ fontFamily: "'Kantumruy Pro', 'Outfit', sans-serif" }}
       >
         {/* Header */}
-        <div className="flex items-center gap-3">
-          <img src={companyLogoSrc(state.companyProfile)} alt={state.companyProfile.name} className="w-14 h-14 object-contain flex-shrink-0" />
-          <div className="flex-1 text-center">
+        <div className="doc-letterhead flex items-center gap-3">
+          <img src={companyLogoSrc(state.companyProfile)} alt={state.companyProfile.name} className="doc-logo w-14 h-14 object-contain flex-shrink-0" />
+          <div className="letterhead-name flex-1 text-center">
             <p className="text-lg font-bold text-slate-800 dark:text-slate-100">{state.companyProfile.nameKh}</p>
             <p className="text-sm font-bold tracking-wide text-slate-700 dark:text-slate-200">{state.companyProfile.name.toUpperCase()}</p>
           </div>
           <div className="w-14 h-14 flex-shrink-0" aria-hidden="true" />
         </div>
-        <p className="text-center text-base font-bold text-slate-800 dark:text-slate-100 mt-1 mb-5">តារាងកាលវិភាគសងប្រាក់</p>
+        <p className="doc-title text-center text-base font-bold text-slate-800 dark:text-slate-100 mt-1 mb-5">តារាងកាលវិភាគសងប្រាក់</p>
 
         {/* Borrower / loan info */}
         <div className="flex flex-col sm:flex-row gap-x-8 gap-y-1.5 text-xs mb-3">
@@ -92,11 +104,12 @@ function RepaymentScheduleContent({ loan }) {
           <div className="space-y-1.5 flex-1">
             <ScheduleField label="ទំហំកម្ចី (Amount)" value={`${currency} ${(loan.amount || 0).toFixed(2)}`} />
             <ScheduleField label="ថ្ងៃបើកប្រាក់ (Disb Date)" value={formatDMY(loan.disbursementDate)} />
-            <ScheduleField label="អត្រា (Rate)" value={`${loan.interestRate}% p.a.`} />
+            <ScheduleField label="អត្រា (Rate)" value={`${loan.interestRate}% per year · ${((Number(loan.interestRate) || 0) / 12).toFixed(2)}% per month`} />
             <ScheduleField label="រយៈពេល (Period)" value={`${loan.installments} ${loan.repaymentType || 'Monthly'}`} />
             <ScheduleField label="ជុំទី (Loan Seq)" value={loan.loanCycle === '1' ? 'New' : `Renewal (Cycle ${loan.loanCycle})`} />
             <ScheduleField label="សេវា (Admin Fee)" value="0.00 % = 0.00" />
             <ScheduleField label="Refinance Fee" value="0.00" />
+                    
             <ScheduleField label="ភ្នាក់ងារឥណទាន (CO)" value={loan.creditOfficer} />
           </div>
         </div>
@@ -110,29 +123,29 @@ function RepaymentScheduleContent({ loan }) {
         <table className="w-full min-w-[600px] text-[11px] border-separate border-spacing-0 border-t border-l border-slate-300 dark:border-slate-600">
           <thead>
             <tr>
-              <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-slate-700 dark:text-slate-200">លេខ<br />No</th>
-              <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-slate-700 dark:text-slate-200">ថ្ងៃបង់ប្រាក់<br />Repayment Date</th>
-              <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-slate-700 dark:text-slate-200">ប្រាក់ដើម<br />Principle</th>
-              <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-slate-700 dark:text-slate-200">ការប្រាក់<br />Interest</th>
-              <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-slate-700 dark:text-slate-200">សេវាមូល<br />Col Fee</th>
-              <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-slate-700 dark:text-slate-200">សរុប<br />Total</th>
-              <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-slate-700 dark:text-slate-200">ប្រាក់ដើមនៅសល់<br />Balance</th>
-              <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-slate-700 dark:text-slate-200">ប្រាក់ផាកពិន័យ<br />Penalty Payoff</th>
+              <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-[#0047ab] dark:text-blue-400">លេខ<br />No</th>
+              <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-[#0047ab] dark:text-blue-400">ថ្ងៃបង់ប្រាក់<br />Repayment Date</th>
+              <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-[#0047ab] dark:text-blue-400">ប្រាក់ដើម<br />Principle</th>
+              <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-[#0047ab] dark:text-blue-400">ការប្រាក់<br />Interest</th>
+              <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-[#0047ab] dark:text-blue-400">សេវាមូល<br />Col Fee</th>
+              <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-[#0047ab] dark:text-blue-400">សរុប<br />Total</th>
+              <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-[#0047ab] dark:text-blue-400">ប្រាក់ដើមនៅសល់<br />Balance</th>
+              <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-[#0047ab] dark:text-blue-400">ប្រាក់ផាកពិន័យ<br />Penalty Payoff</th>
             </tr>
           </thead>
           <tbody>
             {schedule.map((row, idx) => (
               <tr key={idx}>
-                <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-center text-slate-700 dark:text-slate-200">{row.num}</td>
-                <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-center whitespace-nowrap text-slate-700 dark:text-slate-200">
-                  {formatDMY(row.dueDateISO)}
+                <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-center font-semibold text-rose-600 dark:text-rose-400">{row.num}</td>
+                <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-center whitespace-nowrap text-[#0047ab] dark:text-blue-400">
+                  {formatKhDMY(row.dueDateISO)}
                 </td>
-                <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">{row.principal.toFixed(2)}</td>
-                <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">{row.interest.toFixed(2)}</td>
-                <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">0.00</td>
-                <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right font-semibold text-slate-800 dark:text-slate-100">{row.totalDue.toFixed(2)}</td>
-                <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">{row.balance.toFixed(2)}</td>
-                <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">0.00</td>
+                <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">{num2(row.principal)}</td>
+                <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">{num2(row.interest)}</td>
+                <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">{num2(collectionFeeRows[idx])}</td>
+                <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right font-semibold text-slate-800 dark:text-slate-100">{num2(installmentTotal(row, collectionFeeRows[idx]))}</td>
+                <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">{num2(row.balance)}</td>
+                <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">{num2(penaltyPayoffRows[idx])}</td>
               </tr>
             ))}
             {schedule.length === 0 && (
@@ -140,6 +153,19 @@ function RepaymentScheduleContent({ loan }) {
                 <td colSpan={8} className="border-r border-b border-slate-300 dark:border-slate-600 px-3 py-8 text-center text-slate-400 dark:text-slate-500">No repayment schedule available.</td>
               </tr>
             )}
+            {schedule.length > 0 && (() => {
+              const t = scheduleTotals(schedule, collectionFeeRows, penaltyRate, penaltyMonths)
+              return (
+                <tr className="font-semibold bg-slate-50 dark:bg-slate-800/60">
+                  <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-center text-slate-700 dark:text-slate-200" colSpan={2}>សរុប (Total)</td>
+                  <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-800 dark:text-slate-100">{num2(t.principal)}</td>
+                  <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-800 dark:text-slate-100">{num2(t.interest)}</td>
+                  <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-800 dark:text-slate-100">{num2(t.collectionFee)}</td>
+                  <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-800 dark:text-slate-100">{num2(t.total)}</td>
+                  <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1" />
+                  <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-800 dark:text-slate-100">{num2(t.penalty)}</td>
+                </tr>)
+            })()}
           </tbody>
         </table>
         </div>

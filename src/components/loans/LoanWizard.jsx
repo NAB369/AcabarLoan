@@ -9,6 +9,7 @@ import { BRANCHES } from '../../data/constants'
 import StatusBadge from '../shared/StatusBadge'
 import SearchableSelect from '../shared/SearchableSelect'
 import { getCustomerStatus } from '../../utils/customerStatus'
+import { chargedCollectionRate } from '../../utils/benefitFees'
 
 const STEPS = ['Customer', 'Loan Product']
 
@@ -89,6 +90,9 @@ function AmountInput({ value, currency, onChange, className, ...rest }) {
 
 export default function LoanWizard() {
   const { state, dispatch, showToast, can } = useApp()
+  // A collection fee charged the annuity way is priced into the instalment, so the quote the
+  // borrower sees in the wizard is the same level payment the saved schedule will bill.
+  const wizardCollectionRate = chargedCollectionRate({}, state.feeSettings || {})
 
   const step = state.loanWizardStep
   const editRef = state.editingLoanRef
@@ -119,7 +123,18 @@ export default function LoanWizard() {
   const [disbursementDate] = useState(existingLoan?.disbursementDate || todayISO())
   const [repaymentType] = useState(existingLoan?.repaymentType || 'Monthly')
   const [firstInstallment] = useState(existingLoan?.firstInstallment || addMonths(todayISO(), 1))
-  const [penaltyRate] = useState(existingLoan?.penaltyRate?.toString() || '5')
+  // Seeded from the loan product's penalty setting (Loan Setting -> Loan Product); 0 there means
+  // the product carries no late penalty at all. An existing loan keeps whatever it was written with.
+  // How far into the term the penalty applies (0 = whole term), carried from the product.
+  const [penaltyMonths, setPenaltyMonths] = useState(() => {
+    if (existingLoan?.penaltyMonths != null) return existingLoan.penaltyMonths
+    return state.loanProducts.find(p => p.name === existingLoan?.product)?.penaltyMonths ?? 0
+  })
+  const [penaltyRate, setPenaltyRate] = useState(() => {
+    if (existingLoan?.penaltyRate != null) return existingLoan.penaltyRate.toString()
+    const prod = state.loanProducts.find(p => p.name === existingLoan?.product)
+    return (prod?.penaltyRate ?? 0).toString()
+  })
   const [loanCycle] = useState(existingLoan?.loanCycle || '1')
 
   const selectedCustomer = state.customers.find(c => c.code === customerCode) || null
@@ -141,15 +156,16 @@ export default function LoanWizard() {
     const rate = parseFloat(interestRate)
     const term = parseInt(installments, 10)
     if (!amt || amt <= 0 || !rate || rate <= 0 || !term || term <= 0) return { emi: 0, rows: [] }
-    return buildAmortizationData(amt, rate, term, firstInstallment)
-  }, [amount, interestRate, installments, firstInstallment])
+    return buildAmortizationData(amt, rate, term, firstInstallment, wizardCollectionRate, disbursementDate, currency)
+  }, [amount, interestRate, installments, firstInstallment, disbursementDate, wizardCollectionRate])
 
   if (!state.loanWizardOpen) return null
 
   function handleProductChange(name) {
     setProduct(name)
-    const rate = state.loanProducts.find(p => p.name === name)?.rate
-    if (rate !== undefined) setInterestRate(rate.toString())
+    const prod = state.loanProducts.find(p => p.name === name)
+    if (prod?.rate !== undefined) setInterestRate(prod.rate.toString())
+    if (prod) { setPenaltyRate((prod.penaltyRate ?? 0).toString()); setPenaltyMonths(prod.penaltyMonths ?? 0) }
   }
 
   function handleClose() {
@@ -194,7 +210,7 @@ export default function LoanWizard() {
     const rate = parseFloat(interestRate)
     const term = parseInt(installments, 10)
     const penalty = parseFloat(penaltyRate) || 0
-    const { emi, rows } = buildAmortizationData(amt, rate, term, firstInstallment)
+    const { emi, rows } = buildAmortizationData(amt, rate, term, firstInstallment, wizardCollectionRate, disbursementDate, currency)
 
     const loan = {
       ref: nextRef,
@@ -213,6 +229,7 @@ export default function LoanWizard() {
       installments: term,
       interestRate: rate,
       penaltyRate: penalty,
+      penaltyMonths,
       creditOfficer,
       loanCycle,
       branch,

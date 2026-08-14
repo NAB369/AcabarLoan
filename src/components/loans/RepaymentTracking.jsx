@@ -1,11 +1,17 @@
 import { Fragment, useState, useEffect } from 'react'
 import { CheckCircle, Clock, AlertCircle, X, Check, Printer, CornerDownRight, ChevronRight, ChevronDown, Banknote, CalendarClock } from 'lucide-react'
-import { useApp, hasFundingAccount } from '../../context/AppContext'
+import { useApp, hasFundingAccount, cashAccountOptions, repaymentBankOptions } from '../../context/AppContext'
 import { formatVal, formatDateDisplay, CONVERSION_RATE } from '../../utils/format'
 import { companyLogoSrc } from '../../utils/companyLogo'
+import { benefitCustomFeeItems, collectionFeeSchedule, installmentTotal, isCollectionFee, loanPenaltyTerms, penaltyPayoffSchedule } from '../../utils/benefitFees'
 import { KH_BANKS } from '../../data/geoData'
 
-const PAYMENT_METHODS = ['Cash', 'Transfer']
+// How the money reached us, which is a different question from what it settles (that is the
+// allocation, derived from the installment below). 'Split' is one collection arriving through
+// two doors at once — part over the counter, part into the bank.
+const PAYMENT_METHODS = ['Cash', 'Bank Transfer', 'Split (Cash + Bank)']
+const SPLIT_METHOD = 'Split (Cash + Bank)'
+const isBankPayment = method => !!method && method !== 'Cash' && method !== SPLIT_METHOD
 const inputCls = 'w-full px-3 py-2 text-sm rounded-xl border border-slate-200 bg-white dark:bg-slate-900 dark:border-slate-700 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-[#0047ab] transition'
 
 function formatThousands(value) {
@@ -86,6 +92,12 @@ export default function RepaymentTracking() {
   const [recordIdx, setRecordIdx] = useState(null)
   const [recordMode, setRecordMode] = useState('installment')
   const [paymentMethod, setPaymentMethod] = useState('')
+  // Which till the cash went into and which real bank account the transfer landed in —
+  // the payment side of the collection, kept apart from the income it is allocated to.
+  const [cashAccountCode, setCashAccountCode] = useState('')
+  const [bankAccountId, setBankAccountId] = useState('')
+  const [splitCash, setSplitCash] = useState('')
+  const [splitBank, setSplitBank] = useState('')
   const [paymentAmount, setPaymentAmount] = useState('')
   const [paymentDate, setPaymentDate] = useState('')
   const [paymentMemo, setPaymentMemo] = useState('')
@@ -137,6 +149,15 @@ export default function RepaymentTracking() {
 
   const currency = loan.currency || state.currency
   const schedule = loan.schedule
+  // The collection fee each instalment carries, on the same basis as the printed schedule — from
+  // the row itself when the fee was priced into the instalment, worked out here when it rides on top.
+  const collectionFee = benefitCustomFeeItems(loan, state.feeSettings || {}, new Set(), schedule)
+    .find(f => isCollectionFee(f.category))
+  const collectionFeeRows = collectionFeeSchedule(schedule, collectionFee?.rate || 0, collectionFee?.method, loan.amount || 0)
+  // The same payoff balance the printed schedule carries — opening at the whole penalty the loan
+  // could attract and drawn down to zero.
+  const { rate: penaltyRate, months: penaltyMonths } = loanPenaltyTerms(loan, state.loanProducts)
+  const penaltyPayoffRows = penaltyPayoffSchedule(schedule, penaltyRate, penaltyMonths)
 
   const paidRows = schedule.filter(isRowSettled)
   const dueRows = schedule.filter(r => !isRowSettled(r))
@@ -162,12 +183,22 @@ export default function RepaymentTracking() {
   // What the loan is worth over its life — principal out plus all interest charged.
   const totalContractValue = Math.round((disbursedAmount + totalInterest) * 100) / 100
 
+  // The tills and the real bank accounts this loan's money can be received into — both
+  // scoped to the loan's own currency, so a dollar collection can never be filed against a
+  // riel account (and the other way round).
+  const cashAccounts = cashAccountOptions(state.chartOfAccounts, currency)
+  const bankAccounts = repaymentBankOptions(state.realBankAccounts, currency, loan.branch)
+
   function openRecordModal(idx, mode = 'installment', prefillAmount = null) {
     const row = schedule[idx]
     const due = mode === 'remainder'
       ? prefillAmount
       : Math.round(((row.totalDue || 0) + (row.lateFee || 0)) * 100) / 100
     setPaymentMethod('')
+    setCashAccountCode(cashAccounts[0]?.code || '')
+    setBankAccountId(bankAccounts[0]?.id || '')
+    setSplitCash('')
+    setSplitBank('')
     setPaymentAmount(String(due))
     setPaymentDate(new Date().toISOString().split('T')[0])
     setPaymentMemo('')
@@ -193,6 +224,26 @@ export default function RepaymentTracking() {
 
   const showExchangeRate = paymentMethod === 'Cash' && currency === 'USD' && receivedCurrency === 'KHR'
 
+  // What the payment settles, shown while it is being entered. Penalty is settled first and
+  // never exceeds what was handed over, then the interest this installment charged, and
+  // whatever is left retires principal — the same order RECORD_REPAYMENT allocates in, so
+  // the modal cannot promise a breakdown the ledger won't post.
+  const recordAllocation = (() => {
+    if (recordIdx === null) return null
+    const row = schedule[recordIdx]
+    const entered = parseFloat(paymentAmount) || 0
+    const amt = round2(showExchangeRate ? entered / (parseFloat(exchangeRate) || CONVERSION_RATE) : entered)
+    if (recordMode === 'remainder') return { principal: amt, interest: 0, penalty: 0, total: amt }
+    const penalty = round2(Math.min(row.lateFee || 0, amt))
+    // A collection fee priced into the instalment is settled with the penalty, before principal
+    // and interest — it is fee income, not principal. Same order as RECORD_REPAYMENT.
+    const fee = round2(Math.min(row.collectionFee || 0, Math.max(round2(amt - penalty), 0)))
+    const installmentPayment = Math.max(round2(amt - penalty - fee), 0)
+    const balanceBefore = recordIdx === 0 ? loan.amount : (schedule[recordIdx - 1].balance ?? loan.amount)
+    const principal = round2(Math.min(Math.max(installmentPayment - (row.interest || 0), 0), balanceBefore))
+    return { principal, interest: round2(installmentPayment - principal), penalty, fee, total: amt }
+  })()
+
   // The amount field always reflects whichever currency is actually being received —
   // switching currency converts the figure already typed instead of leaving it stale.
   function handleReceivedCurrencyChange(newCurrency) {
@@ -211,8 +262,14 @@ export default function RepaymentTracking() {
       showToast('Select a payment method', 'error')
       return
     }
-    if (!hasFundingAccount(state.realBankAccounts, currency, loan.branch)) {
+    const takesCash = paymentMethod === 'Cash' || paymentMethod === SPLIT_METHOD
+    const takesBank = isBankPayment(paymentMethod) || paymentMethod === SPLIT_METHOD
+    if (takesBank && !hasFundingAccount(state.realBankAccounts, currency, loan.branch)) {
       showToast(`No ${currency} bank account configured for ${loan.branch}. Add one in Real Bank Accounts before recording this payment.`, 'error')
+      return
+    }
+    if (takesCash && !cashAccountCode) {
+      showToast(`No ${currency} cash account to receive this payment. Add one under Cash on Hand in the Chart of Accounts.`, 'error')
       return
     }
     const enteredAmount = parseFloat(paymentAmount)
@@ -234,20 +291,46 @@ export default function RepaymentTracking() {
       }
       amount = Math.round((enteredAmount / rate) * 100) / 100
     }
+    // The split has to account for every cent collected — a repayment whose parts don't add
+    // up to its total would post an unbalanced entry, so it is refused at the point of entry
+    // with the shortfall named rather than silently adjusted.
+    let payments
+    if (paymentMethod === SPLIT_METHOD) {
+      const cashPart = Math.round((parseFloat(splitCash) || 0) * 100) / 100
+      const bankPart = Math.round((parseFloat(splitBank) || 0) * 100) / 100
+      if (cashPart <= 0 || bankPart <= 0) {
+        showToast('A split payment needs both a cash and a bank amount', 'error')
+        return
+      }
+      const difference = Math.round((cashPart + bankPart - amount) * 100) / 100
+      if (Math.abs(difference) > 0.005) {
+        showToast(
+          `Cash ${formatVal(cashPart, currency, 1)} + bank ${formatVal(bankPart, currency, 1)} is ${formatVal(Math.abs(difference), currency, 1)} ${difference > 0 ? 'more' : 'less'} than the ${formatVal(amount, currency, 1)} collected`,
+          'error'
+        )
+        return
+      }
+      payments = [
+        { method: 'Cash', amount: cashPart, cashAccountCode },
+        { method: 'Bank Transfer', amount: bankPart, bankAccountId },
+      ]
+    } else {
+      payments = [{ method: paymentMethod, amount, cashAccountCode, bankAccountId }]
+    }
     dispatch({
       type: recordMode === 'remainder' ? 'RECORD_REMAINDER' : 'RECORD_REPAYMENT',
-      idx: recordIdx, paymentMethod, amount, date: paymentDate,
+      idx: recordIdx, paymentMethod, payments, amount, date: paymentDate,
       memo: paymentMemo.trim(),
-      bankName: paymentMethod === 'Transfer' ? bankName.trim() : '',
+      bankName: takesBank ? bankName.trim() : '',
       receivedCurrency: showExchangeRate ? 'KHR' : null,
       exchangeRate: rate,
-      trxId: paymentMethod === 'Transfer' ? trxId.trim() : '',
-      referenceNo: paymentMethod === 'Transfer' ? referenceNo.trim() : '',
-      payerName: paymentMethod === 'Transfer' ? payerName.trim() : '',
-      outlet: paymentMethod === 'Transfer' ? outlet.trim() : '',
-      remark: paymentMethod === 'Transfer' ? remark.trim() : '',
-      toAccount: paymentMethod === 'Transfer' ? toAccount.trim() : '',
-      txnHash: paymentMethod === 'Transfer' ? txnHash.trim() : '',
+      trxId: takesBank ? trxId.trim() : '',
+      referenceNo: takesBank ? referenceNo.trim() : '',
+      payerName: takesBank ? payerName.trim() : '',
+      outlet: takesBank ? outlet.trim() : '',
+      remark: takesBank ? remark.trim() : '',
+      toAccount: takesBank ? toAccount.trim() : '',
+      txnHash: takesBank ? txnHash.trim() : '',
     })
     if (recordMode === 'remainder') {
       showToast(`Remaining balance of installment #${schedule[recordIdx].num} recorded via ${paymentMethod}`, 'success')
@@ -335,8 +418,11 @@ export default function RepaymentTracking() {
               <th className="px-3 py-3 text-left font-semibold text-slate-500 dark:text-slate-400 whitespace-nowrap">Payment Date</th>
               <th className="px-3 py-3 text-right font-semibold text-slate-500 dark:text-slate-400">Principal</th>
               <th className="px-3 py-3 text-right font-semibold text-slate-500 dark:text-slate-400">Interest</th>
+              {/* Same order as the printed schedule: principal, interest, collection fee, total. */}
+              <th className="px-3 py-3 text-right font-semibold text-slate-500 dark:text-slate-400 whitespace-nowrap">Col Fee</th>
               <th className="px-3 py-3 text-right font-semibold text-slate-500 dark:text-slate-400">Total Due</th>
               <th className="px-3 py-3 text-right font-semibold text-slate-500 dark:text-slate-400 whitespace-nowrap">Penalty Fee</th>
+              <th className="px-3 py-3 text-right font-semibold text-slate-500 dark:text-slate-400 whitespace-nowrap">Penalty Payoff</th>
               <th className="px-3 py-3 text-right font-semibold text-slate-500 dark:text-slate-400">Paid</th>
               <th className="px-3 py-3 text-right font-semibold text-slate-500 dark:text-slate-400">Remaining</th>
               <th className="px-3 py-3 text-center font-semibold text-slate-500 dark:text-slate-400">Status</th>
@@ -363,9 +449,12 @@ export default function RepaymentTracking() {
                 <td className="px-3 py-2.5 text-right font-semibold text-blue-700 dark:text-blue-300">
                   {formatVal(totalInterest, currency, 1)}
                 </td>
+                {/* Disbursement releases principal — no collection fee or penalty falls due with it. */}
+                <td className="px-3 py-2.5 text-right"><span className="text-slate-300 dark:text-slate-600">—</span></td>
                 <td className="px-3 py-2.5 text-right font-bold text-blue-700 dark:text-blue-300">
                   {formatVal(totalContractValue, currency, 1)}
                 </td>
+                <td className="px-3 py-2.5 text-right"><span className="text-slate-300 dark:text-slate-600">—</span></td>
                 <td className="px-3 py-2.5 text-right"><span className="text-slate-300 dark:text-slate-600">—</span></td>
                 <td className="px-3 py-2.5 text-right"><span className="text-slate-300 dark:text-slate-600">—</span></td>
                 <td className="px-3 py-2.5 text-right"><span className="text-slate-300 dark:text-slate-600">—</span></td>
@@ -436,13 +525,23 @@ export default function RepaymentTracking() {
                   </td>
                   <td className="px-3 py-2.5 text-right text-slate-600 dark:text-slate-300">{formatVal(row.principal, currency, 1)}</td>
                   <td className="px-3 py-2.5 text-right text-slate-600 dark:text-slate-300">{formatVal(row.interest, currency, 1)}</td>
-                  <td className="px-3 py-2.5 text-right font-semibold text-slate-700 dark:text-slate-200">{formatVal(row.totalDue, currency, 1)}</td>
+                  <td className="px-3 py-2.5 text-right text-slate-600 dark:text-slate-300">
+                    {(collectionFeeRows[idx] || 0) > 0.005
+                      ? formatVal(collectionFeeRows[idx], currency, 1)
+                      : <span className="text-slate-300 dark:text-slate-600">—</span>}
+                  </td>
+                  <td className="px-3 py-2.5 text-right font-semibold text-slate-700 dark:text-slate-200">
+                    {formatVal(installmentTotal(row, collectionFeeRows[idx]), currency, 1)}
+                  </td>
                   <td className="px-3 py-2.5 text-right">
                     {row.lateFee > 0 ? (
                       <span className="text-rose-600 dark:text-rose-400 font-semibold">{formatVal(row.lateFee, currency, 1)}</span>
                     ) : (
                       <span className="text-slate-300 dark:text-slate-600">—</span>
                     )}
+                  </td>
+                  <td className="px-3 py-2.5 text-right text-slate-600 dark:text-slate-300">
+                    {formatVal(penaltyPayoffRows[idx] || 0, currency, 1)}
                   </td>
                   <td className="px-3 py-2.5 text-right text-slate-600 dark:text-slate-300">
                     {row.paid > 0 ? formatVal(row.paid, currency, 1) : '—'}
@@ -765,6 +864,40 @@ export default function RepaymentTracking() {
                   </p>
                 )}
               </div>
+              {/* What the payment is used for, as distinct from where it came from. An
+                  officer taking an interest-only payment can see it is interest-only before
+                  recording it, rather than discovering it on the receipt afterwards. */}
+              {recordAllocation && recordAllocation.total > 0 && (
+                <div className="p-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/40">
+                  <p className="text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2">Allocation</p>
+                  <dl className="space-y-1 text-xs">
+                    <div className="flex justify-between gap-4">
+                      <dt className="text-slate-500 dark:text-slate-400">Principal</dt>
+                      <dd className="font-semibold text-slate-700 dark:text-slate-200">{formatVal(recordAllocation.principal, currency, 1)}</dd>
+                    </div>
+                    <div className="flex justify-between gap-4">
+                      <dt className="text-slate-500 dark:text-slate-400">Interest income</dt>
+                      <dd className="font-semibold text-slate-700 dark:text-slate-200">{formatVal(recordAllocation.interest, currency, 1)}</dd>
+                    </div>
+                    {recordAllocation.fee > 0.005 && (
+                      <div className="flex justify-between gap-4">
+                        <dt className="text-slate-500 dark:text-slate-400">Collection fee income</dt>
+                        <dd className="font-semibold text-slate-700 dark:text-slate-200">{formatVal(recordAllocation.fee, currency, 1)}</dd>
+                      </div>
+                    )}
+                    {recordAllocation.penalty > 0.005 && (
+                      <div className="flex justify-between gap-4">
+                        <dt className="text-slate-500 dark:text-slate-400">Penalty income</dt>
+                        <dd className="font-semibold text-rose-600 dark:text-rose-400">{formatVal(recordAllocation.penalty, currency, 1)}</dd>
+                      </div>
+                    )}
+                    <div className="flex justify-between gap-4 pt-1 border-t border-slate-200 dark:border-slate-700">
+                      <dt className="font-semibold text-slate-600 dark:text-slate-300">Total</dt>
+                      <dd className="font-bold text-slate-800 dark:text-slate-100">{formatVal(recordAllocation.total, currency, 1)}</dd>
+                    </div>
+                  </dl>
+                </div>
+              )}
               <div>
                 <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
                   Payment Date
@@ -791,7 +924,75 @@ export default function RepaymentTracking() {
                   ))}
                 </select>
               </div>
-              {paymentMethod === 'Transfer' && (
+              {/* Which till took the cash. Only shown when there is a choice to make — a
+                  branch with a single cash account has nothing to pick and the account is
+                  already selected. */}
+              {(paymentMethod === 'Cash' || paymentMethod === SPLIT_METHOD) && cashAccounts.length > 1 && (
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                    Cash Account
+                  </label>
+                  <select value={cashAccountCode} onChange={e => setCashAccountCode(e.target.value)} className={inputCls}>
+                    {cashAccounts.map(a => (
+                      <option key={a.code} value={a.code}>{a.name} — {a.currency}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              {/* Which real bank account received the transfer. This is the payment account,
+                  not the income account — what the payment earns is allocated separately
+                  (see the breakdown below). */}
+              {(isBankPayment(paymentMethod) || paymentMethod === SPLIT_METHOD) && (
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                    Real Bank Account
+                  </label>
+                  {bankAccounts.length ? (
+                    <select value={bankAccountId} onChange={e => setBankAccountId(e.target.value)} className={inputCls}>
+                      {bankAccounts.map(a => (
+                        <option key={a.id} value={a.id}>{a.name} — {a.currency}{a.number ? ` · ${a.number}` : ''}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <p className="text-[11px] text-amber-600 dark:text-amber-400">
+                      No {currency} bank account is configured. Add one under Account Management → Real Bank Accounts.
+                    </p>
+                  )}
+                </div>
+              )}
+              {paymentMethod === SPLIT_METHOD && (
+                <div className="p-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/40 space-y-3">
+                  <p className="text-xs font-semibold text-slate-600 dark:text-slate-400">
+                    Split of {formatVal(recordAllocation?.total || 0, currency, 1)}
+                  </p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Cash ({currency})</label>
+                      <input type="number" min="0" step="0.01" value={splitCash} onChange={e => setSplitCash(e.target.value)} className={inputCls} />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Bank ({currency})</label>
+                      <input type="number" min="0" step="0.01" value={splitBank} onChange={e => setSplitBank(e.target.value)} className={inputCls} />
+                    </div>
+                  </div>
+                  {/* Says what is still unaccounted for as it is typed, rather than waiting
+                      for the officer to press Record and be told the split is wrong. */}
+                  {(() => {
+                    const remaining = round2((recordAllocation?.total || 0) - (parseFloat(splitCash) || 0) - (parseFloat(splitBank) || 0))
+                    if (Math.abs(remaining) <= 0.005) {
+                      return <p className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">Split accounts for the full payment.</p>
+                    }
+                    return (
+                      <p className="text-[11px] font-semibold text-amber-600 dark:text-amber-400">
+                        {remaining > 0
+                          ? `${formatVal(remaining, currency, 1)} of this payment is still unallocated.`
+                          : `${formatVal(Math.abs(remaining), currency, 1)} more than the payment has been allocated.`}
+                      </p>
+                    )
+                  })()}
+                </div>
+              )}
+              {isBankPayment(paymentMethod) && (
                 <div>
                   <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
                     Bank Name
@@ -808,7 +1009,7 @@ export default function RepaymentTracking() {
                   </select>
                 </div>
               )}
-              {paymentMethod === 'Transfer' && (
+              {isBankPayment(paymentMethod) && (
                 <div>
                   <button
                     type="button"
@@ -1006,7 +1207,10 @@ export default function RepaymentTracking() {
                       ប្រាក់រៀល <span className="text-xs text-slate-500">(KHR)</span>
                     </span>
                   </div>
-                  {p.paymentMethod === 'Transfer' && p.bankName && (
+                  {/* Keyed off the bank being named rather than the method's exact wording:
+                      the method has been spelled 'Transfer', 'Bank Transfer' and 'Split'
+                      over time, and a receipt should show the bank whenever one was used. */}
+                  {p.bankName && (
                     <div className="flex gap-2"><span className="font-semibold w-32 flex-shrink-0">ធនាគារ<br /><span className="font-normal text-xs text-slate-500">Bank</span></span><span>{p.bankName}</span></div>
                   )}
                 </div>
