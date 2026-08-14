@@ -19,21 +19,24 @@ import ReportCard from './ReportCard'
 // One definition drives the report selector, the report listing table and the
 // rendered body below — adding a report here puts it in all three at once.
 const REPORT_TABS = [
-  { id: 'listing',            label: 'Overview',                       icon: ClipboardList,     category: 'Overview',            description: 'Index of every loan report in this module' },
-  { id: 'portfolio-listing',  label: 'Loan Portfolio Listing',         icon: Users,             category: 'Portfolio',           description: 'Borrower-level loan detail or grouped summary' },
-  { id: 'portfolio-summary',  label: 'Portfolio & Risk Summary',       icon: BarChart3,         category: 'Portfolio',           description: 'Accounts, outstanding and arrears by chosen grouping' },
-  { id: 'repayments',         label: 'Repayment Report',               icon: Receipt,           category: 'Repayment',           description: 'Every collection, how it was allocated and where it was paid in' },
-  { id: 'collection-sheet',   label: 'Due & Overdue',                  icon: Clock,             category: 'Collection',          description: 'Installments due and overdue, for field collection' },
-  { id: 'arrears',            label: 'Arrears & Portfolio at Risk',    icon: AlertTriangle,     category: 'Arrears / PAR',       description: 'PAR aging and classification, grouped as needed' },
-  { id: 'provision',          label: 'Loan Loss Provision',            icon: ShieldAlert,       category: 'Provision',           description: 'Required provision by classification and reserve rate' },
-  { id: 'disbursement',       label: 'Disbursement Report',            icon: Banknote,          category: 'Disbursement',        description: 'Disbursed and pending-disbursement loans' },
-  { id: 'income-report',      label: 'Income Report',                  icon: Percent,           category: 'Income',              description: 'Interest, penalty and fee income by repayment' },
-  { id: 'closed-loans',       label: 'Closed Loans',                   icon: CheckCircle,       category: 'Write-Off / Recovery', description: 'How loans left the book — paid off, refinanced or written off' },
+  { id: 'portfolio',        label: 'Portfolio',            icon: Users,         description: 'Borrower-level loan detail, and accounts, outstanding and arrears by grouping' },
+  { id: 'repayments',       label: 'Repayment',            icon: Receipt,       description: 'Every collection, how it was allocated and where it was paid in' },
+  { id: 'collection-sheet', label: 'Collection',           icon: Clock,         description: 'Installments due and overdue, for field collection' },
+  { id: 'arrears',          label: 'Arrears / PAR',        icon: AlertTriangle, description: 'PAR aging and classification, grouped as needed' },
+  { id: 'provision',        label: 'Provision',            icon: ShieldAlert,   description: 'Required provision by classification and reserve rate' },
+  { id: 'disbursement',     label: 'Disbursement',         icon: Banknote,      description: 'Disbursed and pending-disbursement loans' },
+  { id: 'income-report',    label: 'Income',               icon: Percent,       description: 'Interest, penalty and fee income by repayment' },
+  { id: 'closed-loans',     label: 'Write-Off / Recovery', icon: CheckCircle,   description: 'How loans left the book — paid off, refinanced or written off' },
 ]
 
-// The categories above run Overview → Operations → Cash & Bank → Credit Risk → Portfolio →
-// Lifecycle, and REPORT_TABS is listed in that order. The tab strip renders it as-is, so keep
-// new reports next to their category rather than appending to the end.
+// One tab per area the loan book is reported on, in that order. The strip is itself the index,
+// so there is no separate overview tab listing the others and no grouping field restating a
+// label. Portfolio carries two views behind one tab — the borrower listing and the risk summary
+// are the same area, and giving them a tab each would spend two of the eight on it.
+const PORTFOLIO_VIEWS = [
+  { value: 'listing', label: 'Borrower Listing' },
+  { value: 'summary', label: 'Risk Summary' },
+]
 
 const BREAKDOWN_SORTING_LABELS = {
   gender: 'Gender',
@@ -990,6 +993,9 @@ export default function ReportsPage() {
   const setView = v => dispatch({ type: 'SET_REPORT_VIEW', view: v })
 
   // ── Per-report filter state ───────────────────────────────────────────────
+  // Which of the Portfolio tab's two views is showing. Local because nothing outside this page
+  // reads it — unlike reportTab, which the Report launcher sets when it opens a module.
+  const [portfolioView, setPortfolioView] = useState('listing')
   const [collectionStatus, setCollectionStatus] = useState('all')
   const [collectionOfficer, setCollectionOfficer] = useState('all')
   const [collectionBranch, setCollectionBranch] = useState('all')
@@ -1173,7 +1179,8 @@ export default function ReportsPage() {
   }, [companyBaseRow, agingRows, allCollectionRows])
 
   function openLoanReports() {
-    selectTab('listing')
+    // Opens on Portfolio — the first of the eight areas, and the one carrying the headline figures.
+    selectTab('portfolio')
     setView('loan')
   }
 
@@ -1241,7 +1248,10 @@ export default function ReportsPage() {
           >
           {/* The KPI row is the Overview tab's content — the index table came out, so these
               are what that tab shows. */}
-          {reportTab === 'listing' && (
+          {/* The headline figures belong with the portfolio they describe — accounts,
+              outstanding, what falls due, arrears and PAR are all read off the same register the
+              report beneath them prints. */}
+          {reportTab === 'portfolio' && (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
             <KpiCard
               label="Active Accounts" value={loanKpis.accounts}
@@ -1274,39 +1284,24 @@ export default function ReportsPage() {
           </div>
           )}
 
-          {/* The index this tab is named for. `category` on REPORT_TABS had never been rendered
-              anywhere, so the areas a loan book is reported on — portfolio, repayment, collection,
-              arrears, provision, disbursement, income, write-off — existed only as metadata and an
-              officer had to know which of thirteen tabs held what. Grouped in the order the tabs
-              are declared, so the strip above and this index read the same way round. */}
-          {reportTab === 'listing' && (
-          <div className="mt-6 space-y-6">
-            {REPORT_TABS.filter(t => t.id !== 'listing').reduce((groups, t) => {
-              const last = groups[groups.length - 1]
-              if (last && last.category === t.category) last.items.push(t)
-              else groups.push({ category: t.category, items: [t] })
-              return groups
-            }, []).map(group => (
-              <div key={group.category}>
-                <p className="text-[11px] font-bold uppercase tracking-wide text-slate-400 dark:text-slate-500 mb-2">
-                  {group.category}
-                </p>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {group.items.map(t => (
-                    <button
-                      key={t.id}
-                      onClick={() => selectTab(t.id)}
-                      className="flex items-start gap-3 text-left p-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:border-brand-300 dark:hover:border-brand-600 hover:bg-slate-50 dark:hover:bg-slate-700/50 transition-colors"
-                    >
-                      <t.icon className="w-4 h-4 mt-0.5 flex-shrink-0 text-brand-600 dark:text-brand-400" />
-                      <span className="min-w-0">
-                        <span className="block text-xs font-bold text-slate-800 dark:text-slate-100">{t.label}</span>
-                        <span className="block text-[11px] text-slate-500 dark:text-slate-400 leading-snug mt-0.5">{t.description}</span>
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              </div>
+          {/* Portfolio's two views. One area, one tab — the borrower listing and the risk summary
+              answer the same question at different altitudes, so they switch here rather than
+              spending two of the eight tabs between them. */}
+          {reportTab === 'portfolio' && (
+          <div className="mt-4 flex flex-wrap gap-1.5">
+            {PORTFOLIO_VIEWS.map(v => (
+              <button
+                key={v.value}
+                onClick={() => setPortfolioView(v.value)}
+                aria-pressed={portfolioView === v.value}
+                className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
+                  portfolioView === v.value
+                    ? 'bg-brand-600 border-brand-600 text-white'
+                    : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700'
+                }`}
+              >
+                {v.label}
+              </button>
             ))}
           </div>
           )}
@@ -1516,7 +1511,7 @@ export default function ReportsPage() {
               tab but not a column set (three grouped columns against twelve borrower-level ones,
               overlapping only on the name), so each remembers its own view — stored under one id,
               a view saved in Detail would leave Summary showing that single shared column. */}
-          {reportTab === 'portfolio-listing' && (
+          {reportTab === 'portfolio' && portfolioView === 'listing' && (
             <SimpleReportTable
               tableId={isListingSummary ? 'portfolio-listing-summary' : 'portfolio-listing-detail'}
               reportTitle="Loan Portfolio Listing"
@@ -1564,7 +1559,7 @@ export default function ReportsPage() {
           )}
 
           {/* Portfolio & Risk Summary — one report, five groupings */}
-          {reportTab === 'portfolio-summary' && (
+          {reportTab === 'portfolio' && portfolioView === 'summary' && (
             <SimpleReportTable
               tableId="portfolio-summary"
               reportTitle="Portfolio & Risk Summary"

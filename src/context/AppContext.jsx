@@ -504,7 +504,7 @@ const INITIAL_STATE = {
   glFilter: 'all',
   glAccountFilter: 'all',
   // reports
-  reportTab: 'listing',
+  reportTab: 'portfolio',
   // Which report module is open ('loan' | 'financial' | null = the picker). In the reducer
   // for the same reason accountingCard is: held in the component, it outlived SET_TAB, so
   // clicking Report in the sidebar left the user inside whichever module they were already in
@@ -962,7 +962,7 @@ function reducer(state, action) {
       // Back to the report picker, and to that module's first report — the same rule the
       // accounting cards follow: a sidebar entry returns its module to its landing view.
       reportView: null,
-      reportTab: 'listing',
+      reportTab: 'portfolio',
       accountHistoryCode: null,
       cashTransferModalOpen: false,
       cashCountModalOpen: false,
