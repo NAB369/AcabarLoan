@@ -7,8 +7,17 @@ import { ALL_DATES, withinRange } from '../../utils/dateRange'
 import Pagination from '../shared/Pagination'
 import StatusBadge from '../shared/StatusBadge'
 import { useTableSort, sortRows, SortHeader, ariaSortFor, ExportCsvButton } from '../shared/DataTableTools'
+import { LOAN_STRUCTURE_OPTIONS, LOAN_STRUCTURES } from '../../data/constants'
 
 const PAGE_SIZE = 10
+
+// The officer-facing name for a loan's repayment structure. Read from LOAN_STRUCTURE_OPTIONS so
+// the register and the wizard never drift apart — the stored value is what schedule rebuilds
+// branch on, the label is what a person reads ('Decline' stores, 'Decline Schedule' prints).
+function structureLabel(structure) {
+  const value = LOAN_STRUCTURES.includes(structure) ? structure : LOAN_STRUCTURES[0]
+  return LOAN_STRUCTURE_OPTIONS.find(o => o.value === value)?.label || value
+}
 
 function formatDateDMY(isoStr) {
   if (!isoStr) return '—'
@@ -36,6 +45,17 @@ export const LOAN_COLUMNS = [
   {
     id: 'product', label: 'Product', sortable: true, sortValue: l => l.product || '',
     cellClass: 'text-slate-600 dark:text-slate-300', render: l => l.product,
+  },
+  {
+    // Which repayment structure the loan was written on. A loan officer scanning the register
+    // needs it beside the product: an amortizing and a balloon loan of the same size and term
+    // ask the borrower for very different money, and only the schedule name says which.
+    // Loans written before structures existed carry none, and read as Amortizing — the shape
+    // they were actually built with (see LOAN_STRUCTURES in data/constants).
+    id: 'structure', label: 'Schedule', sortable: true,
+    sortValue: l => structureLabel(l.structure),
+    cellClass: 'text-slate-600 dark:text-slate-300',
+    render: l => structureLabel(l.structure),
   },
   {
     id: 'amount', label: 'Amount', align: 'right', sortable: true, sortValue: l => Number(l.amount) || 0,

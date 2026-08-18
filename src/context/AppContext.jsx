@@ -92,6 +92,18 @@ function repairRepaymentEntries(entries, chartOfAccounts) {
   }
 }
 
+// Backfills the Schedule column into a column list saved before it existed. Only ever adds it,
+// and only when the list already names some columns — an install that had deliberately hidden
+// everything else keeps its choice for those.
+function withLoanScheduleColumn(saved) {
+  if (!Array.isArray(saved) || !saved.length) return saved || null
+  if (saved.includes('structure')) return saved
+  const at = saved.indexOf('product')
+  const next = [...saved]
+  next.splice(at >= 0 ? at + 1 : next.length, 0, 'structure')
+  return next
+}
+
 function loadPersistedState() {
   try {
     const saved = localStorage.getItem(STORAGE_KEY)
@@ -194,7 +206,11 @@ function loadPersistedState() {
       // Column visibility per register. Additive — an install saved before the column picker
       // existed has neither, and falls back to showing every column.
       customerVisibleColumns: p.customerVisibleColumns || null,
-      loanVisibleColumns: p.loanVisibleColumns || null,
+      // A saved column list is filtered against the live definitions but never gains one added
+      // since (see useTableColumns), so a column introduced after an install last saved would
+      // stay invisible on it forever. 'structure' — the loan's repayment schedule — is inserted
+      // after 'product', where it is declared, rather than appended to the end of the row.
+      loanVisibleColumns: withLoanScheduleColumn(p.loanVisibleColumns),
       payrollColumns: p.payrollColumns || null,
       bankGroupLabels: p.bankGroupLabels || null,
       accountingColumns: p.accountingColumns || null,
