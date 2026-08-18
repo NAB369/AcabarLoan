@@ -5,6 +5,8 @@ import { formatVal } from '../../utils/format'
 import StatusBadge from '../shared/StatusBadge'
 import LoanList, { LOAN_COLUMNS } from './LoanList'
 import { useTableColumns, ColumnPicker } from '../shared/DataTableTools'
+import { FilterMenu } from '../shared/FilterTools'
+import { ALL_DATES, isRangeActive, rangeLabel } from '../../utils/dateRange'
 import LoanWizard from './LoanWizard'
 import LoanDetail from './LoanDetail'
 import LoanOverview from './LoanOverview'
@@ -14,11 +16,35 @@ import RepaymentTracking from './RepaymentTracking'
 import LoanQuickPreviewModal from './LoanQuickPreviewModal'
 import LoanSettingsModal from './LoanSettingsModal'
 
+// Which register a saved filter belongs to — see savedFilters in AppContext.
+const SAVED_FILTER_TABLE = 'loans'
+
 export default function LoanPage() {
   const { state, dispatch, showToast, can } = useApp()
   const { loanReviewOpen, activeLoan, loanDetailIdx, loanOverviewOpen, loanPreviewOpen } = state
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('ALL')
+  const [dateRange, setDateRange] = useState(ALL_DATES)
+
+  // One count behind three controls: whether Reset shows, what it says it will clear, and
+  // whether there is any narrowing worth saving a name for.
+  const savedFilters = state.savedFilters?.[SAVED_FILTER_TABLE] || []
+  const filterCount = [
+    !!search.trim(),
+    statusFilter !== 'ALL',
+    isRangeActive(dateRange),
+  ].filter(Boolean).length
+  const filterSummary = [
+    search.trim() && `Search “${search.trim()}”`,
+    statusFilter !== 'ALL' && `Status: ${statusFilter}`,
+    isRangeActive(dateRange) && `Created: ${rangeLabel(dateRange)}`,
+  ].filter(Boolean).join(' · ')
+
+  function resetFilters() {
+    setSearch('')
+    setStatusFilter('ALL')
+    setDateRange(ALL_DATES)
+  }
   const [loanSettingsOpen, setLoanSettingsOpen] = useState(false)
   // Above the early returns below — hooks cannot be called conditionally.
   const { visible, visibleIds, toggle } = useTableColumns(LOAN_COLUMNS, {
@@ -177,6 +203,37 @@ export default function LoanPage() {
           <option value="Rejected">Rejected</option>
           <option value="Cancelled">Cancelled</option>
         </select>
+        {/* Date range, saved sets and Reset in one panel. The range filters on the date the
+            register's own Created column shows — filtering on a date the table does not
+            display would leave the operator unable to see why a row survived. */}
+        <FilterMenu
+          dateLabel="Created"
+          dateRange={dateRange}
+          onDateRangeChange={setDateRange}
+          saved={savedFilters}
+          activeCount={filterCount}
+          summary={filterSummary}
+          onReset={resetFilters}
+          onApply={entry => {
+            setSearch(entry.filter.search || '')
+            setStatusFilter(entry.filter.statusFilter || 'ALL')
+            setDateRange(entry.filter.dateRange || ALL_DATES)
+            showToast(`Filter “${entry.name}” applied`, 'info')
+          }}
+          onSave={name => {
+            dispatch({
+              type: 'SAVE_TABLE_FILTER',
+              tableId: SAVED_FILTER_TABLE,
+              name,
+              filter: { search, statusFilter, dateRange },
+            })
+            showToast(`Filter “${name}” saved`, 'success')
+          }}
+          onDelete={id => {
+            dispatch({ type: 'DELETE_TABLE_FILTER', tableId: SAVED_FILTER_TABLE, id })
+            showToast('Saved filter deleted', 'info')
+          }}
+        />
         <button
           onClick={() => setLoanSettingsOpen(true)}
           title="Loan Setting"
@@ -208,11 +265,15 @@ export default function LoanPage() {
         </div>
       </div>
 
-      <LoanList search={search} statusFilter={statusFilter} visible={visible} />
+      <LoanList search={search} statusFilter={statusFilter} dateRange={dateRange} visible={visible} />
     </div>
 
       {/* Modals */}
-      <LoanWizard />
+      {/* Mounted only while open, not kept mounted rendering null: the wizard holds the whole
+          application in local state, and a component that stays mounted keeps that state. Cancel
+          then "New Application" would otherwise re-open on the customer, amount and rate the last
+          attempt was abandoned with — a fresh mount is what makes a new application start empty. */}
+      {state.loanWizardOpen && <LoanWizard />}
       <LoanQuickPreviewModal />
       <LoanSettingsModal open={loanSettingsOpen} onClose={() => setLoanSettingsOpen(false)} />
     </>

@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { X, CalendarClock } from 'lucide-react'
 import { formatVal, formatDateDisplay } from '../../utils/format'
 import { buildReschedulePlan, outstandingPrincipal } from '../../utils/loanRestructure'
+import useModalA11y from '@/components/shared/useModalA11y'
 
 // Restructure: the principal still outstanding is spread over new terms. Nothing reaches the
 // ledger — only the schedule changes.
@@ -29,9 +30,12 @@ export default function RestructureModal({ loan, currency, onClose, onConfirm })
   const fieldCls = 'w-full px-3 py-2 text-sm rounded-xl border border-slate-200 bg-white dark:bg-slate-900 dark:border-slate-700 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500/40 focus:border-brand-400 transition'
   const labelCls = 'block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1'
 
+  const modal = useModalA11y({ label: 'Restructure Loan', escape: false })
+
   return (
     <div className="fixed inset-0 bg-black/60 z-[70] flex items-center justify-center p-4" onClick={onClose}>
       <div
+        {...modal}
         className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] flex flex-col overflow-hidden"
         onClick={e => e.stopPropagation()}
       >

@@ -9,6 +9,7 @@ import { benefitCustomFeeItems, collectionFeeSchedule, installmentPenalty, penal
 import { InfoRow, InfoCard } from '../shared/InfoCard'
 import WeumsGateModal from '../shared/WeumsGateModal'
 import RepaymentTracking from './RepaymentTracking'
+import useModalA11y from '@/components/shared/useModalA11y'
 
 function formatDMY(dateStr) {
   if (!dateStr) return '—'
@@ -340,6 +341,10 @@ export default function LoanQuickPreviewModal() {
   const { state, dispatch } = useApp()
   const loan = state.activeLoan
 
+  // Above the early return below: a hook called on some renders and not others changes the
+  // hook order React relies on.
+  const modal = useModalA11y({ label: 'Loan Quick Preview', escape: false })
+
   if (!state.loanQuickPreviewOpen || !loan) return null
 
   const tab = state.loanQuickPreviewTab
@@ -350,7 +355,7 @@ export default function LoanQuickPreviewModal() {
 
   return (
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={handleClose}>
-      <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl w-full max-w-6xl max-h-[92vh] flex flex-col" onClick={e => e.stopPropagation()}>
+      <div {...modal} className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl w-full max-w-6xl max-h-[92vh] flex flex-col" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between px-4 sm:px-6 py-4 border-b border-slate-200 dark:border-slate-700 flex-shrink-0">
           <div>
             <h3 className="text-base font-bold text-slate-800 dark:text-slate-100">{tab}</h3>

@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useMemo } from 'react'
 import jsPDF from 'jspdf'
 import html2canvas from 'html2canvas'
-import { X, Pencil, User, Building, CreditCard, TrendingUp, DollarSign, FileText, Calculator, Briefcase, Wallet, Trash2, Scale, ShieldAlert, Send, Check, Calendar, LayoutDashboard, History, Plus, ArrowDownLeft, Eye, Printer, Download, Upload, PiggyBank } from 'lucide-react'
+import { X, Pencil, User, Building, CreditCard, TrendingUp, DollarSign, FileText, FileSignature, Calculator, Briefcase, Wallet, Trash2, Scale, ShieldAlert, Send, Check, Calendar, LayoutDashboard, History, Plus, ArrowDownLeft, Eye, Printer, Download, Upload, PiggyBank } from 'lucide-react'
 import { useApp } from '../../context/AppContext'
 import { formatVal, num2, formatKhDMY, buildAmortizationData, formatAddress, getProductMaxAmount, splitTimestamp, formatFileSize, formatDateDisplay } from '../../utils/format'
 import StatusBadge from '../shared/StatusBadge'
@@ -16,6 +16,7 @@ import PersonInfoGrid from '../shared/PersonInfoGrid'
 import IdentityDocumentsTable, { hasUploadedDocs } from '../shared/IdentityDocumentsTable'
 import IncomeVerification from './IncomeVerification'
 import ExpenseVerification from './ExpenseVerification'
+import LoanAgreementA4 from './LoanAgreementA4'
 import {
   INCOME_FIELD, INCOME_LIST_FIELD, INCOME_LABEL, BUSINESS_OCCUPATIONS, BUSINESS_INCOME_TYPES,
   getIncomeProofDocTypes, getIncomeCompanyDocTypes,
@@ -89,6 +90,9 @@ const DETAIL_TABS = [
   { id: 'suggestion', label: 'Loan Suggestion',   icon: Calculator },
   { id: 'assessment', label: 'Credit Assessment', icon: Scale },
   { id: 'risk',       label: 'Risk Assessment',   icon: ShieldAlert },
+  // The contract comes out of everything above it — the parties, the security and the agreed
+  // terms — so it sits after the verdicts rather than among the data that feeds it.
+  { id: 'agreement',  label: 'Loan Agreement',    icon: FileSignature },
   { id: 'audit',      label: 'Audit Log',         icon: History },
 ]
 
@@ -331,11 +335,23 @@ export default function LoanDetail() {
   // freshly built schedule quotes the same level payment a saved one does.
   const scheduleCollectionRate = chargedCollectionRate(loan, state.feeSettings || {})
 
+  // A balloon loan has to be re-priced as a balloon everywhere its schedule is rebuilt from the
+  // loan's terms — changing the term or rate below, or previewing a term option. Rebuilding
+  // without it would quietly re-amortize the loan into a level one and show the borrower a
+  // payment they never agreed to. Absent on every loan written before balloons existed, which is
+  // read as the zero residual those loans were quoted at.
+  const balloonPercent = loan.balloonPercent || 0
+  // Same trap as the residual, for the same reason: a declining loan rebuilt without its structure
+  // comes back as a level one. Absent on every loan written before structures existed, which reads
+  // as the ordinary amortizing product those loans were quoted at.
+  const loanStructure = loan.structure || 'Amortizing'
+  const isDecliningLoan = loanStructure === 'Decline'
+
   // Use existing schedule or compute one
   const schedule = loan.schedule && loan.schedule.length > 0
     ? loan.schedule
     : (loan.amount && loan.interestRate
-        ? buildAmortizationData(loan.amount, loan.interestRate, loan.installments || 12, loan.firstInstallment, scheduleCollectionRate, loan.disbursementDate, currency).rows
+        ? buildAmortizationData(loan.amount, loan.interestRate, loan.installments || 12, loan.firstInstallment, scheduleCollectionRate, loan.disbursementDate, currency, balloonPercent, loanStructure).rows
         : [])
 
   const emi = loan.emi || (schedule.length > 0 ? schedule[0].totalDue : 0)
@@ -452,7 +468,7 @@ export default function LoanDetail() {
     : INSTALLMENT_OPTIONS
   const termOptions = (loan.amount && loan.interestRate)
     ? termChoices.map(term => {
-        const { emi: termEmi, rows: termRows } = buildAmortizationData(loan.amount, loan.interestRate, term, loan.firstInstallment, scheduleCollectionRate, loan.disbursementDate, currency)
+        const { emi: termEmi, rows: termRows } = buildAmortizationData(loan.amount, loan.interestRate, term, loan.firstInstallment, scheduleCollectionRate, loan.disbursementDate, currency, balloonPercent, loanStructure)
         const totalInterest = termRows.reduce((sum, r) => sum + (r.interest || 0), 0)
         const leftAmount = availableForRepayment - termEmi
         return { term, emi: termEmi, totalInterest, leftAmount, affordable: leftAmount >= 0, rows: termRows }
@@ -584,6 +600,8 @@ export default function LoanDetail() {
   const [lightbox, setLightbox] = useState(null)
   const [activeTab, setActiveTab] = useState(0)
   const [showApprovalModal, setShowApprovalModal] = useState(false)
+  const agreementSheetRef = useRef(null)
+  const [agreementDownloading, setAgreementDownloading] = useState(false)
   // Which party's CBC the tab is showing. The two used to stack down one scroll, so reading
   // the co-borrower's report meant scrolling past the whole of the borrower's A4 sheet.
   const [cbcTarget, setCbcTarget] = useState('borrower')
@@ -664,6 +682,25 @@ export default function LoanDetail() {
     setShowApprovalModal(false)
   }
 
+  // The agreement is rasterised at paper width like every other sheet in the app — jsPDF's own
+  // text renderer carries no Khmer font, so a vector export would turn the whole contract into
+  // garbled Latin glyphs (see exportPdf.js). `keepWhole` names the article and signature blocks
+  // so a page never breaks through the middle of a clause.
+  async function handleDownloadAgreement() {
+    if (!agreementSheetRef.current || agreementDownloading) return
+    setAgreementDownloading(true)
+    try {
+      await downloadSheetPdf(agreementSheetRef.current, `Loan-Agreement-${loan.ref || 'loan'}`,
+        { keepWhole: '[data-agreement-block]' })
+      logActivity('Loan Agreement', 'Loan agreement downloaded',
+        `${loan.ref} · ${customer?.enName || loan.customerName || '—'}`)
+    } catch {
+      showToast('Could not generate the loan agreement', 'error')
+    } finally {
+      setAgreementDownloading(false)
+    }
+  }
+
   function handleViewDoc(doc, isImage) {
     if (isImage && doc.dataUrl) {
       setLightbox(doc)
@@ -697,7 +734,7 @@ export default function LoanDetail() {
     if (!rate || rate <= 0) { showToast('Please enter a valid interest rate', 'error'); return }
     if (!term || term <= 0) { showToast('Please enter a valid number of installments', 'error'); return }
 
-    const { emi: newEmi, rows } = buildAmortizationData(amt, rate, term, loan.firstInstallment, scheduleCollectionRate, loan.disbursementDate, currency)
+    const { emi: newEmi, rows } = buildAmortizationData(amt, rate, term, loan.firstInstallment, scheduleCollectionRate, loan.disbursementDate, currency, balloonPercent, loanStructure)
     const updatedLoan = {
       ...loan,
       product: loanInfoForm.product,
@@ -718,7 +755,7 @@ export default function LoanDetail() {
   }
 
   function handleApplyTerm(term) {
-    const { emi: newEmi, rows } = buildAmortizationData(loan.amount, loan.interestRate, term, loan.firstInstallment, scheduleCollectionRate, loan.disbursementDate, currency)
+    const { emi: newEmi, rows } = buildAmortizationData(loan.amount, loan.interestRate, term, loan.firstInstallment, scheduleCollectionRate, loan.disbursementDate, currency, balloonPercent, loanStructure)
     const updatedLoan = {
       ...loan,
       installments: term,
@@ -736,7 +773,7 @@ export default function LoanDetail() {
     if (!rate || rate <= 0) { showToast('Please enter a valid interest rate', 'error'); return }
     const term = parseInt(assessmentRateForm.installments, 10)
     if (!term || term <= 0) { showToast('Please select a valid installment term', 'error'); return }
-    const { emi: newEmi, rows } = buildAmortizationData(loan.amount, rate, term, loan.firstInstallment, scheduleCollectionRate, loan.disbursementDate, currency)
+    const { emi: newEmi, rows } = buildAmortizationData(loan.amount, rate, term, loan.firstInstallment, scheduleCollectionRate, loan.disbursementDate, currency, balloonPercent, loanStructure)
     const updatedLoan = { ...loan, interestRate: rate, installments: term, termSelected: true, emi: newEmi, schedule: mergeSchedule(rows, loan.schedule) }
     dispatch({ type: 'UPDATE_LOAN', loan: updatedLoan })
     logActivity('Loan Suggestion', 'Interest rate and term changed', `${rate}% p.a. · ${term} months`)
@@ -1655,8 +1692,14 @@ export default function LoanDetail() {
               { icon: FileText, label: 'Loan Product', value: loan.product },
               { icon: DollarSign, label: 'Loan Amount', value: formatVal(loan.amount, currency, 1) },
               { icon: TrendingUp, label: 'Interest Rate', value: `${loan.interestRate}% p.a.` },
-              { icon: CreditCard, label: 'Installments', value: (loan.termSelected || isDisbursed) && loan.installments ? `${loan.installments} months` : 'Not selected' },
-              { icon: Calculator, label: 'EMI', value: formatVal(emi, currency, 1) },
+              // The residual — and, on a declining loan, the fact that the instalment falls — ride
+              // on the term rather than taking a card of their own: both are properties of how the
+              // term repays, and each only shows on a loan that has it, so an ordinary loan's card
+              // reads exactly as it did before.
+              { icon: CreditCard, label: 'Installments', value: (loan.termSelected || isDisbursed) && loan.installments ? `${loan.installments} months${balloonPercent > 0 ? ` · Balloon ${balloonPercent}%` : isDecliningLoan ? ' · Declining' : ''}` : 'Not selected' },
+              // A declining loan has no one instalment, so the card names what this figure is:
+              // the largest one, which is what `emi` carries for that structure.
+              { icon: Calculator, label: isDecliningLoan ? 'Highest Instalment' : 'EMI', value: formatVal(emi, currency, 1) },
               { icon: Briefcase, label: 'Credit Officer', value: loan.creditOfficer || 'N/A' },
               { icon: Building, label: 'Branch Name', value: loan.branch || 'N/A' },
             ].map(({ icon: Icon, label, value }) => (
@@ -2744,8 +2787,49 @@ export default function LoanDetail() {
         </div>
         )}
 
+        {activeTab === TAB.agreement && (
+        /* Section 10: Loan Agreement — the printed Khmer contract, pre-filled from the record */
+        <div className="space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-4">
+            <div>
+              <p className="text-xs font-bold text-slate-700 dark:text-slate-200 uppercase tracking-wide">
+                កិច្ចសន្យាខ្ចីប្រាក់ · Loan Agreement
+              </p>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                Filled from the customer, parties, collateral and agreed terms on this loan. Lines the
+                record does not hold — ID issue date and authority, the witness, guarantor collateral —
+                print blank to be completed by hand.
+              </p>
+            </div>
+            <button
+              onClick={handleDownloadAgreement}
+              disabled={agreementDownloading}
+              className="flex items-center justify-center gap-2 px-4 py-2 bg-[#0047ab] hover:bg-blue-700 disabled:opacity-60 text-white text-sm font-semibold rounded-xl shadow-sm transition-colors flex-shrink-0 w-full sm:w-auto"
+            >
+              <Download className="w-4 h-4" />
+              {agreementDownloading ? 'Preparing…' : 'Download Agreement'}
+            </button>
+          </div>
+          {!customer && (
+            <div className="flex items-start gap-2.5 px-4 py-3 rounded-xl bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700">
+              <ShieldAlert className="w-4 h-4 text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5" />
+              <p className="text-xs text-amber-700 dark:text-amber-400">
+                No customer record is linked to this loan, so the borrower's particulars print blank.
+              </p>
+            </div>
+          )}
+          <LoanAgreementA4
+            sheetRef={agreementSheetRef}
+            loan={loan}
+            customer={customer || {}}
+            collectionRate={scheduleCollectionRate}
+            adminFeeRate={effectiveFeeRate('adminFeeRate')}
+          />
+        </div>
+        )}
+
         {activeTab === TAB.audit && (
-        /* Section 10: Audit Log */
+        /* Section 11: Audit Log */
         <div className="rounded-xl overflow-hidden">
           <div className="px-4 py-3">
             <span className="text-xs font-bold text-slate-700 dark:text-slate-200 uppercase tracking-wide">Audit Log History</span>
