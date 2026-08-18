@@ -7,8 +7,13 @@ import TypedDocumentUpload from '../shared/TypedDocumentUpload'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Separator } from '@/components/ui/separator'
+import useModalA11y from '@/components/shared/useModalA11y'
 
-function Field({ label, hint, error, children }) {
+// `warning` is not `error`: it is shown the same way but in amber and it does not stop the
+// form being submitted. A phone number shared with an existing customer is worth saying out
+// loud — it is usually a household, occasionally the same person being registered twice — but
+// it is the officer's call, not a rule the form can decide.
+function Field({ label, hint, error, warning, children }) {
   return (
     <div>
       <label className="flex items-center gap-1 text-[11px] font-medium text-slate-500 dark:text-slate-400 mb-1">
@@ -24,6 +29,7 @@ function Field({ label, hint, error, children }) {
       </label>
       {children}
       {error && <p className="mt-1 text-[11px] font-medium text-rose-500">{error}</p>}
+      {!error && warning && <p className="mt-1 text-[11px] font-medium text-amber-600 dark:text-amber-400">{warning}</p>}
     </div>
   )
 }
@@ -98,6 +104,22 @@ export default function CustomerWizard() {
     if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birth.getDate())) age--
     return age
   }
+
+  // Who else is on this number. Not an error — a husband and wife on one handset is ordinary
+  // here, and refusing it would block real customers — but a phone already on file is the
+  // cheapest signal there is that this borrower may already be registered, and the officer
+  // should see it before they finish the form rather than after a duplicate CID exists.
+  // Digits only, so 012 345 678 and 012345678 are recognised as the same number.
+  const phoneAlsoUsedBy = (() => {
+    const digits = phone.replace(/\D/g, '')
+    if (digits.length < 6) return ''
+    const other = customers.find(c => (c.phone || '').replace(/\D/g, '') === digits && c.code !== code)
+    return other ? `Also registered to ${other.enName} (CID-${other.code}) — check this is not the same person` : ''
+  })()
+
+  // Escape is App.jsx's (CLOSE_CUSTOMER_WIZARD), so the hook supplies only the focus trap, the
+  // focus return and the dialog semantics.
+  const modal = useModalA11y({ label: editingCustomer ? 'Edit Customer' : 'Register Customer', escape: false })
 
   // The rules on their own, so the same ones decide what to flag on submit and what to clear as
   // the form is corrected. Split out because they used to live inside validateForm, which only
@@ -187,7 +209,7 @@ export default function CustomerWizard() {
 
   return (
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-      <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-xl w-full max-w-4xl max-h-[92vh] flex flex-col overflow-hidden">
+      <div {...modal} className="bg-white dark:bg-slate-800 rounded-2xl shadow-xl w-full max-w-4xl max-h-[92vh] flex flex-col overflow-hidden">
 
         {/* Header */}
         <div className="flex items-center justify-between px-4 sm:px-6 py-4 border-b border-slate-100 dark:border-slate-700 flex-shrink-0">
@@ -270,7 +292,7 @@ export default function CustomerWizard() {
               <Field label="National ID *" error={fieldErrors.idNo}>
                 <Input type="text" placeholder="National ID" value={idNo} onChange={e => setIdNo(e.target.value)} className={inputClsFor('idNo')} />
               </Field>
-              <Field label="Phone Number *" error={fieldErrors.phone}>
+              <Field label="Phone Number *" error={fieldErrors.phone} warning={phoneAlsoUsedBy}>
                 <Input type="text" placeholder="010517325" value={phone} onChange={e => setPhone(e.target.value)} className={inputClsFor('phone')} />
               </Field>
               <Field label="Email Address">

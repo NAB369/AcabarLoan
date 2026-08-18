@@ -5,6 +5,7 @@ import { auditStamp, formatVal } from '../../utils/format'
 import {
   employeeName, isOnPayroll, periodBounds, periodLabel, employeeDeduction, employeeNetSalary,
 } from '../../utils/employee'
+import useModalA11y from '@/components/shared/useModalA11y'
 
 // A run pays one calendar month, so its period is a month and its posting date is the last
 // day of it.
@@ -129,9 +130,12 @@ export default function PayrollRunModal({ accountCode, accountLabel, initialPeri
   // showing through the translucent background in dark mode.
   const th = 'px-4 py-2.5 text-xs font-semibold text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-700 text-left whitespace-nowrap'
 
+  const modal = useModalA11y({ label: 'Process Payroll', escape: false })
+
   return (
     <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={onClose}>
       <div
+        {...modal}
         className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl w-full max-w-4xl max-h-[92vh] flex flex-col"
         onClick={e => e.stopPropagation()}
       >

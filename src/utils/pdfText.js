@@ -1,7 +1,22 @@
-import * as pdfjsLib from 'pdfjs-dist'
-import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
+// pdf.js and its worker are 1.3 MB between them, and they are needed only when someone
+// actually uploads a PDF — a bank statement, a payslip, a CBC report. Imported statically they
+// were downloaded and parsed by every user on every visit, including the ones who never upload
+// anything. Loaded on first use instead, and cached after: the reader is async already, so
+// nothing above it has to change.
+let pdfjsPromise = null
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker
+function loadPdfjs() {
+  if (!pdfjsPromise) {
+    pdfjsPromise = Promise.all([
+      import('pdfjs-dist'),
+      import('pdfjs-dist/build/pdf.worker.min.mjs?url'),
+    ]).then(([lib, worker]) => {
+      lib.GlobalWorkerOptions.workerSrc = worker.default
+      return lib
+    })
+  }
+  return pdfjsPromise
+}
 
 // ── Getting text off an uploaded PDF ───────────────────────────────────────────
 // Shared by the document readers. A bank statement and a payslip are read for completely
@@ -51,7 +66,7 @@ function groupRows(cells) {
 }
 
 export async function openPdf(file) {
-  const buf = await file.arrayBuffer()
+  const [pdfjsLib, buf] = await Promise.all([loadPdfjs(), file.arrayBuffer()])
   return pdfjsLib.getDocument({ data: buf }).promise
 }
 
@@ -60,6 +75,7 @@ export async function openPdf(file) {
 // still goes through here because this module owns the worker configuration — a second entry
 // point elsewhere would have to duplicate it.
 export async function openPdfBytes(data) {
+  const pdfjsLib = await loadPdfjs()
   return pdfjsLib.getDocument({ data }).promise
 }
 

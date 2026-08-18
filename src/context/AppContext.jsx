@@ -8,6 +8,7 @@ import {
   backfillStatementAnalysis
 } from '../data/mockData'
 import { formatDateDisplay, shiftISODate, daysBetweenISO, auditStamp } from '../utils/format'
+import { ALL_DATES } from '../utils/dateRange'
 import { seedDemoBook } from '../data/demoBook'
 
 // v5: chart-of-accounts replaced by Main Account + sub-accounts (accounts), expenses gained
@@ -448,11 +449,21 @@ const INITIAL_STATE = {
   customerPage: 1,
   customerPageSize: 12,
   customerSearch: '',
-  customerDateFilter: '',
+  // Was an exact-day match, which answered a question nobody asks — a register is read for a
+  // period. See utils/dateRange: the preset is held rather than the two dates it resolves to,
+  // so "This month" keeps meaning this month. Not persisted: which slice of the register was
+  // last on screen is transient, and reopening the app on yesterday's filter reads as data
+  // having gone missing. A slice worth keeping is kept deliberately — see savedFilters.
+  customerDateRange: ALL_DATES,
   // Which columns the operator left visible in the customer register. Persisted, and kept out
   // of SET_TAB's reset list, because a column hidden on purpose reappearing on the next visit
   // reads as the filter being broken. null = show every column.
   customerVisibleColumns: persisted.customerVisibleColumns || null,
+  // Named filter sets, keyed by which register they belong to ('loans', 'customers'). What a
+  // set restores is decided by the page that saved it and stored verbatim, so a register can
+  // add a filter later without this shape changing. Persisted — a saved view the operator
+  // named and lost on refresh would be worse than not offering to save it at all.
+  savedFilters: persisted.savedFilters || {},
   // loan
   loanWizardOpen: false,
   loanWizardStep: 1,
@@ -1089,7 +1100,35 @@ function reducer(state, action) {
     case 'SET_CUSTOMER_COLUMNS': return { ...state, customerVisibleColumns: action.ids }
     case 'SET_CUSTOMER_PAGE': return { ...state, customerPage: action.page }
     case 'SET_CUSTOMER_SEARCH': return { ...state, customerSearch: action.q, customerPage: 1 }
-    case 'SET_CUSTOMER_DATE_FILTER': return { ...state, customerDateFilter: action.date, customerPage: 1 }
+    case 'SET_CUSTOMER_DATE_RANGE': return { ...state, customerDateRange: action.range || ALL_DATES, customerPage: 1 }
+    // Back to page 1 with the filters: the rows that survive a reset are a different list, and
+    // staying on page 4 of it shows the operator a page that may no longer exist.
+    case 'RESET_CUSTOMER_FILTERS': return {
+      ...state, customerSearch: '', customerDateRange: ALL_DATES, customerPage: 1,
+    }
+
+    // Saved filters. `filter` is stored exactly as the page handed it over — this reducer never
+    // reads inside it, which is what lets a register change what it saves without a migration.
+    case 'SAVE_TABLE_FILTER': {
+      const existing = state.savedFilters[action.tableId] || []
+      const name = action.name.trim()
+      if (!name) return state
+      const entry = { id: `${action.tableId}-${Date.now()}`, name, filter: action.filter }
+      // Saving over a name that is already taken replaces it rather than leaving two entries
+      // the operator cannot tell apart.
+      const kept = existing.filter(f => f.name.toLowerCase() !== name.toLowerCase())
+      return {
+        ...state,
+        savedFilters: { ...state.savedFilters, [action.tableId]: [...kept, entry] },
+      }
+    }
+    case 'DELETE_TABLE_FILTER': return {
+      ...state,
+      savedFilters: {
+        ...state.savedFilters,
+        [action.tableId]: (state.savedFilters[action.tableId] || []).filter(f => f.id !== action.id),
+      },
+    }
 
     // Loans
     case 'SET_LOAN_COLUMNS': return { ...state, loanVisibleColumns: action.ids }
@@ -2414,8 +2453,16 @@ const AppContext = createContext(null)
 export function AppProvider({ children }) {
   const [state, dispatch] = useReducer(reducer, BOOT_STATE)
 
-  // Persist key data
+  // Persist key data.
+  //
+  // Coalesced rather than written on every change: `JSON.stringify` over the whole book — every
+  // customer, loan, schedule row and journal line — ran synchronously on the main thread for
+  // each keystroke that reached the reducer, and it grows with the install. Waiting for a pause
+  // collapses a burst of edits into one write. The delay is short enough that a refresh a
+  // moment later still finds the data, and `beforeunload` below covers a tab closed inside the
+  // window, so nothing is traded away for the saving.
   useEffect(() => {
+    const write = () => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({
         customers: state.customers,
@@ -2451,9 +2498,21 @@ export function AppProvider({ children }) {
         accountingColumns: state.accountingColumns,
         reportColumns: state.reportColumns,
         demoSeeded: state.demoSeeded,
+        savedFilters: state.savedFilters,
       }))
     } catch {}
-  }, [state.customerVisibleColumns, state.loanVisibleColumns, state.payrollColumns, state.bankGroupLabels, state.accountingColumns, state.reportColumns, state.systemUsers, state.auditLogs, state.integrations, state.payrollRuns, state.customers, state.loanApplications, state.incomes, state.expenses, state.notifications, state.cashTransfers, state.repayments, state.cashSheet, state.cashCounts, state.recoveries, state.accounts, state.feeSettings, state.loanProducts, state.activeStatement, state.chartOfAccounts, state.realBankAccounts, state.journalEntries, state.companyProfile, state.employees, state.businessDay, state.batchRuns, state.customGeo, state.demoSeeded])
+    }
+
+    const timer = setTimeout(write, 400)
+    // A tab closed or reloaded inside the 400ms window would otherwise lose the last edit, so
+    // the pending write is forced through first.
+    const flush = () => { clearTimeout(timer); write() }
+    window.addEventListener('beforeunload', flush)
+    return () => {
+      clearTimeout(timer)
+      window.removeEventListener('beforeunload', flush)
+    }
+  }, [state.customerVisibleColumns, state.loanVisibleColumns, state.payrollColumns, state.bankGroupLabels, state.accountingColumns, state.reportColumns, state.systemUsers, state.auditLogs, state.integrations, state.payrollRuns, state.customers, state.loanApplications, state.incomes, state.expenses, state.notifications, state.cashTransfers, state.repayments, state.cashSheet, state.cashCounts, state.recoveries, state.accounts, state.feeSettings, state.loanProducts, state.activeStatement, state.chartOfAccounts, state.realBankAccounts, state.journalEntries, state.companyProfile, state.employees, state.businessDay, state.batchRuns, state.customGeo, state.demoSeeded, state.savedFilters])
 
   // Dark mode
   useEffect(() => {

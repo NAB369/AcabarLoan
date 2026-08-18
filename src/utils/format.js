@@ -128,6 +128,17 @@ export function formatAddress(addr) {
 // rather than being handed another rounded EMI. That keeps sum(principal) === the amount
 // borrowed exactly, and the last instalment absorbs the accumulated half-cents.
 //
+// A BALLOON loan is partially amortizing: `balloonAmount` of the principal is deliberately left
+// standing at the end of the term and falls due in one lump on the final instalment. The level
+// payment is solved so the balance lands on the balloon instead of on zero — the same annuity
+// with a residual value, which is why it is the one existing solve with the residual subtracted
+// rather than a second schedule builder. A balloon equal to the whole principal is the
+// interest-only/bullet loan a seasonal agricultural borrower services monthly and clears after
+// harvest: the maths falls out of the same formula (payment = balance × rate), so it needs no
+// case of its own. Zero is a fully amortizing loan and every figure is bit-for-bit what it was
+// before this existed — subtracting a literal zero cannot move a float, which is what keeps a
+// loan already on the books from re-pricing by a rounding cent when its schedule is rebuilt.
+//
 // A collection fee, when one is charged, is priced INTO the instalment rather than billed on top
 // of it: the borrower pays one level figure every month covering principal, interest and the fee.
 // Because the fee accrues on the same outstanding balance as interest, that is exactly an annuity
@@ -163,31 +174,53 @@ export function scheduleDayCounts(accrualStartISO, dueISOs) {
 // would leave the 16 extra days the calendar carries over a 36-month term (1,096 against 1,080)
 // to pile onto the last row as a balloon. On 6,500 / 36 months / 18% + 18% that is a level
 // 299.73 rather than 297.72 for 35 months and 426.16 on the last.
-export function amortizePeriods(balance, monthlyRate, n, feeMonthlyRate = 0, dayCounts = null, currency = 'USD') {
+export function amortizePeriods(balance, monthlyRate, n, feeMonthlyRate = 0, dayCounts = null, currency = 'USD', balloonAmount = 0, structure = 'Amortizing') {
   // Every figure is rounded to what the currency can actually be paid in — the cent in USD, the
   // nearest 100 riel in KHR (see roundAmount). Rounding a riel schedule to two decimals asked a
   // borrower for money that does not circulate. The last period still absorbs the accumulated
   // difference, so sum(principal) lands on the amount borrowed whichever currency it is in.
   const round2 = x => roundAmount(x, currency)
   const chargeRate = monthlyRate + feeMonthlyRate
-  // Walked backwards from the final period: `compounded` accumulates ∏(1+cᵢ) and `annuityFactor`
-  // the sum of the partial products, which is the same quantity ((1+c)ⁿ-1)/c stands for when every
-  // period is equal. The flat-twelfth path keeps its closed form bit for bit rather than being
-  // folded into this one — the two agree mathematically, but a loan already on the books must not
-  // have its instalment shift by a rounding cent just because the schedule was rebuilt.
+  // A declining loan retires the principal in equal slices instead of solving a level instalment,
+  // so there is nothing to solve and no residual to leave standing: the two are alternative
+  // products an officer picks between, not settings that combine.
+  const declining = structure === 'Decline'
+  // Held to the principal it is carved out of: a balloon larger than the loan would solve a
+  // negative instalment, i.e. the lender paying the borrower monthly to keep the loan open.
+  const balloon = declining ? 0 : Math.min(Math.max(round2(balloonAmount) || 0, 0), round2(balance))
+  // The balloon is the FINAL instalment, not an extra payment after it, so the level payment is
+  // solved over the periods BEFORE it and has to leave exactly the balloon standing. Solving over
+  // all n instead would leave the balloon standing after the last payment as well as billing that
+  // payment — a quoted 30% residual then collected 32.5%, since the final row settles whatever is
+  // left rather than a further instalment. A loan with no balloon still solves over all n against
+  // a residual of zero, which is the original calculation untouched.
+  const solveN = balloon > 0 ? n - 1 : n
+  // The equal slice of principal a declining loan retires each period. Interest is charged on
+  // whatever balance is still standing when the period is billed, exactly as it is on every other
+  // structure — it is the principal side that differs, not the interest side.
+  const levelPrincipal = declining ? round2(balance / n) : 0
+  // Walked backwards from the final solved period: `compounded` accumulates ∏(1+cᵢ) and
+  // `annuityFactor` the sum of the partial products, which is the same quantity ((1+c)ⁿ-1)/c stands
+  // for when every period is equal. The flat-twelfth path keeps its closed form bit for bit rather
+  // than being folded into this one — the two agree mathematically, but a loan already on the books
+  // must not have its instalment shift by a rounding cent just because the schedule was rebuilt.
   let emi
-  if (dayCounts) {
+  if (declining) {
+    // Nothing to solve: no single figure is charged twice. What the loan is quoted at is read off
+    // the finished schedule below.
+    emi = 0
+  } else if (dayCounts) {
     let compounded = 1
     let annuityFactor = 0
-    for (let i = n - 1; i >= 0; i--) {
+    for (let i = solveN - 1; i >= 0; i--) {
       annuityFactor += compounded
       compounded *= 1 + chargeRate * ((dayCounts[i] || 0) / 30)
     }
-    emi = round2(annuityFactor > 0 ? (balance * compounded) / annuityFactor : balance / n)
+    emi = round2(annuityFactor > 0 ? (balance * compounded - balloon) / annuityFactor : (balance - balloon) / n)
   } else {
-    emi = round2(chargeRate > 0
-      ? (balance * chargeRate * Math.pow(1 + chargeRate, n)) / (Math.pow(1 + chargeRate, n) - 1)
-      : balance / n)
+    emi = round2(chargeRate > 0 && solveN > 0
+      ? (balance * chargeRate * Math.pow(1 + chargeRate, solveN) - balloon * chargeRate) / (Math.pow(1 + chargeRate, solveN) - 1)
+      : (balance - balloon) / n)
   }
 
   let remainingBalance = round2(balance)
@@ -197,11 +230,24 @@ export function amortizePeriods(balance, monthlyRate, n, feeMonthlyRate = 0, day
     const factor = days === null ? 1 : days / 30
     const interestPaid = round2(remainingBalance * monthlyRate * factor)
     const collectionFee = round2(remainingBalance * feeMonthlyRate * factor)
-    // The last period clears the balance outright; earlier ones can't retire more principal
-    // than is left either, which matters on a short term where the EMI overshoots.
+    // The last period clears the balance outright — on a balloon loan that final row IS the lump.
+    // Earlier ones can retire no more than the balance ABOVE the balloon, which on a plain loan is
+    // simply the balance (a balloon of zero) and matters on a short term where the EMI overshoots.
+    // Holding the floor at the balloon is also what makes the residual exactly what was quoted:
+    // ACT/360 periods are unequal, so a level payment lands slightly differently each month, and
+    // the accumulated drift is absorbed by the LAST REGULAR instalment rather than eating into
+    // the lump — the same way a plain loan's final row absorbs it, moved one row up so that the
+    // balloon a borrower signed for is the figure they are actually billed. On an interest-only
+    // loan the floor equals the balance from the outset, so no principal is retired until maturity
+    // and each row bills its own true interest — which is what interest-only means, and why it
+    // needs no case of its own. Nor can a period retire a NEGATIVE amount: one longer than the
+    // 30-day average charges more interest than the level instalment covers, and letting that
+    // through would grow the principal the borrower owes.
     const principalPaid = i === n
       ? remainingBalance
-      : Math.min(round2(emi - interestPaid - collectionFee), remainingBalance)
+      : declining
+        ? Math.min(levelPrincipal, remainingBalance)
+        : Math.min(Math.max(round2(emi - interestPaid - collectionFee), 0), round2(remainingBalance - balloon))
     remainingBalance = round2(remainingBalance - principalPaid)
     periods.push({
       principal: principalPaid,
@@ -214,6 +260,14 @@ export function amortizePeriods(balance, monthlyRate, n, feeMonthlyRate = 0, day
       ...(days === null ? {} : { days }),
     })
   }
+  // A declining loan is quoted at its LARGEST instalment, which is the figure affordability has to
+  // be tested against: a borrower who cannot pay the peak row cannot carry the loan, whatever the
+  // later rows fall to. Not simply row 1 — under ACT/360 the first period runs from disbursement to
+  // the first due date, which is usually a short stub charging less than a full month, so the
+  // second row can bill more than the first. Taking the maximum is right either way, and every
+  // screen reading `emi` then shows a payment the borrower is actually billed rather than an
+  // average nobody ever pays.
+  if (declining) emi = periods.reduce((max, p) => Math.max(max, p.totalDue), 0)
   return { emi, periods }
 }
 
@@ -222,11 +276,26 @@ export function amortizePeriods(balance, monthlyRate, n, feeMonthlyRate = 0, day
 // keeps the flat-twelfth charge, which is what every schedule written before this existed was
 // quoted at. It is deliberately not defaulted to the first installment date: guessing an accrual
 // start would silently re-price a loan nobody asked to re-price.
-export function buildAmortizationData(amount, annualRate, termMonths, firstInstStr, collectionAnnualRate = 0, accrualStartISO = '', currency = 'USD') {
+//
+// `balloonPercent` is the share of the ORIGINAL principal left standing at maturity, which is how
+// a balloon is quoted to a borrower ("30% residual", "interest only") rather than as a cash
+// figure they would have to work out themselves. 0 is the fully amortizing loan every schedule
+// written before this existed was quoted at; 100 is interest-only with the whole principal due on
+// the last instalment. See amortizePeriods for why one formula covers all three.
+//
+// `structure` is 'Amortizing' (the default every schedule written before structures existed was
+// quoted at), 'Balloon' — which is what `balloonPercent` prices — or 'Decline', the equal-principal
+// schedule whose instalment falls month by month. It must be passed at every place a saved loan's
+// schedule is REBUILT, not just where one is first written: rebuilding a declining loan without it
+// would quietly re-amortize it into a level one and show the borrower a payment they never agreed
+// to, the same trap `balloonPercent` carries.
+export function buildAmortizationData(amount, annualRate, termMonths, firstInstStr, collectionAnnualRate = 0, accrualStartISO = '', currency = 'USD', balloonPercent = 0, structure = 'Amortizing') {
   if (!amount || amount <= 0 || !annualRate || annualRate <= 0) return { emi: 0, rows: [] }
 
   const monthlyRate = (annualRate / 100) / 12
   const feeMonthlyRate = (Math.max(0, collectionAnnualRate) / 100) / 12
+  const balloonShare = Math.min(Math.max(Number(balloonPercent) || 0, 0), 100)
+  const balloonAmount = balloonShare > 0 ? roundAmount(amount * balloonShare / 100, currency) : 0
 
   // The due dates are worked out before the money is, not after: under ACT/360 they are what the
   // interest is priced on rather than labels attached to rows that were already priced.
@@ -244,7 +313,7 @@ export function buildAmortizationData(amount, annualRate, termMonths, firstInstS
   const isoDates = dates.map(toISODate)
 
   const dayCounts = accrualStartISO ? scheduleDayCounts(accrualStartISO, isoDates) : null
-  const { emi, periods } = amortizePeriods(amount, monthlyRate, termMonths, feeMonthlyRate, dayCounts, currency)
+  const { emi, periods } = amortizePeriods(amount, monthlyRate, termMonths, feeMonthlyRate, dayCounts, currency, balloonAmount, structure)
 
   const rows = periods.map((period, idx) => ({
     num: idx + 1,

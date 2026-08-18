@@ -14,6 +14,7 @@ import { formatVal } from '../../utils/format'
 import { isCashGlAccount, cashGlAccounts as cashGlAccountsOf, buildCashMovements, cashCountStatus } from '../../utils/cash'
 import { BRANCHES, CASH_DENOMINATIONS } from '../../data/constants'
 import StatusBadge from '../shared/StatusBadge'
+import MobileCardList, { MobileCardTotal } from '../shared/MobileCardList'
 import {
   JournalEntryModal, SingleEntryModal
 } from './AccountingForms'
@@ -1164,6 +1165,54 @@ const PAYROLL_AUDIT_COLUMNS = [
   { id: 'user',      label: 'User',      sortable: true, sortValue: r => r.user || '' },
   // null sorts last either way — an entry that moved no money is not a zero.
   { id: 'amount',    label: 'Amount',    sortable: true, align: 'right', sortValue: r => (r.amount == null ? null : r.amount) },
+]
+
+// ── Mobile card columns ──────────────────────────────────────────────────────
+// Three tables on this page write their cells inline rather than from a column array, so
+// there is nothing for MobileCardList to take labels from. Their columns are named once here
+// instead, in the table's own order so a card reads top-to-bottom the way the row reads
+// left-to-right. A cell changed in one of those tables has to be changed here too — which is
+// the reason every other table on this page renders from a shared column array.
+const AUDIT_LOG_CARD_COLUMNS = [
+  { id: 'date',      label: 'Date',      value: r => r.date || '—' },
+  { id: 'time',      label: 'Time',      value: r => r.timeLabel || '—' },
+  { id: 'action',    label: 'Action',    value: r => r.action },
+  { id: 'reference', label: 'Reference', value: r => r.reference },
+  { id: 'user',      label: 'User',      value: r => r.user },
+  { id: 'amount',    label: 'Amount',    value: (r, currency) => (r.amount == null ? '—' : formatVal(r.amount, currency)) },
+]
+
+const CASH_SHEET_CARD_COLUMNS = [
+  { id: 'date',        label: 'Date',          value: r => r.date },
+  { id: 'ref',         label: 'Ref',           value: r => r.ref },
+  { id: 'source',      label: 'Source',        value: r => r.source },
+  { id: 'repaymentId', label: 'Repayment ID',  value: r => r.repaymentId || '—' },
+  { id: 'reference',   label: 'Reference',     value: r => r.reference || '—' },
+  { id: 'customer',    label: 'Customer',      value: r => r.customerName || '—' },
+  { id: 'cashIn',      label: 'Cash In',       value: (r, currency) => (r.cashIn > 0
+    ? <span className="font-medium text-emerald-600 dark:text-emerald-400">{formatVal(r.cashIn, currency, 1)}</span> : '—') },
+  { id: 'cashOut',     label: 'Cash Out',      value: (r, currency) => (r.cashOut > 0
+    ? <span className="font-medium text-rose-600 dark:text-rose-400">{formatVal(r.cashOut, currency, 1)}</span> : '—') },
+  { id: 'balance',     label: 'Balance',       value: (r, currency) => (
+    <span className="font-bold text-slate-700 dark:text-slate-200">{formatVal(r.balance, currency, 1)}</span>) },
+]
+
+// Each count carries its own currency, so unlike the cash sheet these need no currency passed.
+const CASH_COUNT_CARD_COLUMNS = [
+  { id: 'date',     label: 'Date',           value: c => c.date },
+  { id: 'ref',      label: 'Ref',            value: c => c.id },
+  { id: 'account',  label: 'Cash Account',   value: c => `${c.cashAccountName} (${c.currency})` },
+  { id: 'cashier',  label: 'Cashier',        value: c => c.cashier || '—' },
+  { id: 'system',   label: 'System Balance', value: c => formatVal(c.systemBalance, c.currency, 1) },
+  { id: 'physical', label: 'Physical Cash',  value: c => (
+    <span className="font-semibold text-slate-700 dark:text-slate-200">{formatVal(c.physical, c.currency, 1)}</span>) },
+  { id: 'difference', label: 'Difference',   value: c => (
+    <span className={`font-bold ${
+      c.status === 'MATCHED' ? 'text-slate-400 dark:text-slate-500'
+        : c.status === 'SHORT' ? 'text-rose-600 dark:text-rose-400' : 'text-amber-600 dark:text-amber-400'
+    }`}>{formatVal(c.difference, c.currency, 1)}</span>) },
+  { id: 'status',   label: 'Status',         value: c => <CashCountStatusBadge status={c.status} /> },
+  { id: 'note',     label: 'Note',           value: c => c.note || '—' },
 ]
 
 // The loan book's two control accounts. Every disbursement passes through the payable and
@@ -2594,7 +2643,7 @@ export default function AccountingPage() {
               iconOnly
             />
           </div>
-          <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-24rem)]">
+          <div className="hidden md:block print:block overflow-x-auto overflow-y-auto max-h-[calc(100vh-24rem)]">
             <table className="w-full">
               <thead className="sticky top-0 z-10">
                 <tr>
@@ -2629,6 +2678,22 @@ export default function AccountingPage() {
               </tbody>
             </table>
           </div>
+
+          <MobileCardList
+            className="max-h-[calc(100vh-24rem)]"
+            columns={auditCols.visible}
+            rows={sortRows(payrollAuditRows, auditCols.visible, auditSort.sort)}
+            rowKey={(row, i) => `${row.reference}-${i}`}
+            renderCell={(col, row) => (
+              col.id === 'date' ? (row.date || '—')
+                : col.id === 'time' ? (row.timeLabel || '—')
+                : col.id === 'action' ? row.action
+                : col.id === 'reference' ? row.reference
+                : col.id === 'user' ? row.user
+                : <span className="font-bold text-slate-700 dark:text-slate-200">{row.amount == null ? '—' : formatVal(row.amount, currency)}</span>
+            )}
+            emptyMessage="Nothing has been done in payroll yet."
+          />
         </div>
       )}
 
@@ -2689,7 +2754,7 @@ export default function AccountingPage() {
               </button>
             </div>
           </div>
-          <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
+          <div className="hidden md:block print:block overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
             <table className="w-full">
               <thead className="sticky top-0 z-10">
                 <tr>
@@ -2720,6 +2785,15 @@ export default function AccountingPage() {
               </tbody>
             </table>
           </div>
+
+          <MobileCardList
+            className="max-h-[calc(100vh-21rem)]"
+            columns={visibleJeColumns}
+            rows={sortRows(journalPostings, visibleJeColumns, jeSort.sort)}
+            rowKey={(j, i) => j.id || `${j.transactionNo}-${i}`}
+            renderCell={(col, j) => col.render(j, v => formatVal(v, currency))}
+            emptyMessage="No journal entries found."
+          />
         </div>
       )}
 
@@ -2780,7 +2854,7 @@ export default function AccountingPage() {
               </button>
             </div>
           </div>
-          <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
+          <div className="hidden md:block print:block overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
             <table className="w-full">
               <thead className="sticky top-0 z-10">
                 <tr>
@@ -2811,6 +2885,15 @@ export default function AccountingPage() {
               </tbody>
             </table>
           </div>
+
+          <MobileCardList
+            className="max-h-[calc(100vh-21rem)]"
+            columns={visibleSeColumns}
+            rows={sortRows(singlePostings, visibleSeColumns, seSort.sort)}
+            rowKey={(j, i) => j.id || `${j.transactionNo}-${i}`}
+            renderCell={(col, j) => col.render(j, v => formatVal(v, currency))}
+            emptyMessage="No single entries found."
+          />
         </div>
       )}
 
@@ -2890,7 +2973,7 @@ export default function AccountingPage() {
               </button>
             </div>
           </div>
-          <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
+          <div className="hidden md:block print:block overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
             <table className="w-full">
               <thead className="sticky top-0 z-10">
                 <tr>
@@ -2933,6 +3016,21 @@ export default function AccountingPage() {
               )}
             </table>
           </div>
+
+          <MobileCardList
+            className="max-h-[calc(100vh-21rem)]"
+            columns={visibleIncColumns}
+            rows={sortRows(incomeRows, visibleIncColumns, incSort.sort)}
+            rowKey={(e, i) => `${e.code}-${i}`}
+            renderCell={(col, e) => col.render(e, v => formatVal(v, currency))}
+            emptyMessage="No income found."
+            footer={incColumns.includes('amount') && (
+              <MobileCardTotal
+                value={formatVal(incomeRows.reduce((s, e) => s + (e.amount || 0), 0), currency)}
+                valueClass="text-emerald-600 dark:text-emerald-400"
+              />
+            )}
+          />
         </div>
       )}
 
@@ -3025,7 +3123,7 @@ export default function AccountingPage() {
               </button>
             </div>
           </div>
-          <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
+          <div className="hidden md:block print:block overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
             <table className="w-full">
               <thead className="sticky top-0 z-10">
                 <tr>
@@ -3071,6 +3169,21 @@ export default function AccountingPage() {
               )}
             </table>
           </div>
+
+          <MobileCardList
+            className="max-h-[calc(100vh-21rem)]"
+            columns={visibleExpColumns}
+            rows={sortRows(expenseRows, visibleExpColumns, expSort.sort)}
+            rowKey={(e, i) => `${e.code}-${i}`}
+            renderCell={(col, e) => col.render(e, v => formatVal(v, currency), expenseRowActions)}
+            emptyMessage="No expenses found."
+            footer={expColumns.includes('amount') && (
+              <MobileCardTotal
+                value={formatVal(expenseRows.reduce((s, e) => s + (e.amount || 0), 0), currency)}
+                valueClass="text-rose-600 dark:text-rose-400"
+              />
+            )}
+          />
         </div>
       )}
 
@@ -3079,7 +3192,7 @@ export default function AccountingPage() {
       {accountingTab === 'audit-log' && (
         <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/60 dark:border-slate-700 shadow-sm overflow-hidden">
           {/* No heading — the active tab already names this table */}
-          <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
+          <div className="hidden md:block print:block overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
             <table className="w-full">
               <thead className="sticky top-0 z-10">
                 <tr>
@@ -3110,6 +3223,15 @@ export default function AccountingPage() {
               </tbody>
             </table>
           </div>
+
+          <MobileCardList
+            className="max-h-[calc(100vh-21rem)]"
+            columns={AUDIT_LOG_CARD_COLUMNS}
+            rows={auditLogRows}
+            rowKey={(row, i) => `${row.reference}-${i}`}
+            renderCell={(col, row) => col.value(row, currency)}
+            emptyMessage="Nothing has been posted in this module yet."
+          />
         </div>
       )}
 
@@ -3177,7 +3299,7 @@ export default function AccountingPage() {
               </button>
             </div>
           </div>
-          <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
+          <div className="hidden md:block print:block overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
             <table className="w-full">
               <thead className="sticky top-0 z-10">
                 <tr>
@@ -3220,6 +3342,21 @@ export default function AccountingPage() {
               )}
             </table>
           </div>
+
+          <MobileCardList
+            className="max-h-[calc(100vh-21rem)]"
+            columns={visibleCtColumns}
+            rows={sortRows(transferRows, visibleCtColumns, ctSort.sort)}
+            rowKey={(t, i) => `${t.ref}-${i}`}
+            renderCell={(col, t) => col.render(t, v => formatVal(v, currency))}
+            emptyMessage="No cash transfers found."
+            footer={ctColumns.includes('amount') && (
+              <MobileCardTotal
+                value={formatVal(transferRows.reduce((s, t) => s + (t.amount || 0), 0), currency)}
+                valueClass="text-brand-600 dark:text-brand-400"
+              />
+            )}
+          />
         </div>
       )}
 
@@ -3279,7 +3416,7 @@ export default function AccountingPage() {
             </div>
           </div>
 
-          <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-27rem)]">
+          <div className="hidden md:block print:block overflow-x-auto overflow-y-auto max-h-[calc(100vh-27rem)]">
             <table className="w-full">
               <thead className="sticky top-0 z-10">
                 <tr>
@@ -3320,6 +3457,15 @@ export default function AccountingPage() {
               </tbody>
             </table>
           </div>
+
+          <MobileCardList
+            className="max-h-[calc(100vh-27rem)]"
+            columns={CASH_SHEET_CARD_COLUMNS}
+            rows={cashSheetRows}
+            rowKey={r => r.key}
+            renderCell={(col, r) => col.value(r, cashSheetCurrency)}
+            emptyMessage={csSearch ? 'No cash movements match that search.' : 'No cash has moved through this account yet. Cash repayments post here automatically.'}
+          />
         </div>
       )}
 
@@ -3344,7 +3490,7 @@ export default function AccountingPage() {
               </button>
             </div>
           </div>
-          <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
+          <div className="hidden md:block print:block overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
             <table className="w-full">
               <thead className="sticky top-0 z-10">
                 <tr>
@@ -3384,6 +3530,15 @@ export default function AccountingPage() {
               </tbody>
             </table>
           </div>
+
+          <MobileCardList
+            className="max-h-[calc(100vh-21rem)]"
+            columns={CASH_COUNT_CARD_COLUMNS}
+            rows={cashCounts || []}
+            rowKey={c => c.id}
+            renderCell={(col, c) => col.value(c)}
+            emptyMessage="No cash counts recorded yet."
+          />
         </div>
       )}
 
@@ -3806,7 +3961,7 @@ export default function AccountingPage() {
           {/* The ledger runs as tall as the viewport allows (page chrome above it is
               roughly 21rem), so the sticky totals row lands at the bottom of the screen
               instead of partway up the page. */}
-          <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
+          <div className="hidden md:block print:block overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
             <table className="w-full">
               <thead className="sticky top-0 z-10">
                 <tr>
@@ -3854,6 +4009,24 @@ export default function AccountingPage() {
               )}
             </table>
           </div>
+
+          <MobileCardList
+            className="max-h-[calc(100vh-21rem)]"
+            columns={visibleGlColumns}
+            rows={sortRows(glEntries, visibleGlColumns, glSort.sort)}
+            renderCell={(col, e) => col.render(e, v => formatVal(v, currency))}
+            emptyMessage="No ledger entries found."
+            footer={(
+              <div className="space-y-1.5">
+                {glColumns.includes('debit') && (
+                  <MobileCardTotal label="Total debit" value={formatVal(glEntries.reduce((s, e) => s + e.debit, 0), currency)} valueClass="text-rose-600" />
+                )}
+                {glColumns.includes('credit') && (
+                  <MobileCardTotal label="Total credit" value={formatVal(glEntries.reduce((s, e) => s + e.credit, 0), currency)} valueClass="text-emerald-600" />
+                )}
+              </div>
+            )}
+          />
         </div>
       )}
 

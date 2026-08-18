@@ -30,6 +30,48 @@ export function getCollateralDocTypes(collateralType) {
   return COLLATERAL_DOC_TYPES_BY_TYPE[collateralType] || ['Valuation Report', 'Other']
 }
 
+// How a loan retires its principal. Amortizing is the ordinary product — a level instalment that
+// closes the balance on the last one. Balloon leaves a share of the principal standing to the end
+// and collects it as the final instalment, which is what a seasonal borrower needs: an
+// agricultural loan services interest through the growing months and clears the principal after
+// harvest, and land-title-secured lending is written the same way. Decline retires an equal slice
+// of principal every month and charges interest on what is still outstanding, so the instalment
+// starts high and falls — the borrower pays less interest overall than on the level product, which
+// suits a salaried borrower who wants the loan off their books quickly. See amortizePeriods in
+// utils/format.js for how one calculation covers all three, and BALLOON_INTEREST_ONLY_PERCENT for
+// the interest-only case a 100% residual amounts to.
+export const LOAN_STRUCTURES = ['Amortizing', 'Balloon', 'Decline']
+
+// What the officer chooses between in the wizard. The label is deliberately longer than the stored
+// value on Decline ("Decline Schedule") — the stored value is what every schedule rebuild branches
+// on and must stay stable, the label is what a loan officer reads.
+export const LOAN_STRUCTURE_OPTIONS = [
+  {
+    value: 'Amortizing',
+    label: 'Amortizing',
+    tag: 'Recommended',
+    description: 'Equal payments covering interest & principal.',
+  },
+  {
+    value: 'Balloon',
+    label: 'Balloon',
+    tag: 'Low start',
+    description: 'Small monthly payments + large final sum.',
+  },
+  {
+    value: 'Decline',
+    label: 'Decline Schedule',
+    tag: 'Fast payoff',
+    description: 'Higher payments initially that decrease.',
+  },
+]
+
+export const BALLOON_INTEREST_ONLY_PERCENT = 100
+// What a balloon is quoted at when the officer hasn't said otherwise. A third of the principal
+// left to the end is the common shape here; interest-only is the deliberate 100% choice, not
+// something to land on by default.
+export const DEFAULT_BALLOON_PERCENT = 30
+
 export const RELATIONS = ['Spouse', 'Parent', 'Child', 'Sibling', 'Relative', 'Friend', 'Business Partner', 'Colleague', 'Other']
 
 export const REGISTRATION_STATUSES = ['Registered', 'Pending Registration', 'Unregistered']

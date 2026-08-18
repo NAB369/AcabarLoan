@@ -9,6 +9,7 @@ import { useApp } from '../../context/AppContext'
 import { formatDateDisplay, splitTimestamp } from '../../utils/format'
 import ProviderLogo from './ProviderLogo'
 import WeBill365Auth from './WeBill365Auth'
+import WeUMS365Auth from './WeUMS365Auth'
 import { INTEGRATION_CATALOGUE, buildIntegration } from './catalogue'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -719,12 +720,15 @@ export default function IntegrationPage({ embedded = false }) {
     showToast(`Registered with ${integration.name} as ${userId}`, 'success')
   }
 
-  function handleSignIn(integration, userId) {
+  // `extra` is whatever the provider's own sign-in settled alongside the account — WeUMS365
+  // passes the "Remember me" choice, which is what decides whether its email field opens
+  // prefilled next time. The generic form passes none.
+  function handleSignIn(integration, userId, extra = null) {
     dispatch({
       type: 'UPDATE_INTEGRATION',
       id: integration.id,
       updates: {
-        login: { ...integration.login, userId, signedIn: true },
+        login: { ...integration.login, userId, signedIn: true, ...(extra || {}) },
         // Signing back in to WeBill365 re-establishes the connection, for the same reason
         // registering opens one — see handleRegister.
         ...(integration.id === 'webill365' ? { status: 'connected' } : {}),
@@ -1195,14 +1199,32 @@ export default function IntegrationPage({ embedded = false }) {
           </div>
 
           {/* Connect opens on the sign-in gate until this install has an account with the
-              provider — nothing behind it can be set up without one. WeBill365 brings its own
-              sign-in, so it gets that instead of this form (see WeBill365Auth). */}
-          {!signedIn && active.id !== 'webill365' && (
+              provider — nothing behind it can be set up without one. WeBill365 and WeUMS365
+              each bring their own sign-in, so they get those instead of this form (see
+              WeBill365Auth / WeUMS365Auth). */}
+          {!signedIn && active.id !== 'webill365' && active.id !== 'weums' && (
             <AuthPanel
               key={active.id}
               integration={active}
               onRegister={userId => handleRegister(active, userId)}
               onSignIn={userId => handleSignIn(active, userId)}
+            />
+          )}
+
+          {/* WeUMS365's own screens, as a popup over the provider page the same way
+              WeBill365's are: sign in, create an account, reset a forgotten password. Unlike
+              WeBill365 this is the gate only — WeUMS365 still connects by the API key on its
+              Connection tab, so signing in hands over to the tabs below. */}
+          {!signedIn && active.id === 'weums' && (
+            <WeUMS365Auth
+              key={active.id}
+              integration={active}
+              onSignIn={(userId, remember) => handleSignIn(active, userId, { remember })}
+              onRegister={(userId, profile) => handleRegister(active, userId, profile)}
+              // Dismissing a sign-in that never happened returns to Integrations rather than
+              // to a provider page with nothing usable on it — the same way backing out of
+              // WeBill365's connect popup does.
+              onClose={() => setOpenId(null)}
             />
           )}
 

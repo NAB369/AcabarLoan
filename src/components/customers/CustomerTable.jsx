@@ -1,10 +1,11 @@
 import { Pencil, Trash2 } from 'lucide-react'
 import { useApp } from '../../context/AppContext'
 import Pagination from '../shared/Pagination'
+import { withinRange } from '../../utils/dateRange'
 import { Button } from '@/components/ui/button'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table'
 import {
-  useTableSort, sortRows, SortHeader, ariaSortFor,
+  useTableSort, sortRows, SortHeader, ariaSortFor, ExportCsvButton,
 } from '../shared/DataTableTools'
 
 function formatDateDMY(isoStr) {
@@ -61,8 +62,8 @@ export const CUSTOMER_COLUMNS = [
 // `visible` is owned by the page, not the table, so the column picker can sit in the page's
 // toolbar next to Open New Customer rather than in a bar of its own above the table.
 export default function CustomerTable({ visible = CUSTOMER_COLUMNS }) {
-  const { state, dispatch } = useApp()
-  const { customers, customerSearch, customerDateFilter, customerPage, customerPageSize } = state
+  const { state, dispatch, showToast } = useApp()
+  const { customers, customerSearch, customerDateRange, customerPage, customerPageSize } = state
   const { sort, toggleSort } = useTableSort()
 
   const q = customerSearch.trim().toLowerCase()
@@ -75,8 +76,7 @@ export default function CustomerTable({ visible = CUSTOMER_COLUMNS }) {
       (c.phone || '').toLowerCase().includes(q) ||
       (c.idNo || '').toLowerCase().includes(q)
     )
-    const created = c.createdAt ? c.createdAt.slice(0, 10) : ''
-    const matchesDate = !customerDateFilter || created === customerDateFilter
+    const matchesDate = withinRange(c.createdAt, customerDateRange)
     return matchesSearch && matchesDate
   })
 
@@ -104,7 +104,12 @@ export default function CustomerTable({ visible = CUSTOMER_COLUMNS }) {
     <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/60 dark:border-slate-700 shadow-sm overflow-hidden">
       {/* The mobile card list below is a fixed summary and is deliberately not driven by the
           column picker. */}
-      <div className="hidden md:block overflow-x-auto min-h-[60vh] max-h-[60vh] overflow-y-auto">
+      <div
+        role="region"
+        aria-label="Customer register table"
+        tabIndex={0}
+        className="hidden md:block overflow-x-auto min-h-[60vh] max-h-[60vh] overflow-y-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-inset"
+      >
         <Table className="w-full text-xs">
           <TableHeader className="sticky top-0 z-10">
             <TableRow className="bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800">
@@ -233,14 +238,24 @@ export default function CustomerTable({ visible = CUSTOMER_COLUMNS }) {
       </div>
 
       {total > 0 && (
-        <div className="px-4 py-3 border-t border-slate-100 dark:border-slate-700">
-          <Pagination
-            page={safePage}
-            totalPages={totalPages}
-            from={from}
-            to={to}
-            total={total}
-            onPage={p => dispatch({ type: 'SET_CUSTOMER_PAGE', page: p })}
+        // Export beside the count it acts on — it saves all `total` rows, not the page.
+        <div className="px-4 py-3 border-t border-slate-100 dark:border-slate-700 flex flex-col-reverse sm:flex-row sm:items-center gap-3">
+          <div className="flex-1 min-w-0">
+            <Pagination
+              page={safePage}
+              totalPages={totalPages}
+              from={from}
+              to={to}
+              total={total}
+              onPage={p => dispatch({ type: 'SET_CUSTOMER_PAGE', page: p })}
+            />
+          </div>
+          <ExportCsvButton
+            name="customers"
+            columns={visible}
+            rows={ordered}
+            onExported={n => showToast(`${n} customer${n === 1 ? '' : 's'} exported to CSV`, 'success')}
+            className="self-end sm:self-auto flex-shrink-0"
           />
         </div>
       )}

@@ -3,7 +3,7 @@ import {
   FileText, AlertTriangle, Clock, Landmark, ChevronLeft, BarChart3, Activity,
   ChevronDown, Printer, Download,
   Users, Banknote, CheckCircle, ClipboardList, Percent, Wallet, ShieldAlert,
-  Receipt, Coins,
+  Receipt, Coins, Sheet,
 } from 'lucide-react'
 import jsPDF from 'jspdf'
 import autoTable from 'jspdf-autotable'
@@ -11,6 +11,8 @@ import { useApp } from '../../context/AppContext'
 import { formatVal, buildAmortizationData, formatAddress, daysBetweenISO } from '../../utils/format'
 import { cashGlAccounts, buildCashMovements } from '../../utils/cash'
 import StatusBadge from '../shared/StatusBadge'
+import MobileCardList, { MobileCardTotal } from '../shared/MobileCardList'
+import { exportTableCsv } from '../../utils/exportCsv'
 import { useTableColumns, ColumnPicker } from '../shared/DataTableTools'
 import { companyLogoSrc } from '../../utils/companyLogo'
 import FinancialReportSection from './FinancialReportSection'
@@ -487,18 +489,39 @@ function SimpleReportTable({ tableId, reportTitle, meta, count, columns: allColu
             <Printer className="w-3.5 h-3.5" />
             Print
           </button>
+          {/* Two formats, each named for what it produces — the old single "Download" button
+              said nothing about which. CSV is what a finance team can actually work with: the
+              same rows and the same visible columns, opened in a spreadsheet instead of
+              retyped out of a PDF. */}
+          <button
+            onClick={() => {
+              const n = exportTableCsv(reportTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-'), columns, rows)
+              showToast(`${n} row${n === 1 ? '' : 's'} exported to CSV`, 'success')
+            }}
+            disabled={rows.length === 0}
+            title={rows.length ? 'Open this report in a spreadsheet' : 'Nothing to export'}
+            className="flex items-center gap-1.5 border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <Sheet className="w-3.5 h-3.5" />
+            CSV
+          </button>
           <button
             onClick={handleDownload}
             className="flex items-center gap-1.5 border border-brand-100 dark:border-brand-800 text-brand-600 dark:text-brand-400 bg-brand-50 dark:bg-brand-900/30 hover:bg-brand-100 dark:hover:bg-brand-900/50 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors"
           >
             <Download className="w-3.5 h-3.5" />
-            Download
+            PDF
           </button>
         </div>
       </div>
       <div className="printable-area">
       <PrintReportHeader title={reportTitle} meta={meta} />
-      <div className="overflow-x-auto max-h-[460px] overflow-y-auto rounded-b-2xl">
+      {/* From md the report is a table — a report is read by comparing rows down a column,
+          and that is what a table is for. Below md there is no width to compare across: the
+          same rows are stacked as cards (see below), each one a record with its columns as
+          labelled lines. Printing always takes the table, whatever the screen it was
+          triggered from — a printed report is A4, not 375px. */}
+      <div className="hidden md:block print:block overflow-x-auto max-h-[460px] overflow-y-auto rounded-b-2xl">
         <table className="w-full">
           <thead className="sticky top-0 z-10">
             <tr>
@@ -533,6 +556,27 @@ function SimpleReportTable({ tableId, reportTitle, meta, count, columns: allColu
           )}
         </table>
       </div>
+
+      {/* Mobile: the same rows as cards. Every report on every tab goes through this one
+          renderer, so they all read the same way on a phone. */}
+      <MobileCardList
+        className="max-h-[460px] rounded-b-2xl"
+        columns={columns}
+        rows={rows}
+        rowKey={(row, i) => row.key ?? i}
+        renderCell={(col, row) => (col.render ? col.render(row) : row[col.key])}
+        emptyMessage={emptyMessage}
+        footer={totals && (
+          <div className="space-y-1.5">
+            <p className="text-xs font-bold text-slate-700 dark:text-slate-200">{totals.label ?? 'Total'}</p>
+            {/* Only the columns a total was computed for — a blank line against every other
+                column would bury the two or three figures that are the point of the row. */}
+            {columns.slice(1).filter(col => totals[col.key] != null && totals[col.key] !== '').map(col => (
+              <MobileCardTotal key={col.key} label={col.label} value={totals[col.key]} />
+            ))}
+          </div>
+        )}
+      />
       </div>
     </div>
   )
@@ -554,11 +598,14 @@ const dmy = iso => (iso ? new Date(`${iso}T00:00:00`).toLocaleDateString('en-GB'
 // A disbursed loan carries its schedule on the record — RECORD_REPAYMENT writes what was
 // actually collected back onto it — so the operational reports read that rather than deriving
 // their own. A loan with no stored schedule (never disbursed, or saved before schedules were
-// kept there) falls back to the amortization its own terms imply.
+// kept there) falls back to the amortization its own terms imply — its balloon residual included,
+// or the fallback would report a balloon loan as a level one and understate the lump the borrower
+// owes at maturity. Its structure travels with it for the same reason — a declining loan reported
+// as a level one would misstate every instalment in the report.
 function loanSchedule(loan) {
   if (loan.schedule?.length) return loan.schedule
   if (!loan.amount || !loan.interestRate) return []
-  return buildAmortizationData(loan.amount, loan.interestRate, loan.installments || 12, loan.firstInstallment, 0, loan.disbursementDate, loan.currency).rows
+  return buildAmortizationData(loan.amount, loan.interestRate, loan.installments || 12, loan.firstInstallment, 0, loan.disbursementDate, loan.currency, loan.balloonPercent || 0, loan.structure || 'Amortizing').rows
 }
 
 const isLive = loan => loan.status === 'Active'
