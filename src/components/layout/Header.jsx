@@ -1,6 +1,7 @@
 import { useState, useId } from 'react'
 import { Bell, Moon, Sun, Settings, LogOut, User, ChevronLeft, Menu, MonitorCog, ChevronDown, Check } from 'lucide-react'
 import { useApp } from '../../context/AppContext'
+import { currentLoanRef } from '../../utils/navigation'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -86,9 +87,19 @@ export default function Header({ onMenuClick }) {
 
   const unread = state.notifications.filter(n => !n.read).length
   const dayOpen = state.businessDay?.status === 'open'
-  const inLoanDetail = state.activeTab === 'open-loan' && state.loanDetailIdx !== null && state.loanDetailIdx !== undefined
   const inLoanOverview = state.activeTab === 'open-loan' && state.loanOverviewOpen
   const inLoanPreview = state.activeTab === 'open-loan' && state.loanPreviewOpen
+  // Which loan the breadcrumb names, read the same way the URL reads it (see utils/navigation)
+  // so the address bar and the breadcrumb can never disagree about where the user is.
+  const loanRef = state.activeTab === 'open-loan' ? currentLoanRef(state) : null
+
+  function closeLoanView() {
+    dispatch({
+      type: inLoanOverview ? 'CLOSE_LOAN_OVERVIEW'
+        : inLoanPreview ? 'CLOSE_LOAN_PREVIEW'
+          : 'CLOSE_LOAN_DETAIL',
+    })
+  }
 
   // Each of the header menus closes its siblings when it opens — Radix already closes a
   // menu on outside click / Escape on its own, this just preserves the "only one open at a
@@ -107,24 +118,48 @@ export default function Header({ onMenuClick }) {
   return (
     <header className="h-16 bg-white border-b border-slate-200 px-3 sm:px-6 flex items-center justify-between flex-shrink-0 relative z-30 dark:bg-slate-800 dark:border-slate-700">
       <div className="flex items-center gap-1.5 min-w-0">
+        {/* Only where the sidebar is off-canvas. From md it is a permanent icon rail, and a
+            hamburger beside a visible nav is a button that opens what is already open. */}
         <Button
           variant="ghost"
           size="icon"
           onClick={onMenuClick}
-          className="lg:hidden text-slate-500 hover:text-slate-700 hover:bg-slate-100 rounded-lg dark:text-slate-400 dark:hover:text-slate-200 dark:hover:bg-white/5 flex-shrink-0"
+          aria-label={isKh ? 'បើកម៉ឺនុយ' : 'Open navigation menu'}
+          className="md:hidden text-slate-500 hover:text-slate-700 hover:bg-slate-100 rounded-lg dark:text-slate-400 dark:hover:text-slate-200 dark:hover:bg-white/5 flex-shrink-0"
         >
           <Menu className="w-5 h-5" />
         </Button>
-        {(inLoanDetail || inLoanOverview || inLoanPreview) ? (
-          <Button
-            variant="ghost"
-            onClick={() => dispatch({ type: inLoanOverview ? 'CLOSE_LOAN_OVERVIEW' : inLoanPreview ? 'CLOSE_LOAN_PREVIEW' : 'CLOSE_LOAN_DETAIL' })}
-            className="flex items-center gap-1.5 px-2 sm:px-4 py-2 h-auto text-sm font-semibold rounded-xl text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 min-w-0"
-          >
-            <ChevronLeft className="w-4 h-4 flex-shrink-0" />
-            <span className="truncate hidden sm:inline">Back to Loan Applications</span>
-            <span className="truncate sm:hidden">Back</span>
-          </Button>
+        {/* Where you are, not just a way out. The loan views sit two levels deep with nothing
+            else on screen saying so — the module name is now a crumb you can click back to,
+            and the loan's own reference names the level you are on. On a narrow screen the
+            module name drops and the chevron plus the reference carry it. */}
+        {loanRef ? (
+          <nav aria-label="Breadcrumb" className="flex items-center gap-0.5 min-w-0">
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={closeLoanView}
+              aria-label={isKh ? 'ត្រឡប់ទៅការគ្រប់គ្រងកម្ចី' : 'Back to Loan Management'}
+              className="text-slate-500 hover:text-slate-700 hover:bg-slate-100 rounded-lg dark:text-slate-400 dark:hover:text-slate-200 dark:hover:bg-white/5 flex-shrink-0"
+            >
+              <ChevronLeft className="w-4 h-4" />
+            </Button>
+            <ol className="flex items-center gap-1.5 min-w-0">
+              <li className="hidden sm:block flex-shrink-0">
+                <button
+                  type="button"
+                  onClick={closeLoanView}
+                  className="text-sm font-semibold text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-100 hover:underline rounded"
+                >
+                  {isKh ? 'ដាក់ពាក្យខ្ចី' : 'Loan Management'}
+                </button>
+              </li>
+              <li aria-hidden="true" className="hidden sm:block text-slate-300 dark:text-slate-600 flex-shrink-0">/</li>
+              <li aria-current="page" className="font-mono text-sm font-bold text-slate-800 dark:text-slate-100 truncate">
+                {loanRef}
+              </li>
+            </ol>
+          </nav>
         ) : null}
       </div>
       <div className="flex items-center gap-1 sm:gap-2.5">

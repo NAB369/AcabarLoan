@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
-import { Columns3, ChevronUp, ChevronDown, ChevronsUpDown } from 'lucide-react'
+import { Columns3, ChevronUp, ChevronDown, ChevronsUpDown, Download } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { exportTableCsv } from '../../utils/exportCsv'
 
 // Sorting and column visibility for the register tables. Both were wanted on Customers and on
 // Loan Applications at once, so they live here rather than being written twice — see the
@@ -176,4 +177,34 @@ export function SortHeader({ column, sort, onSort, children }) {
 export function ariaSortFor(column, sort) {
   if (!column.sortable || sort?.id !== column.id) return undefined
   return sort.dir === 'asc' ? 'ascending' : 'descending'
+}
+
+// ── Export ───────────────────────────────────────────────────────────────────
+// Exports the rows the register is actually showing — filtered and sorted, every page of them,
+// not the ten on screen — through the columns left visible in the picker beside it. So what
+// lands in the spreadsheet is what the operator narrowed the list down to, which is the whole
+// reason they narrowed it.
+export function ExportCsvButton({ columns, rows, name, ctx, onExported, label = 'Export CSV', className = '' }) {
+  const count = rows?.length || 0
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        exportTableCsv(name, columns, rows, ctx)
+        onExported?.(count)
+      }}
+      disabled={count === 0}
+      title={count ? `Export ${count} row${count === 1 ? '' : 's'} to a spreadsheet` : 'Nothing to export'}
+      className={cn(
+        'flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-xl border transition-colors whitespace-nowrap',
+        count === 0
+          ? 'border-slate-200 dark:border-slate-700 text-slate-300 dark:text-slate-600 cursor-not-allowed'
+          : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700',
+        className,
+      )}
+    >
+      <Download className="w-3.5 h-3.5 flex-shrink-0" />
+      {label}
+    </button>
+  )
 }
