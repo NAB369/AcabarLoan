@@ -5,10 +5,11 @@ import {
   DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator,
 } from '@/components/ui/dropdown-menu'
 import { buildReminderRecipients, buildSampleReminderMessage, daysUntilDue as daysUntilDueISO, weumsSignedIn } from '../../utils/reminders'
-import { formatVal, formatAddress, buildAmortizationData, splitTimestamp, formatDateDisplay } from '../../utils/format'
+import { formatVal, num2, formatKhDMY, formatAddress, splitTimestamp, formatDateDisplay } from '../../utils/format'
 import { LOAN_TAB_ICONS } from '../../utils/tabIcons'
 import { downloadSheetPdf } from '../../utils/exportPdf'
 import { companyLogoSrc } from '../../utils/companyLogo'
+import { benefitCustomFeeItems, collectionFeeSchedule, installmentPenalty, penaltyPayoffSchedule, loanPenaltyTerms, installmentTotal, scheduleTotals, isCollectionFee, overriddenRate, selectedBuiltInFeeKeys } from '../../utils/benefitFees'
 import { buildKhqrPayload, renderKhqrImage } from '../../utils/khqr'
 import { InfoRow, InfoCard } from '../shared/InfoCard'
 import DocList from '../shared/DocList'
@@ -26,7 +27,6 @@ import { assessLoanRisk } from '../../utils/riskAssessment'
 import { incomeCapacity } from '../../utils/statementIncome'
 import { expenseCapacity } from '../../utils/statementExpense'
 
-const INSTALLMENT_OPTIONS = [3, 6, 12, 18, 24, 36, 48, 60]
 const CREDIT_HISTORY_FIELD = { borrower: 'creditHistoryInfo', coBorrower: 'coBorrowerCreditHistoryInfo', guarantor: 'guarantorCreditHistoryInfo' }
 const CREDIT_HISTORY_LABEL = { borrower: 'Borrower', coBorrower: 'Co-Borrower', guarantor: 'Guarantor' }
 const TABS = ['Overview', 'Repayment Tracking', 'Repayment Reminder', 'Repayment Schedule', 'Loan Profile', 'Audit Log']
@@ -95,7 +95,12 @@ function DocField({ label, value }) {
   return (
     <div data-doc-field className="flex items-baseline gap-3 py-1 border-b border-dotted border-slate-200 dark:border-slate-700 text-xs">
       <span className="text-slate-500 dark:text-slate-400 w-36 flex-shrink-0">{label}</span>
-      <span className="font-medium text-slate-800 dark:text-slate-100 text-left truncate">{value ?? '—'}</span>
+      {/* Wraps rather than truncating. `truncate` costs a printed profile twice over: its
+          overflow:hidden clips the glyphs against the row's baseline box, so every value came
+          out shaved off along the bottom, and its ellipsis silently drops the tail of anything
+          long — a full address printed as "#56, St 217, Phum 2, Olympic, Chan…". On screen a
+          cut value can be hovered or the column widened; on paper it is simply gone. */}
+      <span className="font-medium text-slate-800 dark:text-slate-100 text-left min-w-0 break-words">{value ?? '—'}</span>
     </div>
   )
 }
@@ -106,7 +111,13 @@ function DocFieldGrid({ children }) {
 
 export default function LoanPreview() {
   const { state, dispatch, showToast, can } = useApp()
-  const loan = state.activeLoan
+  // Bound to the live register entry, not to the snapshot the row click put in state.
+  // `activeLoan` is a *copy* of the loan as it stood when this page was opened: UPDATE_LOAN
+  // refreshes loanApplications and leaves that copy behind. Everything derived here — the fee
+  // figures, the Loan Suggestion, the schedule — was therefore computed from a stale record,
+  // so editing the loan appeared to save and change nothing on screen.
+  const openedLoan = state.activeLoan
+  const loan = state.loanApplications.find(a => a.ref === openedLoan?.ref) || openedLoan
   const [activeTab, setActiveTab] = useState(() => {
     const idx = TABS.indexOf(state.loanPreviewTab)
     return idx >= 0 ? idx : 0
@@ -158,11 +169,8 @@ export default function LoanPreview() {
   const schedule = loan.schedule || []
   const emi = loan.emi || (schedule.length > 0 ? schedule[0].totalDue : 0)
   const customer = state.customers.find(c => c.code === loan.customerCode)
-  // `UPDATE_LOAN` refreshes `loanApplications` but not `activeLoan`, so read the
-  // history off the live list entry — otherwise a reminder sent from this page
-  // never appears below until the page is reopened.
-  const liveLoan = state.loanApplications.find(a => a.ref === loan.ref) || loan
-  const reminderHistory = liveLoan.reminderHistory || []
+  // `loan` is already the live register entry (see above), so the history comes straight off it.
+  const reminderHistory = loan.reminderHistory || []
   const collaterals = loan.collaterals?.length ? loan.collaterals : (loan.collateral ? [loan.collateral] : [])
   const isDisbursed = loan.status === 'Active'
   const readyToDisburse = loan.status === 'Waiting Disburse' && !isDisbursed
@@ -184,55 +192,83 @@ export default function LoanPreview() {
   const totalMonthlyExpense = expense.assessable
   const remainingAmount = income.assessable - expense.assessable
 
-  const termOptions = (loan.amount && loan.interestRate)
-    ? INSTALLMENT_OPTIONS.map(term => {
-        const { emi: termEmi, rows: termRows } = buildAmortizationData(loan.amount, loan.interestRate, term, loan.firstInstallment)
-        const totalInterest = termRows.reduce((sum, r) => sum + (r.interest || 0), 0)
-        const leftAmount = remainingAmount - termEmi
-        return { term, emi: termEmi, totalInterest, leftAmount, affordable: leftAmount >= 0 }
-      })
-    : []
-  const affordableTermOptions = termOptions.filter(t => t.affordable)
-  const recommendedTerm = affordableTermOptions.length > 0
-    ? affordableTermOptions.reduce((best, t) => t.term < best.term ? t : best, affordableTermOptions[0]).term
-    : (termOptions.length > 0 ? termOptions[termOptions.length - 1].term : null)
 
   // Benefit to the Bank: every fee is auto-calculated from the loan amount, interest rate,
   // and the fee rates configured in System Settings.
   const feeSettings = state.feeSettings || {}
-  const productLower = (loan.product || '').toLowerCase()
-  const isPersonalLoan = productLower.includes('personal')
-  const isVehicleLoan = productLower.includes('car') || productLower.includes('vehicle')
+  // The penalty period: the loan's own if it carries one, else the product it was sold under.
+  const { rate: penaltyRate, months: penaltyMonths } = loanPenaltyTerms(loan, state.loanProducts)
+  // The Penalty Payoff column is a running balance, opening at the whole penalty and drawn down
+  // to zero — see penaltyPayoffSchedule.
+  const penaltyPayoffRows = penaltyPayoffSchedule(schedule, penaltyRate, penaltyMonths)
+
   // Lawyer/ministry fees scale per land title pledged; the transport-ministry fee scales per
   // vehicle pledged — each asset needs its own filing, so two of them double the fee.
   const landCollateralCount = Math.max(1, collaterals.filter(c => c.type === 'Land').length)
   const vehicleCollateralCount = Math.max(1, collaterals.filter(c => c.type === 'Vehicle').length)
   const totalInterestIncome = schedule.reduce((sum, row) => sum + (row.interest || 0), 0)
+  // Effective rate = the officer's per-loan override from the Benefit Rate panel, else the
+  // System Settings default.
+  const feeRateOverrides = loan.benefitFeeRates || {}
+  const feeRate = key => overriddenRate(feeRateOverrides, key, feeSettings[key])
   const interestFee = { category: 'Interest Fee', amount: totalInterestIncome }
-  const adminFee = { category: 'Admin Fee', amount: (loan.amount || 0) * ((feeSettings.adminFeeRate || 0) / 100), rateKey: 'adminFeeRate' }
-  const insuranceFee = { category: 'Insurance Fee', amount: (loan.amount || 0) * ((feeSettings.insuranceFeeRate || 0) / 100), rateKey: 'insuranceFeeRate' }
-  const lawyerFee = { category: 'Lawyer Fee', amount: (loan.amount || 0) * ((feeSettings.lawyerFeeRate || 0) / 100) * landCollateralCount, multiplier: landCollateralCount, multiplierLabel: 'land titles', rateKey: 'lawyerFeeRate' }
-  const ministryFee = { category: 'Ministry Fee', amount: (loan.amount || 0) * ((feeSettings.ministryFeeRate || 0) / 100) * landCollateralCount, multiplier: landCollateralCount, multiplierLabel: 'land titles', rateKey: 'ministryFeeRate' }
-  const transportMinistryFee = { category: 'Ministry of Public Works and Transport', amount: (loan.amount || 0) * ((feeSettings.transportMinistryFeeRate || 0) / 100) * vehicleCollateralCount, multiplier: vehicleCollateralCount, multiplierLabel: 'vehicles', rateKey: 'transportMinistryFeeRate' }
+  const adminFee = { category: 'Admin Fee', amount: (loan.amount || 0) * (feeRate('adminFeeRate') / 100), rateKey: 'adminFeeRate' }
+  const insuranceFee = { category: 'Insurance Fee', amount: (loan.amount || 0) * (feeRate('insuranceFeeRate') / 100), rateKey: 'insuranceFeeRate' }
+  const lawyerFee = { category: 'Lawyer Fee', amount: (loan.amount || 0) * (feeRate('lawyerFeeRate') / 100) * landCollateralCount, multiplier: landCollateralCount, multiplierLabel: 'land titles', rateKey: 'lawyerFeeRate' }
+  const ministryFee = { category: 'Ministry Fee', amount: (loan.amount || 0) * (feeRate('ministryFeeRate') / 100) * landCollateralCount, multiplier: landCollateralCount, multiplierLabel: 'land titles', rateKey: 'ministryFeeRate' }
+  const transportMinistryFee = { category: 'Ministry of Public Works and Transport', amount: (loan.amount || 0) * (feeRate('transportMinistryFeeRate') / 100) * vehicleCollateralCount, multiplier: vehicleCollateralCount, multiplierLabel: 'vehicles', rateKey: 'transportMinistryFeeRate' }
   // Built-in fees deleted in Loan Setting → Benefit Fees drop out entirely; interest has no rate key and always counts.
   const removedFeeKeys = feeSettings.removedFeeKeys || []
-  const baseFeeItems = (isPersonalLoan
-    ? [interestFee, adminFee]
-    : isVehicleLoan
-    ? [interestFee, adminFee, insuranceFee, transportMinistryFee]
-    : [interestFee, adminFee, insuranceFee, lawyerFee, ministryFee]
-  ).filter(b => !b.rateKey || !removedFeeKeys.includes(b.rateKey))
-  const baseFeeCategories = new Set(baseFeeItems.map(b => b.category.toLowerCase()))
-  const customFees = (feeSettings.customFees || [])
-    .filter(f => !baseFeeCategories.has((f.name || '').toLowerCase()))
-    .map(f => ({ category: f.name, amount: (loan.amount || 0) * ((f.rate || 0) / 100) }))
+  const configurableFeeItems = [adminFee, insuranceFee, lawyerFee, ministryFee, transportMinistryFee]
+    .filter(b => !removedFeeKeys.includes(b.rateKey))
+  // Which of those this loan carries is the officer's choice in the Benefit Rate panel (Loan
+  // Suggestion tab); the product only supplies the default until they save one.
+  const selectedFeeKeys = selectedBuiltInFeeKeys(loan)
+  const baseFeeItems = [interestFee, ...configurableFeeItems.filter(b => selectedFeeKeys.includes(b.rateKey))]
+  const baseFeeCategories = new Set([interestFee, ...configurableFeeItems].map(b => b.category.toLowerCase()))
+  // Institution-wide custom fees, minus any the officer unticked for this loan and with any
+  // per-loan rate override applied — see the Benefit Rate panel on the Loan Suggestion tab.
+  const customFees = benefitCustomFeeItems(loan, feeSettings, baseFeeCategories, schedule)
   const benefitItems = [...baseFeeItems, ...customFees]
+  // The schedule sheet prints the admin fee on its own line, so it has to agree with the strip:
+  // 0 when the loan isn't charged it, whether that's a removed fee or an unticked one.
+  const adminFeeCharged = baseFeeItems.includes(adminFee)
   const totalBenefitToBank = benefitItems.reduce((sum, b) => sum + b.amount, 0)
+
+  // ── The collection fee, per installment ──
+  // Configured in Loan Setting → Benefit Fees as a custom fee named "Collection Fee", and charged
+  // on the same basis as interest: the rate is annual, a twelfth of it falls due each installment,
+  // and it is charged on the principal still outstanding — so the column declines alongside the
+  // interest column instead of repeating one flat share. See utils/benefitFees.
+  const collectionFee = customFees.find(f => isCollectionFee(f.category))
+  const collectionFeeRate = collectionFee?.rate || 0
+  const collectionFeeMethodInUse = collectionFee?.method
+  const collectionFeeRows = useMemo(
+    () => collectionFeeSchedule(schedule, collectionFeeRate, collectionFeeMethodInUse, loan.amount || 0),
+    [schedule, collectionFeeRate, collectionFeeMethodInUse, loan.amount])
 
   // Risk Assessment: auto-derived from each party's CBC data — see utils/riskAssessment.
   const riskAssessment = assessLoanRisk(loan)
   // Every file on the loan, for the profile's Documents section — see loanDocuments.js.
   const profileDocGroups = useMemo(() => buildProfileDocGroups(loan, customer), [loan, customer])
+
+  // Who each CBC report was pulled against, for the profile's credit-history headings. The
+  // borrower is named on the loan itself; a co-borrower or guarantor is whoever sits first in
+  // their list, which is the party a single report belongs to. Falls back to the bare role when
+  // a party carries no name yet, so the heading never reads "Borrower — ".
+  function creditHistoryHeading(target) {
+    const role = CREDIT_HISTORY_LABEL[target]
+    const first = list => (list?.length ? list[0] : null)
+    const party = target === 'coBorrower'
+      ? first(loan.coBorrowers) || loan.coBorrower
+      : target === 'guarantor'
+        ? first(loan.guarantors) || loan.guarantor
+        : null
+    const name = target === 'borrower'
+      ? (loan.customerName || customer?.enName || '')
+      : (party?.enName || party?.khName || '')
+    return name.trim() ? `${role} — ${name.trim()}` : role
+  }
 
 
   const upcomingInstallments = schedule.filter(r => r.status !== 'Paid')
@@ -414,12 +450,21 @@ export default function LoanPreview() {
     if (!element || downloading) return
     setDownloading(true)
     try {
+      // Every uploaded document on the loan, carried into the same file as the data. The sheet
+      // itself lists them as rows — a 40px thumbnail for a photo, an icon for a PDF — which is
+      // an index of what exists, not the documents. They are appended in full after the data
+      // pages, each labelled with the group it was filed under.
+      const attachments = profileDocGroups.flatMap(group =>
+        group.documents.map(doc => ({ ...doc, label: group.label })))
       await downloadSheetPdf(element, `Loan-Profile-${loan.ref || 'loan'}`, {
         keepWhole: '[data-doc-section], [data-doc-field], tbody tr',
+        attachments,
       })
       // Logged after the export resolved, so a failed or cancelled save leaves no entry
-      // claiming the document went out.
-      logActivity('Loan Profile', 'Profile exported to PDF', `Loan-Profile-${loan.ref || 'loan'}.pdf`)
+      // claiming the document went out. The count is recorded too: whether the bundle carried
+      // the documents is the thing anyone reading the trail later needs to know.
+      logActivity('Loan Profile', 'Profile exported to PDF',
+        `Loan-Profile-${loan.ref || 'loan'}.pdf · ${attachments.length} document${attachments.length === 1 ? '' : 's'} merged`)
     } finally {
       setDownloading(false)
     }
@@ -530,7 +575,7 @@ export default function LoanPreview() {
     if (!weumsSignedIn(state)) { setReminderGateOpen(true); return }
     const destination = selectedRecipient?.phone
     const updatedLoan = {
-      ...liveLoan,
+      ...loan,
       reminderHistory: [
         ...reminderHistory,
         {
@@ -1053,47 +1098,56 @@ export default function LoanPreview() {
                     <DocField label="Remaining Amount" value={formatVal(remainingAmount, currency, 1)} />
                   </DocFieldGrid>
 
-                  {termOptions.length > 0 && (
-                    <div className="mt-3">
-                      <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-1">Other Term Options</p>
-                      <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">
-                        {affordableTermOptions.length > 0 ? (
-                          <>System recommendation: the <span className="font-semibold text-emerald-600 dark:text-emerald-400">{recommendedTerm}-month</span> term is the shortest option the borrower can afford, keeping total interest paid to a minimum.</>
-                        ) : (
-                          <>None of the standard terms fit within the borrower's remaining income. The <span className="font-semibold text-slate-700 dark:text-slate-200">{recommendedTerm}-month</span> term has the lowest monthly installment, but still exceeds capacity.</>
-                        )}
-                      </p>
+                  {/* The agreed schedule, not a comparison of terms the officer could have picked.
+                      By the time a profile is printed the term was settled at the In Progress
+                      stage, so this prints what the borrower actually signed up to — the same
+                      table, from the same rows, as the Repayment Schedule tab. */}
+                  <div className="mt-3">
+                    <DocSubHeading>Repayment Schedule</DocSubHeading>
+                    <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">
+                      {loan.installments}-month term · {formatVal(emi, currency, 1)} per installment
+                    </p>
+                    {schedule.length > 0 ? (
                       <table className="w-full text-[11px] border-collapse">
                         <thead>
                           <tr>
-                            <th className="border border-slate-300 dark:border-slate-600 px-2 py-1.5 text-slate-700 dark:text-slate-200">Term</th>
-                            <th className="border border-slate-300 dark:border-slate-600 px-2 py-1.5 text-slate-700 dark:text-slate-200">Monthly</th>
-                            <th className="border border-slate-300 dark:border-slate-600 px-2 py-1.5 text-slate-700 dark:text-slate-200">Total Interest</th>
-                            <th className="border border-slate-300 dark:border-slate-600 px-2 py-1.5 text-slate-700 dark:text-slate-200">Left Amount</th>
-                            <th className="border border-slate-300 dark:border-slate-600 px-2 py-1.5 text-slate-700 dark:text-slate-200">Affordable</th>
+                            {['No', 'Repayment Date', 'Principle', 'Interest', 'Col Fee', 'Total', 'Balance', 'Penalty Payoff'].map(h => (
+                              <th key={h} className="border border-slate-300 dark:border-slate-600 px-2 py-1.5 text-slate-700 dark:text-slate-200">{h}</th>
+                            ))}
                           </tr>
                         </thead>
                         <tbody>
-                          {termOptions.map(opt => {
-                            const isCurrent = opt.term === loan.installments
+                          {schedule.map((row, idx) => (
+                            <tr key={idx}>
+                              <td className="border border-slate-300 dark:border-slate-600 px-2 py-1 text-center font-semibold text-rose-600 dark:text-rose-400">{row.num}</td>
+                              <td className="border border-slate-300 dark:border-slate-600 px-2 py-1 text-center whitespace-nowrap text-[#0047ab] dark:text-blue-400">{formatKhDMY(row.dueDateISO)}</td>
+                              <td className="border border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">{num2(row.principal)}</td>
+                              <td className="border border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">{num2(row.interest)}</td>
+                              <td className="border border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">{num2(collectionFeeRows[idx])}</td>
+                              <td className="border border-slate-300 dark:border-slate-600 px-2 py-1 text-right font-semibold text-slate-800 dark:text-slate-100">{num2(installmentTotal(row, collectionFeeRows[idx]))}</td>
+                              <td className="border border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">{num2(row.balance)}</td>
+                              <td className="border border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">{num2(penaltyPayoffRows[idx])}</td>
+                            </tr>
+                          ))}
+                          {(() => {
+                            const t = scheduleTotals(schedule, collectionFeeRows, penaltyRate, penaltyMonths)
                             return (
-                              <tr key={opt.term} className={opt.term === recommendedTerm ? 'bg-emerald-50/60 dark:bg-emerald-900/10' : ''}>
-                                <td className="border border-slate-300 dark:border-slate-600 px-2 py-1 font-semibold text-slate-700 dark:text-slate-200 whitespace-nowrap">
-                                  {opt.term} mo
-                                  {isCurrent && <span className="ml-1 text-[10px] font-medium text-slate-400 dark:text-slate-500">(current)</span>}
-                                  {opt.term === recommendedTerm && <span className="ml-1 text-[10px] font-semibold text-emerald-700 dark:text-emerald-400">(Recommended)</span>}
-                                </td>
-                                <td className="border border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-600 dark:text-slate-300 whitespace-nowrap">{formatVal(opt.emi, currency, 1)}</td>
-                                <td className="border border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-600 dark:text-slate-300 whitespace-nowrap">{formatVal(opt.totalInterest, currency, 1)}</td>
-                                <td className={`border border-slate-300 dark:border-slate-600 px-2 py-1 text-right font-medium whitespace-nowrap ${opt.leftAmount >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>{formatVal(opt.leftAmount, currency, 1)}</td>
-                                <td className="border border-slate-300 dark:border-slate-600 px-2 py-1 text-center text-slate-700 dark:text-slate-200">{opt.affordable ? 'Yes' : 'No'}</td>
-                              </tr>
-                            )
-                          })}
+                              <tr className="font-semibold bg-slate-50 dark:bg-slate-800/60">
+                                <td className="border border-slate-300 dark:border-slate-600 px-2 py-1 text-center text-slate-700 dark:text-slate-200" colSpan={2}>សរុប (Total)</td>
+                                <td className="border border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-800 dark:text-slate-100">{num2(t.principal)}</td>
+                                <td className="border border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-800 dark:text-slate-100">{num2(t.interest)}</td>
+                                <td className="border border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-800 dark:text-slate-100">{num2(t.collectionFee)}</td>
+                                <td className="border border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-800 dark:text-slate-100">{num2(t.total)}</td>
+                                <td className="border border-slate-300 dark:border-slate-600 px-2 py-1" />
+                                <td className="border border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-800 dark:text-slate-100">{num2(t.penalty)}</td>
+                              </tr>)
+                          })()}
                         </tbody>
                       </table>
-                    </div>
-                  )}
+                    ) : (
+                      <p className="text-xs text-slate-400 dark:text-slate-500">No repayment schedule available.</p>
+                    )}
+                  </div>
                 </DocSection>
 
                 <DocSection title="Loan Suggestion — Benefit to the Bank">
@@ -1117,8 +1171,13 @@ export default function LoanPreview() {
                     const info = loan[CREDIT_HISTORY_FIELD[target]]
                     return (
                       <div key={target} className="mb-4 last:mb-0">
-                        <DocSubHeading>{CREDIT_HISTORY_LABEL[target]}</DocSubHeading>
-                        <CBCReport info={info} currency={currency} onView={handleViewDoc} hideDocument />  /* the file itself is listed once, under Documents */
+                        {/* Named, not just labelled by role. A bureau report is filed against a
+                            person, and a profile that heads it "Borrower" alone leaves the reader
+                            to work out who was checked — on a loan carrying a co-borrower and a
+                            guarantor there are three of them. Falls back to the role on its own
+                            when no name is recorded for that party. */}
+                        <DocSubHeading>{creditHistoryHeading(target)}</DocSubHeading>
+                        <CBCReport info={info} currency={currency} onView={handleViewDoc} hideDocument />{/* the file itself is listed once, under Documents */}
                       </div>
                     )
                   })}
@@ -1372,11 +1431,20 @@ export default function LoanPreview() {
                   <div className="space-y-1.5 flex-1">
                     <ScheduleField label="ទំហំកម្ចី (Amount)" value={`${currency} ${(loan.amount || 0).toFixed(2)}`} />
                     <ScheduleField label="ថ្ងៃបើកប្រាក់ (Disb Date)" value={formatDMY(loan.disbursementDate)} />
-                    <ScheduleField label="អត្រា (Rate)" value={`${loan.interestRate}% p.a.`} />
+                    <ScheduleField label="អត្រា (Rate)" value={`${loan.interestRate}% per year · ${((Number(loan.interestRate) || 0) / 12).toFixed(2)}% per month`} />
                     <ScheduleField label="រយៈពេល (Period)" value={`${loan.installments} ${loan.repaymentType || 'Monthly'}`} />
                     <ScheduleField label="ជុំទី (Loan Seq)" value={loan.loanCycle === '1' ? 'New' : `Renewal (Cycle ${loan.loanCycle})`} />
-                    <ScheduleField label="សេវា (Admin Fee)" value="0.00 % = 0.00" />
+                    {/* The rate this loan is actually charged and what it comes to, rather than
+                        the 0.00 placeholder this printed for. Reads 0.00 when the fee was removed
+                        in Loan Setting → Benefit Fees or unticked for this loan, which is then
+                        the true figure. */}
+                    <ScheduleField
+                      label="សេវា (Admin Fee)"
+                      value={`${adminFeeCharged ? feeRate('adminFeeRate') : 0} % = ${
+                        (adminFeeCharged ? adminFee.amount : 0).toFixed(2)}`}
+                    />
                     <ScheduleField label="Refinance Fee" value="0.00" />
+                    
                     <ScheduleField label="ភ្នាក់ងារឥណទាន (CO)" value={loan.creditOfficer} />
                   </div>
                 </div>
@@ -1389,29 +1457,31 @@ export default function LoanPreview() {
                 <table className="w-full text-[11px] border-separate border-spacing-0 border-t border-l border-slate-300 dark:border-slate-600">
                   <thead>
                     <tr>
-                      <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-slate-700 dark:text-slate-200">លេខ<br />No</th>
-                      <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-slate-700 dark:text-slate-200">ថ្ងៃបង់ប្រាក់<br />Repayment Date</th>
-                      <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-slate-700 dark:text-slate-200">ប្រាក់ដើម<br />Principle</th>
-                      <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-slate-700 dark:text-slate-200">ការប្រាក់<br />Interest</th>
-                      <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-slate-700 dark:text-slate-200">សេវាមូល<br />Col Fee</th>
-                      <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-slate-700 dark:text-slate-200">សរុប<br />Total</th>
-                      <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-slate-700 dark:text-slate-200">ប្រាក់ដើមនៅសល់<br />Balance</th>
-                      <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-slate-700 dark:text-slate-200">ប្រាក់ផាកពិន័យ<br />Penalty Payoff</th>
+                      <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-[#0047ab] dark:text-blue-400">លេខ<br />No</th>
+                      <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-[#0047ab] dark:text-blue-400">ថ្ងៃបង់ប្រាក់<br />Repayment Date</th>
+                      <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-[#0047ab] dark:text-blue-400">ប្រាក់ដើម<br />Principle</th>
+                      <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-[#0047ab] dark:text-blue-400">ការប្រាក់<br />Interest</th>
+                      <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-[#0047ab] dark:text-blue-400">សេវាមូល<br />Col Fee</th>
+                      <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-[#0047ab] dark:text-blue-400">សរុប<br />Total</th>
+                      <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-[#0047ab] dark:text-blue-400">ប្រាក់ដើមនៅសល់<br />Balance</th>
+                      <th className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1.5 leading-tight text-[#0047ab] dark:text-blue-400">ប្រាក់ផាកពិន័យ<br />Penalty Payoff</th>
                     </tr>
                   </thead>
                   <tbody>
                     {schedule.map((row, idx) => (
                       <tr key={idx}>
-                        <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-center text-slate-700 dark:text-slate-200">{row.num}</td>
-                        <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-center whitespace-nowrap text-slate-700 dark:text-slate-200">
-                          {formatDMY(row.dueDateISO)}
+                        <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-center font-semibold text-rose-600 dark:text-rose-400">{row.num}</td>
+                        <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-center whitespace-nowrap text-[#0047ab] dark:text-blue-400">
+                          {formatKhDMY(row.dueDateISO)}
                         </td>
-                        <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">{row.principal.toFixed(2)}</td>
-                        <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">{row.interest.toFixed(2)}</td>
-                        <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">0.00</td>
-                        <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right font-semibold text-slate-800 dark:text-slate-100">{row.totalDue.toFixed(2)}</td>
-                        <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">{row.balance.toFixed(2)}</td>
-                        <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">0.00</td>
+                        <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">{num2(row.principal)}</td>
+                        <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">{num2(row.interest)}</td>
+                        <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">
+                          {num2(collectionFeeRows[idx])}
+                        </td>
+                        <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right font-semibold text-slate-800 dark:text-slate-100">{num2(installmentTotal(row, collectionFeeRows[idx]))}</td>
+                        <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">{num2(row.balance)}</td>
+                        <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-700 dark:text-slate-200">{num2(penaltyPayoffRows[idx])}</td>
                       </tr>
                     ))}
                     {schedule.length === 0 && (
@@ -1419,6 +1489,19 @@ export default function LoanPreview() {
                         <td colSpan={8} className="border-r border-b border-slate-300 dark:border-slate-600 px-3 py-8 text-center text-slate-400 dark:text-slate-500">No repayment schedule available.</td>
                       </tr>
                     )}
+                    {schedule.length > 0 && (() => {
+                      const t = scheduleTotals(schedule, collectionFeeRows, penaltyRate, penaltyMonths)
+                      return (
+                        <tr className="font-semibold bg-slate-50 dark:bg-slate-800/60">
+                          <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-center text-slate-700 dark:text-slate-200" colSpan={2}>សរុប (Total)</td>
+                          <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-800 dark:text-slate-100">{num2(t.principal)}</td>
+                          <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-800 dark:text-slate-100">{num2(t.interest)}</td>
+                          <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-800 dark:text-slate-100">{num2(t.collectionFee)}</td>
+                          <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-800 dark:text-slate-100">{num2(t.total)}</td>
+                          <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1" />
+                          <td className="border-r border-b border-slate-300 dark:border-slate-600 px-2 py-1 text-right text-slate-800 dark:text-slate-100">{num2(t.penalty)}</td>
+                        </tr>)
+                    })()}
                   </tbody>
                 </table>
 

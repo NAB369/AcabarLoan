@@ -31,7 +31,7 @@ export default function AddressFields({ label, values, onChange, action = null }
   const provinces = optionsFor(KH_PROVINCES, custom.provinces, values.province)
   const districts = optionsFor(getDistricts(values.province), custom.districts?.[districtKey], values.district)
   const communes = optionsFor(getCommunes(values.district), custom.communes?.[communeKey], values.commune)
-  const villages = optionsFor(getVillages(values.commune), custom.villages?.[villageKey], values.village)
+  const villages = optionsFor(getVillages(values.district, values.commune), custom.villages?.[villageKey], values.village)
 
   function handleChange(field, val) {
     // Each level clears the ones below it — a district left over from another province is

@@ -46,6 +46,24 @@ export function periodLabel(month) {
   return new Date(`${start}T00:00:00`).toLocaleDateString('en-GB', { month: 'long', year: 'numeric' })
 }
 
+// What an employee is actually paid: gross less standing deductions. Net is derived, never
+// stored — a stored net would drift the moment either figure behind it was edited, and payroll
+// would then pay a number that agrees with nothing on the record. A deduction larger than the
+// salary floors at zero rather than going negative: payroll pays out, it does not collect.
+export function employeeDeduction(emp) {
+  const value = Number(emp?.deduction)
+  return Number.isFinite(value) && value > 0 ? Math.round(value * 100) / 100 : 0
+}
+
+export function employeeGross(emp) {
+  const value = Number(emp?.salary)
+  return Number.isFinite(value) && value > 0 ? Math.round(value * 100) / 100 : 0
+}
+
+export function employeeNetSalary(emp) {
+  return Math.max(Math.round((employeeGross(emp) - employeeDeduction(emp)) * 100) / 100, 0)
+}
+
 export function employeePhone(code, number) {
   if (!number) return ''
   return `${code || ''} ${number}`.trim()

@@ -2,12 +2,17 @@ import { useEffect } from 'react'
 import { X, LogIn } from 'lucide-react'
 import ProviderLogo from '../integration/ProviderLogo'
 import { Button } from '@/components/ui/button'
+import useModalA11y from '@/components/shared/useModalA11y'
 
 // Shown by every repayment-reminder send button (Reminder module, and the loan's own
 // Repayment Reminder tab in LoanOverview / LoanPreview / LoanQuickPreviewModal) when this
 // install has no WeUMS account yet — see weumsSignedIn in utils/reminders.js. Points the
 // user at Settings → Integration, the same place any other provider is signed in to.
 export default function WeumsGateModal({ onClose, onGoToIntegrations }) {
+  // Escape is this component's own (see below), so the hook only supplies the focus trap, the
+  // focus return and the dialog semantics.
+  const modal = useModalA11y({ label: 'Sign in to WeUMS to send reminders', escape: false })
+
   // Local component state, so App.jsx's global Escape handler can't reach it.
   useEffect(() => {
     const handleKey = (e) => { if (e.key === 'Escape') onClose() }
@@ -17,7 +22,7 @@ export default function WeumsGateModal({ onClose, onGoToIntegrations }) {
 
   return (
     <div className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4" onClick={onClose}>
-      <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden" onClick={e => e.stopPropagation()}>
+      <div {...modal} className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden" onClick={e => e.stopPropagation()}>
         <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-slate-100 dark:border-slate-700">
           <div className="min-w-0">
             <ProviderLogo id="weums" name="WeUMS" size="md" />

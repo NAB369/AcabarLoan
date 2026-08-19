@@ -1,4 +1,5 @@
 import { toISODate, daysBetweenISO } from './format'
+import { installmentPenalty, loanPenaltyTerms } from './benefitFees'
 
 // System Operations — the maths behind the Start of Day / End of Day / End of Month
 // batches. Everything here is pure and reads state without changing it, so the modal can
@@ -119,14 +120,19 @@ export function computeAccrual(state, todayIso) {
 export function computeOverdue(state, todayIso) {
   const items = []
   for (const loan of activeLoans(state)) {
-    const penaltyRate = loan.penaltyRate || 0
+    // Resolved the same way the printed schedule does, so End of Day never charges a rate or
+    // an instalment the sheet did not show.
+    const { rate: penaltyRate, months: penaltyMonths } = loanPenaltyTerms(loan, state.loanProducts)
     if (penaltyRate <= 0) continue
     loan.schedule.forEach((row, idx) => {
       if (isSettled(row) || !row.dueDateISO) return
       if ((row.lateFee || 0) > 0) return
       const daysLate = daysBetweenISO(row.dueDateISO, todayIso)
       if (daysLate <= 0) return
-      const fee = round2((row.totalDue || 0) * (penaltyRate / 100))
+      // Same formula the schedule prints (installmentPenalty): an annual rate, a twelfth of it
+      // per instalment, on the principal still outstanding — and only within the penalty period
+      // the product carries, if it carries one.
+      const fee = installmentPenalty({ ...row, lateFee: 0 }, penaltyRate, penaltyMonths)
       if (fee <= 0.005) return
       items.push({
         ref: loan.ref,

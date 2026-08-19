@@ -6,13 +6,15 @@ import {
   Plus, X, ArrowRightLeft, Wallet,
   FileText, ChevronDown,
   Banknote, Users, Zap, Receipt, ArrowUpCircle, ArrowDownCircle, HandCoins, Landmark, ChevronRight, ChevronLeft,
-  Settings, Pencil, Search, Eye, LayoutDashboard, BookOpen, Check, CheckCheck, Trash2, History,
-  Download, Columns3, ExternalLink, CornerDownRight, Folder,
+  Settings, Pencil, Search, Eye, LayoutDashboard, BookOpen, Check, Trash2, History,
+  Download, Columns3, ExternalLink, CornerDownRight, Folder, Coins, Calculator,
 } from 'lucide-react'
 import { useApp, canFundExpense, expenseFundingAccount } from '../../context/AppContext'
 import { formatVal } from '../../utils/format'
-import { BRANCHES } from '../../data/constants'
+import { isCashGlAccount, cashGlAccounts as cashGlAccountsOf, buildCashMovements, cashCountStatus } from '../../utils/cash'
+import { BRANCHES, CASH_DENOMINATIONS } from '../../data/constants'
 import StatusBadge from '../shared/StatusBadge'
+import MobileCardList, { MobileCardTotal } from '../shared/MobileCardList'
 import {
   JournalEntryModal, SingleEntryModal
 } from './AccountingForms'
@@ -588,6 +590,171 @@ function CashTransferModal({ accounts, onClose, onSubmit }) {
   )
 }
 
+// ─── Modal: Cash Count ────────────────────────────────────────────────────────
+// A cashier counting their drawer against what the books say should be in it. Nothing here
+// posts: the count is a statement of fact, and a difference is an incident to investigate,
+// not a ledger movement to make. `systemBalanceOf` reads the Cash Sheet balance of whichever
+// account is selected, so the comparison is always against the same number the Cash Sheet tab
+// shows rather than a figure typed in by hand.
+// How a cash count came out against the books — see cashCountStatus. Colour and word together,
+// never colour alone: these print to PDF and are read by people who cannot rely on hue. SHORT is
+// the one that matters, so it is the loud one; MATCHED is the quiet good news.
+const CASH_COUNT_STATUS_STYLE = {
+  MATCHED: 'bg-emerald-50 text-emerald-700 border-emerald-200/60 dark:bg-emerald-900/30 dark:text-emerald-400 dark:border-emerald-800',
+  SHORT: 'bg-rose-50 text-rose-700 border-rose-200/60 dark:bg-rose-900/30 dark:text-rose-400 dark:border-rose-800',
+  OVER: 'bg-amber-50 text-amber-700 border-amber-200/60 dark:bg-amber-900/30 dark:text-amber-400 dark:border-amber-800',
+}
+const CASH_COUNT_STATUS_LABEL = { MATCHED: 'Matched', SHORT: 'Short', OVER: 'Over' }
+
+function CashCountStatusBadge({ status }) {
+  return (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold border whitespace-nowrap ${
+      CASH_COUNT_STATUS_STYLE[status] || CASH_COUNT_STATUS_STYLE.MATCHED
+    }`}>
+      {CASH_COUNT_STATUS_LABEL[status] || status || '—'}
+    </span>
+  )
+}
+
+function CashCountModal({ accounts, systemBalanceOf, defaultCode, cashier, onClose, onSubmit }) {
+  const [code, setCode] = useState(defaultCode || accounts[0]?.code || '')
+  const [date, setDate] = useState(todayStr())
+  const [countedBy, setCountedBy] = useState(cashier || '')
+  const [note, setNote] = useState('')
+  // Keyed by "code:denomination" so switching account clears nothing the cashier typed for
+  // the account they were counting — they can count a dollar drawer and a riel one in turn.
+  const [counts, setCounts] = useState({})
+
+  const account = accounts.find(a => a.code === code) || accounts[0] || null
+  const currency = account?.currency || 'USD'
+  const denominations = CASH_DENOMINATIONS[currency] || CASH_DENOMINATIONS.USD
+  const qtyOf = d => Number(counts[`${code}:${d}`]) || 0
+  const physical = Math.round(denominations.reduce((sum, d) => sum + d * qtyOf(d), 0) * 100) / 100
+  const systemBalance = account ? systemBalanceOf(account.code) : 0
+  const { status, difference } = cashCountStatus(physical, systemBalance)
+  const counted = denominations.some(d => qtyOf(d) > 0)
+
+  function handleSubmit(e) {
+    e.preventDefault()
+    if (!account) return
+    onSubmit({
+      date,
+      cashAccountCode: account.code,
+      cashAccountName: account.name,
+      currency,
+      cashier: countedBy.trim(),
+      denominations: denominations
+        .filter(d => qtyOf(d) > 0)
+        .map(d => ({ denomination: d, quantity: qtyOf(d), amount: Math.round(d * qtyOf(d) * 100) / 100 })),
+      physical,
+      systemBalance,
+      difference,
+      status,
+      note: note.trim(),
+      createdAt: new Date().toISOString(),
+    })
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+      <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl w-full max-w-2xl max-h-[92vh] flex flex-col">
+        <div className="flex items-center justify-between px-4 sm:px-6 py-4 border-b border-slate-100 dark:border-slate-700 flex-shrink-0">
+          <h2 className="text-sm font-bold text-slate-800 dark:text-slate-100">New Cash Count</h2>
+          <Button type="button" variant="ghost" size="icon" onClick={onClose} className="h-auto w-auto p-0 text-slate-400 hover:text-slate-600 hover:bg-transparent"><X className="w-4 h-4" /></Button>
+        </div>
+        <form onSubmit={handleSubmit} className="flex flex-col min-h-0 flex-1">
+          <div className="p-4 sm:p-6 space-y-4 overflow-y-auto flex-1">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div>
+                <Label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">Cash Account</Label>
+                <select value={code} onChange={e => setCode(e.target.value)}
+                  className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500">
+                  {accounts.map(a => <option key={a.code} value={a.code}>{a.name} ({a.currency || 'USD'})</option>)}
+                </select>
+              </div>
+              <div>
+                <Label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">Date</Label>
+                <Input type="date" value={date} onChange={e => setDate(e.target.value)} required
+                  className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500" />
+              </div>
+              <div>
+                <Label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">Counted By</Label>
+                <Input value={countedBy} onChange={e => setCountedBy(e.target.value)} placeholder="Cashier name"
+                  className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500" />
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
+              <table className="w-full">
+                <thead>
+                  <tr className="bg-slate-50 dark:bg-slate-700/50">
+                    <th className="px-4 py-2 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide">Denomination</th>
+                    <th className="px-4 py-2 text-right text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide w-32">Quantity</th>
+                    <th className="px-4 py-2 text-right text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide">Amount</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
+                  {denominations.map(d => (
+                    <tr key={d}>
+                      <td className="px-4 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200">{formatVal(d, currency, 1)}</td>
+                      <td className="px-4 py-1.5">
+                        <Input
+                          type="number" min="0" step="1" placeholder="0"
+                          value={counts[`${code}:${d}`] ?? ''}
+                          onChange={e => setCounts(c => ({ ...c, [`${code}:${d}`]: e.target.value.replace(/[^\d]/g, '') }))}
+                          className="w-full border border-slate-200 dark:border-slate-600 rounded-lg px-2 py-1 text-xs text-right bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500"
+                        />
+                      </td>
+                      <td className="px-4 py-1.5 text-xs text-right font-semibold text-slate-700 dark:text-slate-200">
+                        {qtyOf(d) > 0 ? formatVal(Math.round(d * qtyOf(d) * 100) / 100, currency, 1) : <span className="text-slate-300 dark:text-slate-600">—</span>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* The comparison the count exists for, stated before it is saved. */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-3">
+                <p className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">System Cash Balance</p>
+                <p className="text-sm font-bold text-slate-800 dark:text-slate-100 mt-1">{formatVal(systemBalance, currency, 1)}</p>
+              </div>
+              <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-3">
+                <p className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">Physical Cash</p>
+                <p className="text-sm font-bold text-slate-800 dark:text-slate-100 mt-1">{formatVal(physical, currency, 1)}</p>
+              </div>
+              <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-3">
+                <p className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">Difference</p>
+                <div className="flex items-center gap-2 mt-1">
+                  <p className="text-sm font-bold text-slate-800 dark:text-slate-100">{formatVal(difference, currency, 1)}</p>
+                  <CashCountStatusBadge status={status} />
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <Label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">Note</Label>
+              <Textarea rows={2} value={note} onChange={e => setNote(e.target.value)} placeholder={status === 'MATCHED' ? 'Optional…' : 'Explain the difference — the count posts nothing to the ledger.'}
+                className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500 resize-none" />
+            </div>
+          </div>
+          <div className="flex gap-3 px-4 sm:px-6 py-4 border-t border-slate-100 dark:border-slate-700 flex-shrink-0">
+            <Button type="button" variant="outline" onClick={onClose}
+              className="flex-1 border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 rounded-xl py-2.5 h-auto text-sm font-semibold hover:bg-slate-50 dark:hover:bg-slate-700">
+              Cancel
+            </Button>
+            <Button type="submit" disabled={!counted}
+              className="flex-1 bg-brand-600 hover:bg-brand-700 rounded-xl py-2.5 h-auto text-sm font-bold disabled:opacity-40">
+              Save Count
+            </Button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+}
+
 // ─── Sub-account display metadata (fixed set — not user-creatable) ───────────
 const ACCOUNT_ICONS = {
   'ACC-MAIN': Landmark,
@@ -965,6 +1132,11 @@ const GENERAL_TABS = [
   { id: 'journal-entry',     label: 'Journal Entry',      icon: FileText },
   { id: 'single-entry',      label: 'Single Entry',       icon: Pencil },
   { id: 'cash-transfer',     label: 'Cash Transfer',      icon: ArrowRightLeft },
+  // The till's own ledger and the physical count taken against it. They sit next to Cash
+  // Transfer because all three are the same money — what came into the drawer, what moved
+  // between drawers, and what is actually in one now.
+  { id: 'cash-sheet',        label: 'Cash Sheet',         icon: Coins },
+  { id: 'cash-count',        label: 'Cash Count',         icon: Calculator },
   { id: 'income',            label: 'Income',             icon: TrendingUp },
   { id: 'expense',           label: 'Expense',            icon: TrendingDown },
   { id: 'bank-accounts',     label: 'Real Bank Accounts', icon: Landmark },
@@ -976,25 +1148,13 @@ const GENERAL_TABS = [
 // in the Chart of Accounts, where every other account is, rather than restated here.
 // Audit Log is last and sits apart at the right end, the same way the general card's does:
 // every payroll action, including each period run and what it paid.
+// Approval is not a tab of its own: the queue sits under the staff register on Employee Salary
+// Payment. Running a period and releasing what it committed are one job done in one sitting, and
+// splitting them across two tabs meant processing payroll on one screen and then hunting for the
+// result on another to let the money go.
 const PAYROLL_TABS = [
   { id: 'employees', label: 'Employee Salary Payment', icon: Users },
-  { id: 'approval',  label: 'Approval', icon: CheckCheck },
   { id: 'audit-log', label: 'Audit Log', icon: History },
-]
-
-// The two payroll tables, as column definitions rather than hand-written headers and cells:
-// one list drives both, so a column cannot end up labelled one thing and filled with another.
-// `sortValue` is what the column orders on, which is rarely what it draws — an amount sorts on
-// the number behind the formatted currency, a period on its raw YYYY-MM rather than "Jan 2026".
-const PAYROLL_APPROVAL_COLUMNS = [
-  { id: 'date',        label: 'Date',        sortable: true, sortValue: e => e.date || '' },
-  { id: 'code',        label: 'Ref',         sortable: true, sortValue: e => e.code || '', cellClass: 'font-mono text-slate-500 dark:text-slate-400' },
-  { id: 'period',      label: 'Period',      sortable: true, sortValue: e => e.period || '' },
-  { id: 'description', label: 'Description', sortable: true, sortValue: e => e.description || e.category || '' },
-  { id: 'account',     label: 'Account',     sortable: true },
-  { id: 'employees',   label: 'Employees',   sortable: true, align: 'right', sortValue: e => e.employeeCount || 0 },
-  { id: 'amount',      label: 'Amount',      sortable: true, align: 'right', sortValue: e => e.amount || 0 },
-  { id: 'action',      label: 'Action' },
 ]
 
 const PAYROLL_AUDIT_COLUMNS = [
@@ -1005,6 +1165,54 @@ const PAYROLL_AUDIT_COLUMNS = [
   { id: 'user',      label: 'User',      sortable: true, sortValue: r => r.user || '' },
   // null sorts last either way — an entry that moved no money is not a zero.
   { id: 'amount',    label: 'Amount',    sortable: true, align: 'right', sortValue: r => (r.amount == null ? null : r.amount) },
+]
+
+// ── Mobile card columns ──────────────────────────────────────────────────────
+// Three tables on this page write their cells inline rather than from a column array, so
+// there is nothing for MobileCardList to take labels from. Their columns are named once here
+// instead, in the table's own order so a card reads top-to-bottom the way the row reads
+// left-to-right. A cell changed in one of those tables has to be changed here too — which is
+// the reason every other table on this page renders from a shared column array.
+const AUDIT_LOG_CARD_COLUMNS = [
+  { id: 'date',      label: 'Date',      value: r => r.date || '—' },
+  { id: 'time',      label: 'Time',      value: r => r.timeLabel || '—' },
+  { id: 'action',    label: 'Action',    value: r => r.action },
+  { id: 'reference', label: 'Reference', value: r => r.reference },
+  { id: 'user',      label: 'User',      value: r => r.user },
+  { id: 'amount',    label: 'Amount',    value: (r, currency) => (r.amount == null ? '—' : formatVal(r.amount, currency)) },
+]
+
+const CASH_SHEET_CARD_COLUMNS = [
+  { id: 'date',        label: 'Date',          value: r => r.date },
+  { id: 'ref',         label: 'Ref',           value: r => r.ref },
+  { id: 'source',      label: 'Source',        value: r => r.source },
+  { id: 'repaymentId', label: 'Repayment ID',  value: r => r.repaymentId || '—' },
+  { id: 'reference',   label: 'Reference',     value: r => r.reference || '—' },
+  { id: 'customer',    label: 'Customer',      value: r => r.customerName || '—' },
+  { id: 'cashIn',      label: 'Cash In',       value: (r, currency) => (r.cashIn > 0
+    ? <span className="font-medium text-emerald-600 dark:text-emerald-400">{formatVal(r.cashIn, currency, 1)}</span> : '—') },
+  { id: 'cashOut',     label: 'Cash Out',      value: (r, currency) => (r.cashOut > 0
+    ? <span className="font-medium text-rose-600 dark:text-rose-400">{formatVal(r.cashOut, currency, 1)}</span> : '—') },
+  { id: 'balance',     label: 'Balance',       value: (r, currency) => (
+    <span className="font-bold text-slate-700 dark:text-slate-200">{formatVal(r.balance, currency, 1)}</span>) },
+]
+
+// Each count carries its own currency, so unlike the cash sheet these need no currency passed.
+const CASH_COUNT_CARD_COLUMNS = [
+  { id: 'date',     label: 'Date',           value: c => c.date },
+  { id: 'ref',      label: 'Ref',            value: c => c.id },
+  { id: 'account',  label: 'Cash Account',   value: c => `${c.cashAccountName} (${c.currency})` },
+  { id: 'cashier',  label: 'Cashier',        value: c => c.cashier || '—' },
+  { id: 'system',   label: 'System Balance', value: c => formatVal(c.systemBalance, c.currency, 1) },
+  { id: 'physical', label: 'Physical Cash',  value: c => (
+    <span className="font-semibold text-slate-700 dark:text-slate-200">{formatVal(c.physical, c.currency, 1)}</span>) },
+  { id: 'difference', label: 'Difference',   value: c => (
+    <span className={`font-bold ${
+      c.status === 'MATCHED' ? 'text-slate-400 dark:text-slate-500'
+        : c.status === 'SHORT' ? 'text-rose-600 dark:text-rose-400' : 'text-amber-600 dark:text-amber-400'
+    }`}>{formatVal(c.difference, c.currency, 1)}</span>) },
+  { id: 'status',   label: 'Status',         value: c => <CashCountStatusBadge status={c.status} /> },
+  { id: 'note',     label: 'Note',           value: c => c.note || '—' },
 ]
 
 // The loan book's two control accounts. Every disbursement passes through the payable and
@@ -1094,13 +1302,6 @@ function bankTxDetailRows(t, currency, formatVal) {
 // receivables and their loss allowances, accrued loan interest, and the release /
 // repayment accounts that disbursement and repayment postings land in. Accounts a user
 // adds later are classified by name so the split keeps holding without a code list edit.
-// The physical cash floats — what the Cash Transfer screen is allowed to move between. Name
-// matching lets a float added later be recognised without touching this list.
-const CASH_GL_CODES = new Set(['1010', '1011'])
-function isCashGlAccount(account) {
-  if (CASH_GL_CODES.has(account.code)) return true
-  return /cash on hand/i.test(account.name || '')
-}
 
 const LOAN_GL_CODES = new Set(['1100', '1101', '1102', '1103', '1110', '1111', '1112', '1113', '1120', AR_LOAN_CODE, AP_LOAN_CODE, '5010', '6010'])
 function isLoanGlAccount(account) {
@@ -1120,50 +1321,6 @@ function approvalDateISO(loan) {
   return (loan.submittedAt || '').split('T')[0]
 }
 
-function GlAccountTable({ accounts, currency, emptyMessage }) {
-  return (
-    <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/60 dark:border-slate-700 shadow-sm overflow-hidden">
-      <div className="overflow-x-auto">
-        <table className="w-full">
-          <thead>
-            <tr>
-              <th className={ACCOUNT_TH}>Code</th>
-              <th className={ACCOUNT_TH}>Account Name</th>
-              <th className={ACCOUNT_TH}>Type</th>
-              <th className={ACCOUNT_TH}>Normal Balance</th>
-              <th className={`${ACCOUNT_TH} !text-right`}>Balance</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
-            {accounts.length === 0
-              ? <EmptyState message={emptyMessage} />
-              : accounts.map(acct => (
-                <tr key={acct.code} className="hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
-                  <td className="px-4 py-3 text-xs font-bold font-mono text-brand-600 dark:text-brand-400">{acct.code}</td>
-                  <td className="px-4 py-3 text-xs font-bold text-slate-800 dark:text-slate-100">
-                    {acct.name}
-                    {acct.parentCode && <span className="ml-2 text-[10px] font-medium text-slate-400 dark:text-slate-500">under {acct.parentCode}</span>}
-                  </td>
-                  <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">{acct.type === 'Income' ? 'Revenue' : acct.type}</td>
-                  <td className="px-4 py-3">
-                    {acct.normalBalance ? (
-                      <span className={`text-[10px] font-black px-2 py-0.5 rounded ${acct.normalBalance === 'DEBIT' ? 'text-blue-600 bg-blue-50 dark:text-blue-400 dark:bg-blue-900/30' : 'text-purple-600 bg-purple-50 dark:text-purple-400 dark:bg-purple-900/30'}`}>
-                        {acct.normalBalance}
-                      </span>
-                    ) : '—'}
-                  </td>
-                  <td className="px-4 py-3 text-xs font-bold text-slate-700 dark:text-slate-200 text-right whitespace-nowrap">
-                    {formatVal(acct.balance || 0, acct.currency || currency)}
-                  </td>
-                </tr>
-              ))
-            }
-          </tbody>
-        </table>
-      </div>
-    </div>
-  )
-}
 
 // ─── Modal: Placeholder ───────────────────────────────────────────────────────
 function PlaceholderModal({ title, onClose }) {
@@ -1194,6 +1351,10 @@ export default function AccountingPage() {
     transactionModalOpen, transactionModalType,
     glFilter, glAccountFilter, realBankAccounts, journalEntries, employees, payrollRuns,
     integrations,
+    // The Cash Sheet's own data: the till's movement lines and the counts made against it.
+    // The count modal's open flag is reducer state like the other modals here, so leaving the
+    // module closes it rather than leaving it open behind a tab reset.
+    cashSheet, cashCounts, cashCountModalOpen,
   } = state
   const webill365Status = integrations?.find(i => i.id === 'webill365')?.status || 'disconnected'
 
@@ -1254,14 +1415,14 @@ export default function AccountingPage() {
   // Payroll card: which of its tabs is showing, and whether a payroll run is being drafted.
   const [payrollTab, setPayrollTab] = useState(PAYROLL_TABS[0].id)
   const [payrollRunOpen, setPayrollRunOpen] = useState(false)
+  // What the register was showing when Process Payroll was pressed — the month it was
+  // filtered to and the names ticked in it. Null until a run is being drafted.
+  const [payrollRunSeed, setPayrollRunSeed] = useState(null)
 
-  // Sorting and which columns each payroll table shows. The column choice is persisted, so
-  // the view an operator sets is the one they get back — see SET_PAYROLL_COLUMNS.
-  const approvalSort = useTableSort()
-  const approvalCols = useTableColumns(PAYROLL_APPROVAL_COLUMNS, {
-    value: state.payrollColumns?.approval,
-    onChange: ids => dispatch({ type: 'SET_PAYROLL_COLUMNS', table: 'approval', ids }),
-  })
+  // Sorting and which columns the payroll audit table shows. The column choice is persisted,
+  // so the view an operator sets is the one they get back — see SET_PAYROLL_COLUMNS. The
+  // approval queue no longer has a table of its own: it reads onto the staff register, whose
+  // own column picker covers it.
   const auditSort = useTableSort()
   const auditCols = useTableColumns(PAYROLL_AUDIT_COLUMNS, {
     value: state.payrollColumns?.audit,
@@ -1313,6 +1474,10 @@ export default function AccountingPage() {
   // Approving releases real funds from a bank account — confirm-then-commit before the
   // dispatch, the same pattern already used for deleting a chart-of-accounts entry.
   const [approvingExpense, setApprovingExpense] = useState(null)
+  // The posting being rejected, and the reason being typed for it. Held together so closing
+  // the dialog drops a half-written reason rather than carrying it to the next rejection.
+  const [rejectingExpense, setRejectingExpense] = useState(null)
+  const [rejectReason, setRejectReason] = useState('')
 
   // Cash Transfer toolbar.
   const [ctAccount, setCtAccount] = useState('all')
@@ -1366,6 +1531,7 @@ export default function AccountingPage() {
       else if (bankAccountModalOpen) setBankAccountModalOpen(false)
       else if (deletingCoa) setDeletingCoa(null)
       else if (approvingExpense) setApprovingExpense(null)
+      else if (rejectingExpense) setRejectingExpense(null)
       else if (payrollRunOpen) setPayrollRunOpen(false)
       else if (transactionModalOpen) dispatch({ type: 'CLOSE_TRANSACTION_MODAL' })
       else if (cashTransferModalOpen) dispatch({ type: 'CLOSE_CASH_TRANSFER_MODAL' })
@@ -1376,9 +1542,10 @@ export default function AccountingPage() {
   }, [
     journalEntryModalOpen, singleEntryModalOpen,
     trialBalanceModalOpen, plModalOpen, balanceSheetModalOpen,
-    bankAccountModalOpen, deletingCoa, approvingExpense, payrollRunOpen,
+    bankAccountModalOpen, deletingCoa, approvingExpense, rejectingExpense, payrollRunOpen,
     transactionModalOpen, cashTransferModalOpen, accountHistoryCode, dispatch,
   ])
+
 
   // The open section lives in app state, not here, so leaving for another module and
   // coming back via the sidebar returns to whatever was open — remounting this page
@@ -1416,6 +1583,45 @@ export default function AccountingPage() {
       })
     return [...inc, ...exp, ...tr].sort((a, b) => (b.date || '').localeCompare(a.date || ''))
   }
+
+  // ── Cash Sheet: one till's movements, and the balance they leave behind ──
+  // The tills this branch holds. Both currencies are listed together — they are separate
+  // drawers of separate money, never one balance (see the currency rule in architecture.md),
+  // and the selector is what tells them apart.
+  // Empty until a till is picked, which reads as "the first one" below rather than as none —
+  // the sheet always has a drawer open.
+  const [cashAccountCode, setCashAccountCode] = useState('')
+  // Free-text filter over the till's movements, held here rather than in the reducer: it is a
+  // view of a list, not a fact about the book.
+  const [csSearch, setCsSearch] = useState('')
+  const cashGlAccounts = useMemo(() => cashGlAccountsOf(chartOfAccounts), [chartOfAccounts])
+  const selectedCashAccount = cashGlAccounts.find(a => a.code === cashAccountCode) || cashGlAccounts[0] || null
+  const cashSheetCurrency = selectedCashAccount?.currency || 'USD'
+
+  // Every movement through the selected till, oldest first with the balance it left — see
+  // buildCashMovements, which the Cash Report reads through as well so the two can't diverge.
+  const cashSheetMovements = useMemo(
+    () => buildCashMovements({ cashSheet, cashTransfers, expenses, incomes, chartOfAccounts }, selectedCashAccount),
+    [selectedCashAccount, cashSheet, cashTransfers, expenses, incomes, chartOfAccounts]
+  )
+
+  // Newest first for reading, and filtered by the search box. The running balance above was
+  // computed in date order, so each row keeps the balance it actually left behind.
+  const cashSheetRows = useMemo(() => {
+    const q = csSearch.trim().toLowerCase()
+    const rows = [...cashSheetMovements].reverse()
+    if (!q) return rows
+    return rows.filter(r => [r.ref, r.source, r.repaymentId, r.reference, r.customerName, r.description]
+      .some(v => (v || '').toLowerCase().includes(q)))
+  }, [cashSheetMovements, csSearch])
+
+  const cashSheetTotals = useMemo(() => ({
+    cashIn: cashSheetRows.reduce((s, r) => s + r.cashIn, 0),
+    cashOut: cashSheetRows.reduce((s, r) => s + r.cashOut, 0),
+  }), [cashSheetRows])
+
+  // What the books say is in a given drawer — the one figure a cash count is taken against.
+  const cashSystemBalance = code => chartOfAccounts.find(a => a.code === code)?.balance || 0
 
   // ── Real bank accounts: inline master–detail selection ─────────────────
   const selectedBank = useMemo(
@@ -1471,25 +1677,6 @@ export default function AccountingPage() {
   const payrollEntries = useMemo(
     () => expenses.filter(isPayrollExpense).sort((a, b) => (b.date || '').localeCompare(a.date || '')),
     [expenses]
-  )
-  const payrollPending = useMemo(
-    () => payrollEntries.filter(e => e.status !== 'Approved').reduce((s, e) => s + (e.amount || 0), 0),
-    [payrollEntries]
-  )
-  // The approval queue — salary postings whose money has been committed but not released.
-  // Oldest first, the reverse of the Salary Payment list: there the newest posting is the news,
-  // here the one that has been waiting longest is the one to act on. A posting made by a
-  // payroll run carries that run's period and headcount, so a row says which month is unpaid
-  // and for how many people rather than only which reference is outstanding.
-  const payrollApprovals = useMemo(
-    () => payrollEntries
-      .filter(e => e.status !== 'Approved')
-      .map(e => {
-        const run = payrollRuns.find(r => r.code === e.code)
-        return { ...e, period: run?.period || '', employeeCount: run?.lines?.length || 0 }
-      })
-      .sort((a, b) => (a.date || '').localeCompare(b.date || '')),
-    [payrollEntries, payrollRuns]
   )
   // ── Loan ledger: every movement through Account Payable and Account Receivable ──
   // Derived from the loan book itself rather than from journal postings, so a loan
@@ -1957,6 +2144,22 @@ export default function AccountingPage() {
     showToast('Cash transfer completed', 'success')
   }
 
+  // The toast says how the count came out, not just that it saved — a short drawer is the
+  // whole reason the count was taken, and it should not need a second look at the table.
+  function handleAddCashCount(count) {
+    if (!can('manage_accounting')) {
+      showToast(`${state.currentRole} does not have permission to manage accounting.`, 'error')
+      return
+    }
+    dispatch({ type: 'ADD_CASH_COUNT', count })
+    showToast(
+      count.status === 'MATCHED'
+        ? `Cash count matched — ${formatVal(count.physical, count.currency, 1)} counted`
+        : `Cash count ${count.status.toLowerCase()} by ${formatVal(Math.abs(count.difference), count.currency, 1)}`,
+      count.status === 'MATCHED' ? 'success' : 'error'
+    )
+  }
+
   function viewAccountHistory(code) {
     dispatch({ type: 'OPEN_ACCOUNT_HISTORY', code })
   }
@@ -2225,6 +2428,41 @@ export default function AccountingPage() {
     setApprovingExpense(null)
   }
 
+  // Rejecting takes the same permission as approving — both are the decision on a posting, and
+  // someone who cannot release money has no business refusing it either. No funds check: a
+  // rejection moves nothing, so a short account is irrelevant to it.
+  function handleRejectExpense(code) {
+    if (!can('manage_accounting')) {
+      showToast(`${state.currentRole} does not have permission to manage income & expense.`, 'error')
+      return
+    }
+    const exp = expenses.find(e => e.code === code)
+    if (!exp || exp.status === 'Approved') return
+    setRejectingExpense(exp)
+    setRejectReason('')
+  }
+
+  function confirmRejectExpense() {
+    if (!rejectingExpense) return
+    const reason = rejectReason.trim()
+    // Required, not optional: whoever raised the run has to know what to change before raising
+    // it again, and a bare "Rejected" in the audit trail answers nothing later either.
+    if (!reason) return
+    dispatch({ type: 'REJECT_EXPENSE', code: rejectingExpense.code, reason, by: state.currentRole })
+    dispatch({
+      type: 'ADD_AUDIT_LOG',
+      log: {
+        module: 'Payroll',
+        action: `Salary posting rejected — ${reason}`,
+        reference: rejectingExpense.code,
+        amount: rejectingExpense.amount || null,
+      },
+    })
+    showToast('Posting rejected — no funds were released', 'success')
+    setRejectingExpense(null)
+    setRejectReason('')
+  }
+
   // Each card opens as its own page: the cards give way to that card's content with a
   // back arrow, rather than expanding a panel underneath them.
   const activeCard = CARDS.find(c => c.id === openCard) || null
@@ -2388,94 +2626,9 @@ export default function AccountingPage() {
       )}
 
       {/* Panel: Employee Information — the staff register payroll pays, with its own
-          Add/Edit modal */}
-      {openCard === 'payroll' && payrollTab === 'employees' && <EmployeeInformation />}
+          Add/Edit modal. The approval queue follows it on the same tab. */}
+      {openCard === 'payroll' && payrollTab === 'employees' && <EmployeeInformation onProcessPayroll={seed => { setPayrollRunSeed(seed || null); setPayrollRunOpen(true) }} onApproveRun={handleApproveExpense} onRejectRun={handleRejectExpense} />}
 
-      {/* Panel: Approval — the gate between a salary being committed and the money leaving the
-          payroll account, and the only place that gate is offered. It carries the postings that
-          still need deciding; what was already paid is in the Audit Log. */}
-      {openCard === 'payroll' && payrollTab === 'approval' && (
-        <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/60 dark:border-slate-700 shadow-sm overflow-hidden">
-          <div className="flex items-center px-4 sm:px-5 py-3 border-b border-slate-100 dark:border-slate-700">
-            {/* Filter and action together at the right, the way the employee register puts its
-                filter beside Upload. Process Payroll carries no icon: it runs a period rather
-                than adding a row, so a plus described the wrong action. */}
-            <div className="flex items-center gap-2 ml-auto">
-              <ColumnPicker
-                columns={PAYROLL_APPROVAL_COLUMNS}
-                visibleIds={approvalCols.visibleIds}
-                onToggle={approvalCols.toggle}
-                iconOnly
-              />
-              <button
-                onClick={() => setPayrollRunOpen(true)}
-                className="px-4 py-1.5 rounded-lg text-xs font-bold text-white bg-brand-600 hover:bg-brand-700 shadow-sm transition-colors"
-              >
-                Process Payroll
-              </button>
-            </div>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr>
-                  {approvalCols.visible.map(col => (
-                    <Th key={col.id} right={col.align === 'right'} ariaSort={ariaSortFor(col, approvalSort.sort)}>
-                      <SortHeader column={col} sort={approvalSort.sort} onSort={approvalSort.toggleSort}>{col.label}</SortHeader>
-                    </Th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
-                {payrollApprovals.length === 0
-                  ? <EmptyState message="Nothing awaiting approval — every salary posting has been released." />
-                  : sortRows(payrollApprovals, approvalCols.visible, approvalSort.sort).map((e, i) => (
-                    <tr key={`${e.code}-${i}`} className="hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
-                      {approvalCols.visible.map(col => (
-                        <td
-                          key={col.id}
-                          className={`px-4 py-3 text-xs ${col.align === 'right' ? 'text-right' : ''} ${col.cellClass || 'text-slate-600 dark:text-slate-300'}`}
-                        >
-                          {col.id === 'date' ? e.date
-                            : col.id === 'code' ? e.code
-                            /* Only a payroll run has a period — a one-off salary posting is dated, not monthly */
-                            : col.id === 'period' ? (e.period ? periodLabel(e.period) : '—')
-                            : col.id === 'description' ? (e.description || e.category)
-                            : col.id === 'account' ? accountName(e.account)
-                            : col.id === 'employees' ? (e.employeeCount || '—')
-                            : col.id === 'amount' ? <span className="font-bold text-amber-700 dark:text-amber-400 whitespace-nowrap">{formatVal(e.amount, currency)}</span>
-                            : (
-                              <button
-                                onClick={() => handleApproveExpense(e.code)}
-                                className="flex items-center gap-1 px-2 py-1 text-[11px] font-semibold rounded-lg border border-emerald-200 dark:border-emerald-800 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 transition-colors whitespace-nowrap"
-                              >
-                                <Check className="w-3 h-3" /> Approve
-                              </button>
-                            )}
-                        </td>
-                      ))}
-                    </tr>
-                  ))
-                }
-              </tbody>
-              {/* No Status column and no status footer — every row here is pending by
-                  definition. What the total answers is how much leaves the account if the
-                  whole queue is approved. */}
-              {payrollApprovals.length > 0 && (
-                <tfoot>
-                  <tr className="border-t-2 border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700/50">
-                    <td colSpan={Math.max(1, approvalCols.visible.length - 2)} className="px-4 py-3 text-xs font-bold text-slate-700 dark:text-slate-200">Awaiting Approval</td>
-                    <td className="px-4 py-3 text-xs font-bold text-amber-700 dark:text-amber-400 text-right whitespace-nowrap">
-                      {formatVal(payrollPending, currency)}
-                    </td>
-                    <td />
-                  </tr>
-                </tfoot>
-              )}
-            </table>
-          </div>
-        </div>
-      )}
 
       {/* Panel: Audit Log — who did what in this module: the register edited, a period run,
           a run approved. Same columns as the general card's log, so the two read alike. */}
@@ -2490,7 +2643,7 @@ export default function AccountingPage() {
               iconOnly
             />
           </div>
-          <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-24rem)]">
+          <div className="hidden md:block print:block overflow-x-auto overflow-y-auto max-h-[calc(100vh-24rem)]">
             <table className="w-full">
               <thead className="sticky top-0 z-10">
                 <tr>
@@ -2525,6 +2678,22 @@ export default function AccountingPage() {
               </tbody>
             </table>
           </div>
+
+          <MobileCardList
+            className="max-h-[calc(100vh-24rem)]"
+            columns={auditCols.visible}
+            rows={sortRows(payrollAuditRows, auditCols.visible, auditSort.sort)}
+            rowKey={(row, i) => `${row.reference}-${i}`}
+            renderCell={(col, row) => (
+              col.id === 'date' ? (row.date || '—')
+                : col.id === 'time' ? (row.timeLabel || '—')
+                : col.id === 'action' ? row.action
+                : col.id === 'reference' ? row.reference
+                : col.id === 'user' ? row.user
+                : <span className="font-bold text-slate-700 dark:text-slate-200">{row.amount == null ? '—' : formatVal(row.amount, currency)}</span>
+            )}
+            emptyMessage="Nothing has been done in payroll yet."
+          />
         </div>
       )}
 
@@ -2585,7 +2754,7 @@ export default function AccountingPage() {
               </button>
             </div>
           </div>
-          <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
+          <div className="hidden md:block print:block overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
             <table className="w-full">
               <thead className="sticky top-0 z-10">
                 <tr>
@@ -2616,6 +2785,15 @@ export default function AccountingPage() {
               </tbody>
             </table>
           </div>
+
+          <MobileCardList
+            className="max-h-[calc(100vh-21rem)]"
+            columns={visibleJeColumns}
+            rows={sortRows(journalPostings, visibleJeColumns, jeSort.sort)}
+            rowKey={(j, i) => j.id || `${j.transactionNo}-${i}`}
+            renderCell={(col, j) => col.render(j, v => formatVal(v, currency))}
+            emptyMessage="No journal entries found."
+          />
         </div>
       )}
 
@@ -2676,7 +2854,7 @@ export default function AccountingPage() {
               </button>
             </div>
           </div>
-          <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
+          <div className="hidden md:block print:block overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
             <table className="w-full">
               <thead className="sticky top-0 z-10">
                 <tr>
@@ -2707,6 +2885,15 @@ export default function AccountingPage() {
               </tbody>
             </table>
           </div>
+
+          <MobileCardList
+            className="max-h-[calc(100vh-21rem)]"
+            columns={visibleSeColumns}
+            rows={sortRows(singlePostings, visibleSeColumns, seSort.sort)}
+            rowKey={(j, i) => j.id || `${j.transactionNo}-${i}`}
+            renderCell={(col, j) => col.render(j, v => formatVal(v, currency))}
+            emptyMessage="No single entries found."
+          />
         </div>
       )}
 
@@ -2786,7 +2973,7 @@ export default function AccountingPage() {
               </button>
             </div>
           </div>
-          <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
+          <div className="hidden md:block print:block overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
             <table className="w-full">
               <thead className="sticky top-0 z-10">
                 <tr>
@@ -2829,6 +3016,21 @@ export default function AccountingPage() {
               )}
             </table>
           </div>
+
+          <MobileCardList
+            className="max-h-[calc(100vh-21rem)]"
+            columns={visibleIncColumns}
+            rows={sortRows(incomeRows, visibleIncColumns, incSort.sort)}
+            rowKey={(e, i) => `${e.code}-${i}`}
+            renderCell={(col, e) => col.render(e, v => formatVal(v, currency))}
+            emptyMessage="No income found."
+            footer={incColumns.includes('amount') && (
+              <MobileCardTotal
+                value={formatVal(incomeRows.reduce((s, e) => s + (e.amount || 0), 0), currency)}
+                valueClass="text-emerald-600 dark:text-emerald-400"
+              />
+            )}
+          />
         </div>
       )}
 
@@ -2921,7 +3123,7 @@ export default function AccountingPage() {
               </button>
             </div>
           </div>
-          <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
+          <div className="hidden md:block print:block overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
             <table className="w-full">
               <thead className="sticky top-0 z-10">
                 <tr>
@@ -2967,6 +3169,21 @@ export default function AccountingPage() {
               )}
             </table>
           </div>
+
+          <MobileCardList
+            className="max-h-[calc(100vh-21rem)]"
+            columns={visibleExpColumns}
+            rows={sortRows(expenseRows, visibleExpColumns, expSort.sort)}
+            rowKey={(e, i) => `${e.code}-${i}`}
+            renderCell={(col, e) => col.render(e, v => formatVal(v, currency), expenseRowActions)}
+            emptyMessage="No expenses found."
+            footer={expColumns.includes('amount') && (
+              <MobileCardTotal
+                value={formatVal(expenseRows.reduce((s, e) => s + (e.amount || 0), 0), currency)}
+                valueClass="text-rose-600 dark:text-rose-400"
+              />
+            )}
+          />
         </div>
       )}
 
@@ -2975,7 +3192,7 @@ export default function AccountingPage() {
       {accountingTab === 'audit-log' && (
         <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/60 dark:border-slate-700 shadow-sm overflow-hidden">
           {/* No heading — the active tab already names this table */}
-          <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
+          <div className="hidden md:block print:block overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
             <table className="w-full">
               <thead className="sticky top-0 z-10">
                 <tr>
@@ -3006,6 +3223,15 @@ export default function AccountingPage() {
               </tbody>
             </table>
           </div>
+
+          <MobileCardList
+            className="max-h-[calc(100vh-21rem)]"
+            columns={AUDIT_LOG_CARD_COLUMNS}
+            rows={auditLogRows}
+            rowKey={(row, i) => `${row.reference}-${i}`}
+            renderCell={(col, row) => col.value(row, currency)}
+            emptyMessage="Nothing has been posted in this module yet."
+          />
         </div>
       )}
 
@@ -3073,7 +3299,7 @@ export default function AccountingPage() {
               </button>
             </div>
           </div>
-          <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
+          <div className="hidden md:block print:block overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
             <table className="w-full">
               <thead className="sticky top-0 z-10">
                 <tr>
@@ -3116,9 +3342,205 @@ export default function AccountingPage() {
               )}
             </table>
           </div>
+
+          <MobileCardList
+            className="max-h-[calc(100vh-21rem)]"
+            columns={visibleCtColumns}
+            rows={sortRows(transferRows, visibleCtColumns, ctSort.sort)}
+            rowKey={(t, i) => `${t.ref}-${i}`}
+            renderCell={(col, t) => col.render(t, v => formatVal(v, currency))}
+            emptyMessage="No cash transfers found."
+            footer={ctColumns.includes('amount') && (
+              <MobileCardTotal
+                value={formatVal(transferRows.reduce((s, t) => s + (t.amount || 0), 0), currency)}
+                valueClass="text-brand-600 dark:text-brand-400"
+              />
+            )}
+          />
         </div>
       )}
 
+
+      {/* Panel: Cash Sheet — one till's own ledger */}
+      {accountingTab === 'cash-sheet' && (
+        <div id="acct-panel-cash-sheet" className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/60 dark:border-slate-700 shadow-sm overflow-hidden">
+          <div className="px-5 py-4 border-b border-slate-100 dark:border-slate-700 flex items-center gap-2 flex-wrap">
+            <div className="relative">
+              <select
+                value={selectedCashAccount?.code || ''}
+                onChange={e => setCashAccountCode(e.target.value)}
+                className="appearance-none border border-slate-200 dark:border-slate-600 rounded-lg pl-3 pr-7 py-1.5 text-xs font-medium bg-white dark:bg-slate-700 text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-500"
+              >
+                {cashGlAccounts.map(a => (
+                  <option key={a.code} value={a.code}>{a.code} — {a.name} ({a.currency || 'USD'})</option>
+                ))}
+              </select>
+              <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400 pointer-events-none" />
+            </div>
+
+            <div className="relative w-64">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
+              <input
+                type="text"
+                value={csSearch}
+                onChange={e => setCsSearch(e.target.value)}
+                placeholder="Search repayment, customer…"
+                className="w-full border border-slate-200 dark:border-slate-600 rounded-lg pl-8 pr-3 py-1.5 text-xs bg-white dark:bg-slate-700 text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-500"
+              />
+            </div>
+
+            <div className="flex items-center gap-2 flex-shrink-0 ml-auto">
+              <button
+                onClick={() => dispatch({ type: 'SET_ACCOUNTING_TAB', tab: 'cash-count' })}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
+              >
+                <Calculator className="w-3.5 h-3.5" /> Cash Count
+              </button>
+            </div>
+          </div>
+
+          {/* The three figures a cashier is actually asking for, in the currency of the
+              selected drawer — money in, money out, and what should be in it now. */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 px-5 py-4">
+            <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-3">
+              <p className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">Cash In</p>
+              <p className="text-sm font-bold text-emerald-600 dark:text-emerald-400 mt-1">{formatVal(cashSheetTotals.cashIn, cashSheetCurrency, 1)}</p>
+            </div>
+            <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-3">
+              <p className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">Cash Out</p>
+              <p className="text-sm font-bold text-rose-600 dark:text-rose-400 mt-1">{formatVal(cashSheetTotals.cashOut, cashSheetCurrency, 1)}</p>
+            </div>
+            <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-3">
+              <p className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">System Cash Balance</p>
+              <p className="text-sm font-bold text-slate-800 dark:text-slate-100 mt-1">{formatVal(selectedCashAccount?.balance || 0, cashSheetCurrency, 1)}</p>
+            </div>
+          </div>
+
+          <div className="hidden md:block print:block overflow-x-auto overflow-y-auto max-h-[calc(100vh-27rem)]">
+            <table className="w-full">
+              <thead className="sticky top-0 z-10">
+                <tr>
+                  <Th>Date</Th>
+                  <Th>Ref</Th>
+                  <Th>Source</Th>
+                  <Th>Repayment ID</Th>
+                  <Th>Reference</Th>
+                  <Th>Customer</Th>
+                  <Th right>Cash In</Th>
+                  <Th right>Cash Out</Th>
+                  <Th right>Balance</Th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
+                {cashSheetRows.length === 0
+                  ? <EmptyState message={csSearch ? 'No cash movements match that search.' : 'No cash has moved through this account yet. Cash repayments post here automatically.'} />
+                  : cashSheetRows.map(r => (
+                    <tr key={r.key} className="hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
+                      <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300 whitespace-nowrap">{r.date}</td>
+                      <td className="px-4 py-3 text-xs font-mono text-slate-500 dark:text-slate-400">{r.ref}</td>
+                      <td className="px-4 py-3 text-xs text-slate-700 dark:text-slate-200">{r.source}</td>
+                      <td className="px-4 py-3 text-xs font-mono text-slate-500 dark:text-slate-400">{r.repaymentId || '—'}</td>
+                      <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">{r.reference || '—'}</td>
+                      <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">{r.customerName || '—'}</td>
+                      <td className="px-4 py-3 text-xs text-right font-medium text-emerald-600 dark:text-emerald-400 whitespace-nowrap">
+                        {r.cashIn > 0 ? formatVal(r.cashIn, cashSheetCurrency, 1) : '—'}
+                      </td>
+                      <td className="px-4 py-3 text-xs text-right font-medium text-rose-600 dark:text-rose-400 whitespace-nowrap">
+                        {r.cashOut > 0 ? formatVal(r.cashOut, cashSheetCurrency, 1) : '—'}
+                      </td>
+                      <td className="px-4 py-3 text-xs text-right font-bold text-slate-700 dark:text-slate-200 whitespace-nowrap">
+                        {formatVal(r.balance, cashSheetCurrency, 1)}
+                      </td>
+                    </tr>
+                  ))
+                }
+              </tbody>
+            </table>
+          </div>
+
+          <MobileCardList
+            className="max-h-[calc(100vh-27rem)]"
+            columns={CASH_SHEET_CARD_COLUMNS}
+            rows={cashSheetRows}
+            rowKey={r => r.key}
+            renderCell={(col, r) => col.value(r, cashSheetCurrency)}
+            emptyMessage={csSearch ? 'No cash movements match that search.' : 'No cash has moved through this account yet. Cash repayments post here automatically.'}
+          />
+        </div>
+      )}
+
+      {/* Panel: Cash Count — what was physically in the drawer, against what should be */}
+      {accountingTab === 'cash-count' && (
+        <div id="acct-panel-cash-count" className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/60 dark:border-slate-700 shadow-sm overflow-hidden">
+          <div className="px-5 py-4 border-b border-slate-100 dark:border-slate-700 flex items-center gap-2 flex-wrap">
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              Counts are a record only — a difference is never written back to the Cash Sheet.
+            </p>
+            <div className="flex items-center gap-2 flex-shrink-0 ml-auto">
+              <button
+                onClick={() => can('manage_accounting')
+                  ? dispatch({ type: 'OPEN_CASH_COUNT_MODAL' })
+                  : showToast(`${state.currentRole} does not have permission to manage accounting.`, 'error')}
+                title={can('manage_accounting') ? undefined : `${state.currentRole} cannot manage accounting`}
+                className={`flex items-center gap-1.5 text-white px-3 py-1.5 rounded-lg text-xs font-bold shadow-sm transition-colors ${
+                  can('manage_accounting') ? 'bg-brand-600 hover:bg-brand-700' : 'bg-slate-300 dark:bg-slate-600 cursor-not-allowed'
+                }`}
+              >
+                <Plus className="w-3.5 h-3.5" /> New Cash Count
+              </button>
+            </div>
+          </div>
+          <div className="hidden md:block print:block overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
+            <table className="w-full">
+              <thead className="sticky top-0 z-10">
+                <tr>
+                  <Th>Date</Th>
+                  <Th>Ref</Th>
+                  <Th>Cash Account</Th>
+                  <Th>Cashier</Th>
+                  <Th right>System Balance</Th>
+                  <Th right>Physical Cash</Th>
+                  <Th right>Difference</Th>
+                  <Th>Status</Th>
+                  <Th>Note</Th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
+                {(cashCounts || []).length === 0
+                  ? <EmptyState message="No cash counts recorded yet." />
+                  : cashCounts.map(c => (
+                    <tr key={c.id} className="hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
+                      <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300 whitespace-nowrap">{c.date}</td>
+                      <td className="px-4 py-3 text-xs font-mono text-slate-500 dark:text-slate-400">{c.id}</td>
+                      <td className="px-4 py-3 text-xs text-slate-700 dark:text-slate-200">{c.cashAccountName} ({c.currency})</td>
+                      <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">{c.cashier || '—'}</td>
+                      <td className="px-4 py-3 text-xs text-right text-slate-600 dark:text-slate-300 whitespace-nowrap">{formatVal(c.systemBalance, c.currency, 1)}</td>
+                      <td className="px-4 py-3 text-xs text-right font-semibold text-slate-700 dark:text-slate-200 whitespace-nowrap">{formatVal(c.physical, c.currency, 1)}</td>
+                      <td className={`px-4 py-3 text-xs text-right font-bold whitespace-nowrap ${
+                        c.status === 'MATCHED' ? 'text-slate-400 dark:text-slate-500'
+                          : c.status === 'SHORT' ? 'text-rose-600 dark:text-rose-400' : 'text-amber-600 dark:text-amber-400'
+                      }`}>
+                        {formatVal(c.difference, c.currency, 1)}
+                      </td>
+                      <td className="px-4 py-3"><CashCountStatusBadge status={c.status} /></td>
+                      <td className="px-4 py-3 text-xs text-slate-500 dark:text-slate-400 max-w-[240px] truncate" title={c.note}>{c.note || '—'}</td>
+                    </tr>
+                  ))
+                }
+              </tbody>
+            </table>
+          </div>
+
+          <MobileCardList
+            className="max-h-[calc(100vh-21rem)]"
+            columns={CASH_COUNT_CARD_COLUMNS}
+            rows={cashCounts || []}
+            rowKey={c => c.id}
+            renderCell={(col, c) => col.value(c)}
+            emptyMessage="No cash counts recorded yet."
+          />
+        </div>
+      )}
 
       {/* Panel: Real Bank Accounts */}
       {accountingTab === 'bank-accounts' && (
@@ -3539,7 +3961,7 @@ export default function AccountingPage() {
           {/* The ledger runs as tall as the viewport allows (page chrome above it is
               roughly 21rem), so the sticky totals row lands at the bottom of the screen
               instead of partway up the page. */}
-          <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
+          <div className="hidden md:block print:block overflow-x-auto overflow-y-auto max-h-[calc(100vh-21rem)]">
             <table className="w-full">
               <thead className="sticky top-0 z-10">
                 <tr>
@@ -3587,6 +4009,24 @@ export default function AccountingPage() {
               )}
             </table>
           </div>
+
+          <MobileCardList
+            className="max-h-[calc(100vh-21rem)]"
+            columns={visibleGlColumns}
+            rows={sortRows(glEntries, visibleGlColumns, glSort.sort)}
+            renderCell={(col, e) => col.render(e, v => formatVal(v, currency))}
+            emptyMessage="No ledger entries found."
+            footer={(
+              <div className="space-y-1.5">
+                {glColumns.includes('debit') && (
+                  <MobileCardTotal label="Total debit" value={formatVal(glEntries.reduce((s, e) => s + e.debit, 0), currency)} valueClass="text-rose-600" />
+                )}
+                {glColumns.includes('credit') && (
+                  <MobileCardTotal label="Total credit" value={formatVal(glEntries.reduce((s, e) => s + e.credit, 0), currency)} valueClass="text-emerald-600" />
+                )}
+              </div>
+            )}
+          />
         </div>
       )}
 
@@ -3741,7 +4181,9 @@ export default function AccountingPage() {
         <PayrollRunModal
           accountCode={payrollGlAccounts[0]?.code || '6020'}
           accountLabel={payrollGlAccounts[0]?.name || 'Payroll Account'}
-          onClose={() => setPayrollRunOpen(false)}
+          initialPeriod={payrollRunSeed?.period}
+          initialEmployeeIds={payrollRunSeed?.employeeIds}
+          onClose={() => { setPayrollRunOpen(false); setPayrollRunSeed(null) }}
         />
       )}
 
@@ -3765,6 +4207,17 @@ export default function AccountingPage() {
           accounts={chartOfAccounts}
           onClose={() => dispatch({ type: 'CLOSE_CASH_TRANSFER_MODAL' })}
           onSubmit={handleAddTransfer}
+        />
+      )}
+
+      {cashCountModalOpen && cashGlAccounts.length > 0 && (
+        <CashCountModal
+          accounts={cashGlAccounts}
+          systemBalanceOf={cashSystemBalance}
+          defaultCode={selectedCashAccount?.code}
+          cashier={state.currentRole}
+          onClose={() => dispatch({ type: 'CLOSE_CASH_COUNT_MODAL' })}
+          onSubmit={handleAddCashCount}
         />
       )}
 
@@ -3873,6 +4326,57 @@ export default function AccountingPage() {
                 className="px-4 py-2 text-sm font-semibold rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white transition-colors"
               >
                 Approve
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Rejecting a posting. The reason is the point of the dialog — Reject stays disabled
+          until one is written, because a refusal nobody explained leaves whoever raised the run
+          with nothing to correct and the audit trail with nothing to read. */}
+      {rejectingExpense && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setRejectingExpense(null)}>
+          <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-xl w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-xl bg-rose-100 dark:bg-rose-900/30 flex items-center justify-center flex-shrink-0">
+                <X className="w-5 h-5 text-rose-600 dark:text-rose-400" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-800 dark:text-slate-100">Reject Posting</h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400">No funds are released. The run can be raised again.</p>
+              </div>
+            </div>
+            <p className="text-sm text-slate-600 dark:text-slate-300 mb-4">
+              Reject{' '}
+              <span className="font-bold text-slate-800 dark:text-slate-100">{formatVal(rejectingExpense.amount, currency)}</span>
+              {' '}for <span className="font-semibold text-slate-800 dark:text-slate-100">{rejectingExpense.description || rejectingExpense.category}</span>?
+            </p>
+            <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1" htmlFor="reject-reason">
+              Reason <span className="text-rose-500">*</span>
+            </label>
+            <textarea
+              id="reject-reason"
+              autoFocus
+              rows={3}
+              value={rejectReason}
+              onChange={e => setRejectReason(e.target.value)}
+              placeholder="What has to change before this is raised again"
+              className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-rose-500/30 resize-y"
+            />
+            <div className="flex justify-end gap-3 mt-6">
+              <button
+                onClick={() => setRejectingExpense(null)}
+                className="px-4 py-2 text-sm font-semibold rounded-xl border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmRejectExpense}
+                disabled={!rejectReason.trim()}
+                className="px-4 py-2 text-sm font-semibold rounded-xl bg-rose-600 hover:bg-rose-700 text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Reject
               </button>
             </div>
           </div>

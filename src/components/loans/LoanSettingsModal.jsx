@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { COLLECTION_FEE_METHODS, collectionFeeMethod, isCollectionFee } from '../../utils/benefitFees'
 import { X, Package, Percent, GitBranch, Edit2, Trash2, Check, AlertTriangle } from 'lucide-react'
 import { useApp } from '../../context/AppContext'
 
@@ -11,9 +12,9 @@ const Th = ({ children, className = '' }) => (
 // ─── Loan Product ────────────────────────────────────────────────────────────
 function LoanProductPanel({ products, dispatch, showToast }) {
   const [showAddForm, setShowAddForm] = useState(false)
-  const [form, setForm] = useState({ name: '', rate: '', maxAmount: '' })
+  const [form, setForm] = useState({ name: '', rate: '', maxAmount: '', penaltyRate: '', penaltyMonths: '' })
   const [editingIdx, setEditingIdx] = useState(null)
-  const [editForm, setEditForm] = useState({ name: '', rate: '', maxAmount: '' })
+  const [editForm, setEditForm] = useState({ name: '', rate: '', maxAmount: '', penaltyRate: '', penaltyMonths: '' })
   const [deletingIdx, setDeletingIdx] = useState(null)
   const fieldCls = 'w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500'
   const fieldLabelCls = 'block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1'
@@ -39,10 +40,12 @@ function LoanProductPanel({ products, dispatch, showToast }) {
         name,
         rate: parseFloat(form.rate) || 0,
         maxAmount: parseFloat(form.maxAmount) || 0,
+        penaltyRate: Math.max(0, parseFloat(form.penaltyRate) || 0),
+        penaltyMonths: Math.max(0, parseInt(form.penaltyMonths, 10) || 0),
       },
     })
     showToast('Loan product added', 'success')
-    setForm({ name: '', rate: '', maxAmount: '' })
+    setForm({ name: '', rate: '', maxAmount: '', penaltyRate: '', penaltyMonths: '' })
     setShowAddForm(false)
   }
 
@@ -52,6 +55,8 @@ function LoanProductPanel({ products, dispatch, showToast }) {
       name: products[idx].name,
       rate: products[idx].rate?.toString() || '',
       maxAmount: products[idx].maxAmount?.toString() || '',
+      penaltyRate: (products[idx].penaltyRate ?? '').toString(),
+      penaltyMonths: (products[idx].penaltyMonths ?? '').toString(),
     })
   }
 
@@ -68,7 +73,9 @@ function LoanProductPanel({ products, dispatch, showToast }) {
     dispatch({
       type: 'UPDATE_LOAN_PRODUCT',
       index: editingIdx,
-      product: { name, rate: parseFloat(editForm.rate) || 0, maxAmount: parseFloat(editForm.maxAmount) || 0 },
+      product: { name, rate: parseFloat(editForm.rate) || 0, maxAmount: parseFloat(editForm.maxAmount) || 0,
+        penaltyRate: Math.max(0, parseFloat(editForm.penaltyRate) || 0),
+        penaltyMonths: Math.max(0, parseInt(editForm.penaltyMonths, 10) || 0) },
     })
     showToast('Loan product updated', 'success')
     setEditingIdx(null)
@@ -106,8 +113,30 @@ function LoanProductPanel({ products, dispatch, showToast }) {
               />
             </div>
             <div className="w-full sm:w-32 flex-shrink-0">
-              <label className={fieldLabelCls}>Interest Rate (%)</label>
+              <label className={fieldLabelCls}>Interest Rate (% per year)</label>
               <input type="number" min="0" step="0.1" value={form.rate} onChange={e => setForm(p => ({ ...p, rate: e.target.value }))} className={fieldCls} />
+            </div>
+            <div className="w-full sm:w-44 flex-shrink-0">
+              <label className={fieldLabelCls}>Penalty (% per year)</label>
+              <input type="number" min="0" step="0.1" value={form.penaltyRate} onChange={e => setForm(p => ({ ...p, penaltyRate: e.target.value }))} className={fieldCls} />
+              {/* Charged like interest — annual rate, a twelfth per instalment, on the balance
+                  outstanding. 0 is how a product is sold without a late penalty at all. */}
+              <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-500">
+                {parseFloat(form.penaltyRate) > 0
+                  ? `${(parseFloat(form.penaltyRate) / 12).toFixed(2)}% per month, on the balance outstanding`
+                  : '0 = no penalty charged'}
+              </p>
+            </div>
+            <div className="w-full sm:w-44 flex-shrink-0">
+              <label className={fieldLabelCls}>Penalty applies for</label>
+              <input type="number" min="0" step="1" placeholder="whole term" value={form.penaltyMonths}
+                onChange={e => setForm(p => ({ ...p, penaltyMonths: e.target.value }))} className={fieldCls} />
+              {/* e.g. 18 on a 36-month product: instalments 19 onwards attract no penalty. */}
+              <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-500">
+                {parseInt(form.penaltyMonths, 10) > 0
+                  ? `First ${parseInt(form.penaltyMonths, 10)} instalments only`
+                  : 'Blank = the whole term'}
+              </p>
             </div>
             <div className="w-full sm:w-40 flex-shrink-0">
               <label className={fieldLabelCls}>Max Amount (USD)</label>
@@ -130,14 +159,15 @@ function LoanProductPanel({ products, dispatch, showToast }) {
             <thead>
               <tr>
                 <Th>Product Name</Th>
-                <Th>Interest Rate</Th>
+                <Th>Interest Rate (per year)</Th>
+                <Th>Penalty</Th>
                 <Th>Max Loan Amount</Th>
                 <Th>Actions</Th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
               {products.length === 0 ? (
-                <tr><td colSpan={4} className="py-10 text-center text-sm text-slate-400">No loan products yet.</td></tr>
+                <tr><td colSpan={5} className="py-10 text-center text-sm text-slate-400">No loan products yet.</td></tr>
               ) : products.map((p, idx) => editingIdx === idx ? (
                 <tr key={idx} className="bg-brand-50/40 dark:bg-brand-900/10">
                   <td className="px-4 py-2">
@@ -156,6 +186,24 @@ function LoanProductPanel({ products, dispatch, showToast }) {
                       onChange={e => setEditForm(f => ({ ...f, rate: e.target.value }))}
                       onKeyDown={e => e.key === 'Enter' && handleSaveEdit()}
                       className={cellFieldCls}
+                    />
+                  </td>
+                  <td className="px-4 py-2">
+                    <input
+                      type="number" min="0" step="0.1"
+                      value={editForm.penaltyRate}
+                      placeholder="0"
+                      onChange={e => setEditForm(f => ({ ...f, penaltyRate: e.target.value }))}
+                      onKeyDown={e => e.key === 'Enter' && handleSaveEdit()}
+                      className={cellFieldCls}
+                    />
+                    <input
+                      type="number" min="0" step="1"
+                      value={editForm.penaltyMonths}
+                      placeholder="months (blank = all)"
+                      onChange={e => setEditForm(f => ({ ...f, penaltyMonths: e.target.value }))}
+                      onKeyDown={e => e.key === 'Enter' && handleSaveEdit()}
+                      className={cellFieldCls + ' mt-1'}
                     />
                   </td>
                   <td className="px-4 py-2">
@@ -189,7 +237,25 @@ function LoanProductPanel({ products, dispatch, showToast }) {
               ) : (
                 <tr key={idx} className="hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
                   <td className="px-4 py-3 text-xs font-bold text-slate-800 dark:text-slate-100">{p.name}</td>
-                  <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300 whitespace-nowrap">{p.rate}%</td>
+                  {/* Spelled out both ways: the rate is entered per year but the schedule bills
+                      monthly, and a bare percentage next to monthly instalments doesn't say which. */}
+                  <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300 whitespace-nowrap">
+                    {p.rate}% per year
+                    <span className="text-slate-400 dark:text-slate-500"> · {((Number(p.rate) || 0) / 12).toFixed(2)}% per month</span>
+                  </td>
+                  <td className="px-4 py-3 whitespace-nowrap">
+                    {(p.penaltyRate || 0) > 0 ? (
+                      <span className="px-2 py-0.5 rounded-lg text-[10px] font-bold border bg-rose-50 text-rose-700 border-rose-200/50 dark:bg-rose-900/30 dark:text-rose-400 dark:border-rose-800"
+                        title="Charged once on an instalment that falls overdue, by End of Day">
+                        {p.penaltyRate}% per year{(p.penaltyMonths || 0) > 0 ? ` · first ${p.penaltyMonths} mo` : ''}
+                      </span>
+                    ) : (
+                      <span className="px-2 py-0.5 rounded-lg text-[10px] font-bold border bg-slate-100 text-slate-500 border-slate-200 dark:bg-slate-700 dark:text-slate-400 dark:border-slate-600"
+                        title="No late penalty is charged on this product">
+                        Not charged
+                      </span>
+                    )}
+                  </td>
                   <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300 whitespace-nowrap">
                     {p.maxAmount ? `$${p.maxAmount.toLocaleString()}` : 'No limit'}
                   </td>
@@ -302,6 +368,8 @@ function FeeSettingsPanel({ feeSettings, dispatch, showToast }) {
     ...customFees.map((f, index) => ({
       kind: 'custom', id: `custom-${index}`, index, name: f.name,
       rate: f.rate ?? 0, scope: 'Per loan',
+      // Only the collection fee is billed per installment, so only it carries a charging method.
+      isCollection: isCollectionFee(f.name), method: collectionFeeMethod(f),
     })),
   ]
 
@@ -325,7 +393,9 @@ function FeeSettingsPanel({ feeSettings, dispatch, showToast }) {
       showToast(taken === 'built-in' ? 'That name belongs to a built-in fee' : 'A fee with that name already exists', 'error')
       return
     }
-    dispatch({ type: 'ADD_CUSTOM_FEE', fee: { name, rate: Math.max(0, parseFloat(form.rate) || 0) } })
+    const fee = { name, rate: Math.max(0, parseFloat(form.rate) || 0) }
+    if (isCollectionFee(name)) fee.method = collectionFeeMethod(null)
+    dispatch({ type: 'ADD_CUSTOM_FEE', fee })
     showToast('Custom fee added', 'success')
     setForm({ name: '', rate: '' })
     setShowAddForm(false)
@@ -337,7 +407,7 @@ function FeeSettingsPanel({ feeSettings, dispatch, showToast }) {
   }
 
   function openEdit(row) {
-    setEditing({ ...row, rate: row.rate?.toString() ?? '' })
+    setEditing({ ...row, rate: row.rate?.toString() ?? '', method: row.method || collectionFeeMethod(null) })
   }
 
   function handleSaveEdit() {
@@ -358,7 +428,9 @@ function FeeSettingsPanel({ feeSettings, dispatch, showToast }) {
       showToast(taken === 'built-in' ? 'That name belongs to a built-in fee' : 'A fee with that name already exists', 'error')
       return
     }
-    dispatch({ type: 'UPDATE_CUSTOM_FEE', index: editing.index, fee: { name, rate } })
+    const fee = { name, rate }
+    if (isCollectionFee(name)) fee.method = editing.method
+    dispatch({ type: 'UPDATE_CUSTOM_FEE', index: editing.index, fee })
     showToast('Custom fee updated', 'success')
     setEditing(null)
   }
@@ -409,8 +481,10 @@ function FeeSettingsPanel({ feeSettings, dispatch, showToast }) {
                 className={fieldCls}
               />
             </div>
-            <div className="w-full sm:w-40 flex-shrink-0">
-              <label className={fieldLabelCls}>Rate (%)</label>
+            <div className="w-full sm:w-52 flex-shrink-0">
+              <label className={fieldLabelCls}>
+                {isCollectionFee(form.name) ? 'Rate (% per year)' : 'Rate (% of principal)'}
+              </label>
               <input
                 type="number" min="0" step="0.01"
                 value={form.rate}
@@ -418,6 +492,13 @@ function FeeSettingsPanel({ feeSettings, dispatch, showToast }) {
                 onKeyDown={e => e.key === 'Enter' && handleAddFee()}
                 className={fieldCls}
               />
+              {/* Which basis applies depends on the fee: a collection fee accrues per instalment
+                  like interest, so its rate is annual; every other fee is one charge on the loan. */}
+              <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-500">
+                {isCollectionFee(form.name)
+                  ? 'Accrues per instalment on the balance outstanding'
+                  : 'One charge, calculated on the loan amount'}
+              </p>
             </div>
             <button
               onClick={handleAddFee}
@@ -438,13 +519,14 @@ function FeeSettingsPanel({ feeSettings, dispatch, showToast }) {
                 <Th>Fee Name</Th>
                 <Th>Type</Th>
                 <Th>Rate</Th>
+                <Th>Charging</Th>
                 <Th>Applies To</Th>
                 <Th>Actions</Th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
               {rows.length === 0 ? (
-                <tr><td colSpan={5} className="py-10 text-center text-sm text-slate-400">No fees configured.</td></tr>
+                <tr><td colSpan={6} className="py-10 text-center text-sm text-slate-400">No fees configured.</td></tr>
               ) : rows.map(row => isEditing(row) ? (
                 <tr key={row.id} className="bg-brand-50/40 dark:bg-brand-900/10">
                   <td className="px-4 py-2">
@@ -480,6 +562,19 @@ function FeeSettingsPanel({ feeSettings, dispatch, showToast }) {
                       className={cellFieldCls}
                     />
                   </td>
+                  <td className="px-4 py-2">
+                    {row.isCollection ? (
+                      <select
+                        value={editing.method}
+                        onChange={e => setEditing(p => ({ ...p, method: e.target.value }))}
+                        className={cellFieldCls}
+                      >
+                        {COLLECTION_FEE_METHODS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                      </select>
+                    ) : (
+                      <span className="text-xs text-slate-400 dark:text-slate-500">One-off</span>
+                    )}
+                  </td>
                   <td className="px-4 py-2 text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap">{row.scope}</td>
                   <td className="px-4 py-2">
                     <div className="flex items-center gap-1">
@@ -512,7 +607,38 @@ function FeeSettingsPanel({ feeSettings, dispatch, showToast }) {
                       {row.kind === 'system' ? 'Built-in' : 'Custom'}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300 whitespace-nowrap">{row.rate}%</td>
+                  {/* A bare percentage says nothing about what it is a percentage OF. Every fee
+                      here but an annuity collection fee is one charge on the principal; that one
+                      accrues per instalment, so its rate is annual like the loan's own. */}
+                  <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300 whitespace-nowrap">
+                    {row.isCollection && row.method === 'annuity' ? (
+                      <>
+                        {row.rate}% per year
+                        <span className="text-slate-400 dark:text-slate-500"> · {((Number(row.rate) || 0) / 12).toFixed(2)}% per month</span>
+                      </>
+                    ) : (
+                      <>
+                        {row.rate}%
+                        <span className="text-slate-400 dark:text-slate-500"> of principal</span>
+                      </>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 whitespace-nowrap">
+                    {row.isCollection ? (
+                      <span
+                        title={COLLECTION_FEE_METHODS.find(o => o.value === row.method)?.hint}
+                        className={`px-2 py-0.5 rounded-lg text-[10px] font-bold border ${
+                          row.method === 'none'
+                            ? 'bg-slate-100 text-slate-500 border-slate-200 dark:bg-slate-700 dark:text-slate-400 dark:border-slate-600'
+                            : 'bg-emerald-50 text-emerald-700 border-emerald-200/50 dark:bg-emerald-900/30 dark:text-emerald-400 dark:border-emerald-800'
+                        }`}
+                      >
+                        {COLLECTION_FEE_METHODS.find(o => o.value === row.method)?.label}
+                      </span>
+                    ) : (
+                      <span className="text-xs text-slate-400 dark:text-slate-500">One-off</span>
+                    )}
+                  </td>
                   <td className="px-4 py-3 text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap">{row.scope}</td>
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-1">

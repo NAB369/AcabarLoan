@@ -2,11 +2,22 @@ import { useState, useEffect } from 'react'
 import { Bell, Wallet, Calendar } from 'lucide-react'
 import { useApp } from '../../context/AppContext'
 import { formatVal } from '../../utils/format'
+import { loanOpenAction } from '../../utils/navigation'
+import { ALL_DATES, withinRange } from '../../utils/dateRange'
 import Pagination from '../shared/Pagination'
 import StatusBadge from '../shared/StatusBadge'
-import { useTableSort, sortRows, SortHeader, ariaSortFor } from '../shared/DataTableTools'
+import { useTableSort, sortRows, SortHeader, ariaSortFor, ExportCsvButton } from '../shared/DataTableTools'
+import { LOAN_STRUCTURE_OPTIONS, LOAN_STRUCTURES } from '../../data/constants'
 
 const PAGE_SIZE = 10
+
+// The officer-facing name for a loan's repayment structure. Read from LOAN_STRUCTURE_OPTIONS so
+// the register and the wizard never drift apart — the stored value is what schedule rebuilds
+// branch on, the label is what a person reads ('Decline' stores, 'Decline Schedule' prints).
+function structureLabel(structure) {
+  const value = LOAN_STRUCTURES.includes(structure) ? structure : LOAN_STRUCTURES[0]
+  return LOAN_STRUCTURE_OPTIONS.find(o => o.value === value)?.label || value
+}
 
 function formatDateDMY(isoStr) {
   if (!isoStr) return '—'
@@ -36,6 +47,17 @@ export const LOAN_COLUMNS = [
     cellClass: 'text-slate-600 dark:text-slate-300', render: l => l.product,
   },
   {
+    // Which repayment structure the loan was written on. A loan officer scanning the register
+    // needs it beside the product: an amortizing and a balloon loan of the same size and term
+    // ask the borrower for very different money, and only the schedule name says which.
+    // Loans written before structures existed carry none, and read as Amortizing — the shape
+    // they were actually built with (see LOAN_STRUCTURES in data/constants).
+    id: 'structure', label: 'Schedule', sortable: true,
+    sortValue: l => structureLabel(l.structure),
+    cellClass: 'text-slate-600 dark:text-slate-300',
+    render: l => structureLabel(l.structure),
+  },
+  {
     id: 'amount', label: 'Amount', align: 'right', sortable: true, sortValue: l => Number(l.amount) || 0,
     cellClass: 'text-right font-semibold text-slate-700 dark:text-slate-200',
     render: (l, ctx) => formatVal(l.amount, l.currency || ctx.currency, 1),
@@ -55,13 +77,17 @@ export const LOAN_COLUMNS = [
 
 // `visible` is owned by the page, not the table, so the column picker can sit in the page's
 // toolbar next to New Application rather than in a bar of its own above the table.
-export default function LoanList({ search = '', statusFilter = 'ALL', visible = LOAN_COLUMNS }) {
-  const { state, dispatch } = useApp()
+export default function LoanList({ search = '', statusFilter = 'ALL', dateRange = ALL_DATES, visible = LOAN_COLUMNS }) {
+  const { state, dispatch, showToast } = useApp()
   const [page, setPage] = useState(1)
   const { sort, toggleSort } = useTableSort()
 
   const filtered = state.loanApplications.filter(loan => {
     const matchStatus = statusFilter === 'ALL' || loan.status === statusFilter
+    // The same date the Created column shows, so a row's presence is always explainable from
+    // what is on screen — an application saved before submittedAt existed falls back to its
+    // disbursement date, exactly as the column does.
+    const matchDate = withinRange(loan.submittedAt || loan.disbursementDate, dateRange)
     const q = search.toLowerCase()
     const matchSearch = !search.trim() || (
       loan.ref?.toLowerCase().includes(q) ||
@@ -70,12 +96,12 @@ export default function LoanList({ search = '', statusFilter = 'ALL', visible = 
       loan.product?.toLowerCase().includes(q) ||
       loan.status?.toLowerCase().includes(q)
     )
-    return matchStatus && matchSearch
+    return matchStatus && matchDate && matchSearch
   })
 
   // Back to page 1 on a re-sort too — the rows that moved to the top are the point of sorting,
   // and staying on page 3 hides them.
-  useEffect(() => { setPage(1) }, [search, statusFilter, sort])
+  useEffect(() => { setPage(1) }, [search, statusFilter, dateRange, sort])
 
   // Sorted before the page is cut, so the order runs across every matching application rather
   // than rearranging the ten rows currently on screen. Against the visible columns only: hiding
@@ -90,17 +116,11 @@ export default function LoanList({ search = '', statusFilter = 'ALL', visible = 
   const to = Math.min(safePage * PAGE_SIZE, total)
   const rows = ordered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE)
 
+  // Which view a loan opens on depends on its status; the rule lives in loanOpenAction so that
+  // a link to a loan (see the URL sync in App.jsx) opens exactly the same view this row does.
   function handleRowClick(loan) {
-    if (loan.status === 'Active' || loan.status === 'Waiting Disburse') {
-      dispatch({ type: 'OPEN_LOAN_PREVIEW', loan, tab: 'Overview' })
-      return
-    }
-    if (loan.status === 'Pending Approval') {
-      dispatch({ type: 'OPEN_LOAN_OVERVIEW', loan, tab: 'Overview' })
-      return
-    }
-    const globalIdx = state.loanApplications.findIndex(l => l.ref === loan.ref)
-    if (globalIdx >= 0) dispatch({ type: 'OPEN_LOAN_DETAIL', idx: globalIdx })
+    const action = loanOpenAction(loan, state.loanApplications)
+    if (action) dispatch(action)
   }
 
   function handleOpenQuickPreview(e, loan, tab) {
@@ -112,7 +132,12 @@ export default function LoanList({ search = '', statusFilter = 'ALL', visible = 
     <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700 overflow-hidden">
       {/* Table — the mobile card list below is a fixed summary and is deliberately not driven
           by the column picker. */}
-      <div className="hidden md:block overflow-x-auto min-h-[60vh] max-h-[60vh] overflow-y-auto">
+      <div
+        role="region"
+        aria-label="Loan applications table"
+        tabIndex={0}
+        className="hidden md:block overflow-x-auto min-h-[60vh] max-h-[60vh] overflow-y-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-inset"
+      >
         <table className="w-full text-xs">
           <thead className="sticky top-0 z-10">
             <tr className="bg-slate-50 dark:bg-slate-900 border-b border-slate-200 dark:border-slate-700">
@@ -161,6 +186,7 @@ export default function LoanList({ search = '', statusFilter = 'ALL', visible = 
                         <div className="flex items-center justify-center gap-2">
                           <button
                             onClick={e => handleOpenQuickPreview(e, loan, 'Repayment Schedule')}
+                            aria-label={`Repayment schedule for ${loan.ref}`}
                             disabled={loan.status !== 'Active' && loan.status !== 'Waiting Disburse'}
                             title={loan.status === 'Active' || loan.status === 'Waiting Disburse' ? 'View repayment schedule' : 'Available once loan is disbursed'}
                             className="p-1.5 text-slate-400 hover:text-[#0047ab] hover:bg-blue-50 dark:hover:bg-blue-900/30 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
@@ -169,6 +195,7 @@ export default function LoanList({ search = '', statusFilter = 'ALL', visible = 
                           </button>
                           <button
                             onClick={e => handleOpenQuickPreview(e, loan, 'Repayment Reminder')}
+                            aria-label={`Repayment reminder for ${loan.ref}`}
                             disabled={loan.status !== 'Active' && loan.status !== 'Waiting Disburse'}
                             title={loan.status === 'Active' || loan.status === 'Waiting Disburse' ? 'Repayment reminder' : 'Available once loan is disbursed'}
                             className="p-1.5 text-slate-400 hover:text-[#0047ab] hover:bg-blue-50 dark:hover:bg-blue-900/30 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
@@ -177,6 +204,7 @@ export default function LoanList({ search = '', statusFilter = 'ALL', visible = 
                           </button>
                           <button
                             onClick={e => handleOpenQuickPreview(e, loan, 'Repayment Tracking')}
+                            aria-label={`Repayment tracking for ${loan.ref}`}
                             disabled={loan.status !== 'Active' && loan.status !== 'Waiting Disburse'}
                             title={loan.status === 'Active' || loan.status === 'Waiting Disburse' ? 'Repayment Tracking' : 'Available once loan is disbursed'}
                             className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-900/30 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
@@ -231,6 +259,7 @@ export default function LoanList({ search = '', statusFilter = 'ALL', visible = 
               <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
                 <button
                   onClick={e => handleOpenQuickPreview(e, loan, 'Repayment Schedule')}
+                            aria-label={`Repayment schedule for ${loan.ref}`}
                   disabled={loan.status !== 'Active' && loan.status !== 'Waiting Disburse'}
                   title={loan.status === 'Active' || loan.status === 'Waiting Disburse' ? 'View repayment schedule' : 'Available once loan is disbursed'}
                   className="p-1.5 text-slate-400 hover:text-[#0047ab] hover:bg-blue-50 dark:hover:bg-blue-900/30 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
@@ -239,6 +268,7 @@ export default function LoanList({ search = '', statusFilter = 'ALL', visible = 
                 </button>
                 <button
                   onClick={e => handleOpenQuickPreview(e, loan, 'Repayment Reminder')}
+                            aria-label={`Repayment reminder for ${loan.ref}`}
                   disabled={loan.status !== 'Active' && loan.status !== 'Waiting Disburse'}
                   title={loan.status === 'Active' || loan.status === 'Waiting Disburse' ? 'Repayment reminder' : 'Available once loan is disbursed'}
                   className="p-1.5 text-slate-400 hover:text-[#0047ab] hover:bg-blue-50 dark:hover:bg-blue-900/30 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
@@ -247,6 +277,7 @@ export default function LoanList({ search = '', statusFilter = 'ALL', visible = 
                 </button>
                 <button
                   onClick={e => handleOpenQuickPreview(e, loan, 'Repayment Tracking')}
+                            aria-label={`Repayment tracking for ${loan.ref}`}
                   disabled={loan.status !== 'Active' && loan.status !== 'Waiting Disburse'}
                   title={loan.status === 'Active' || loan.status === 'Waiting Disburse' ? 'Repayment Tracking' : 'Available once loan is disbursed'}
                   className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-900/30 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
@@ -260,14 +291,27 @@ export default function LoanList({ search = '', statusFilter = 'ALL', visible = 
       </div>
 
       {total > 0 && (
-        <div className="px-4 py-3 border-t border-slate-100 dark:border-slate-700">
-          <Pagination
-            page={safePage}
-            totalPages={totalPages}
-            from={from}
-            to={to}
-            total={total}
-            onPage={setPage}
+        // Export sits beside the count it acts on — "1–10 of 47" and the button that saves all
+        // 47 read as one statement, where the same button up in the toolbar would look like it
+        // exported the page.
+        <div className="px-4 py-3 border-t border-slate-100 dark:border-slate-700 flex flex-col-reverse sm:flex-row sm:items-center gap-3">
+          <div className="flex-1 min-w-0">
+            <Pagination
+              page={safePage}
+              totalPages={totalPages}
+              from={from}
+              to={to}
+              total={total}
+              onPage={setPage}
+            />
+          </div>
+          <ExportCsvButton
+            name="loans"
+            columns={visible}
+            rows={ordered}
+            ctx={{ currency: state.currency }}
+            onExported={n => showToast(`${n} loan${n === 1 ? '' : 's'} exported to CSV`, 'success')}
+            className="self-end sm:self-auto flex-shrink-0"
           />
         </div>
       )}

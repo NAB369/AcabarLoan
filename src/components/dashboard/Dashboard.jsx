@@ -1,57 +1,10 @@
-import { useMemo } from 'react'
-import { Bar, BarChart, CartesianGrid, XAxis } from 'recharts'
+import { lazy, Suspense, useMemo } from 'react'
 import { Users, DollarSign, Banknote, Activity, ArrowUpRight, ArrowDownRight, TrendingUp, Coins } from 'lucide-react'
 import { useApp } from '../../context/AppContext'
 import { formatVal, CONVERSION_RATE } from '../../utils/format'
 import StatusBadge from '../shared/StatusBadge'
+const FinancialBarChart = lazy(() => import('./FinancialBarChart'))
 import { getCustomerStatus } from '../../utils/customerStatus'
-import { ChartContainer, ChartTooltip, ChartTooltipContent } from '@/components/ui/chart'
-
-// ── Financial Overview chart config — fixed Income/Expense hues, matching the
-// legend dots already used in this card (bg-emerald-500 / bg-rose-500) ────────
-const financialChartConfig = {
-  income:  { label: 'Income',  color: '#10b981' },
-  expense: { label: 'Expense', color: '#f43f5e' },
-}
-
-// ── Bar Chart (shadcn/recharts) — grouped Income vs Expense bars per month ────
-function FinancialBarChart({ data, currency }) {
-  if (data.length === 0) {
-    return (
-      <div className="h-44 flex items-center justify-center text-xs text-slate-400">
-        No income or expense records yet.
-      </div>
-    )
-  }
-
-  return (
-    <ChartContainer config={financialChartConfig} className="aspect-auto h-44 w-full">
-      <BarChart data={data} barGap={4}>
-        <CartesianGrid vertical={false} />
-        <XAxis dataKey="month" tickLine={false} axisLine={false} tickMargin={8} fontSize={11} />
-        <ChartTooltip
-          cursor={false}
-          content={
-            <ChartTooltipContent
-              indicator="dot"
-              formatter={(value, name, item) => (
-                <>
-                  <div className="h-2.5 w-2.5 shrink-0 rounded-[2px]" style={{ backgroundColor: item.color }} />
-                  <div className="flex flex-1 items-center justify-between leading-none">
-                    <span className="text-muted-foreground">{name}</span>
-                    <span className="font-mono font-medium tabular-nums text-foreground">{formatVal(value, currency)}</span>
-                  </div>
-                </>
-              )}
-            />
-          }
-        />
-        <Bar dataKey="income" name="Income" fill="var(--color-income)" radius={[4, 4, 0, 0]} maxBarSize={32} />
-        <Bar dataKey="expense" name="Expense" fill="var(--color-expense)" radius={[4, 4, 0, 0]} maxBarSize={32} />
-      </BarChart>
-    </ChartContainer>
-  )
-}
 
 // ── Donut Chart (SVG) ─────────────────────────────────────────────────────────
 function DonutChart({ segments, total }) {
@@ -225,7 +178,11 @@ export default function Dashboard() {
               </span>
             </div>
           </div>
-          <FinancialBarChart data={financialTrend} currency={currency} />
+          {/* The card keeps its height while the chart chunk is in flight, so the tiles
+              below it do not jump when it lands. */}
+          <Suspense fallback={<div className="h-44 rounded-xl bg-slate-100/70 dark:bg-slate-700/40 animate-pulse" />}>
+            <FinancialBarChart data={financialTrend} currency={currency} />
+          </Suspense>
         </div>
 
       </div>

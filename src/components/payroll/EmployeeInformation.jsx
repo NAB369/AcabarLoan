@@ -4,9 +4,11 @@ import { useApp } from '../../context/AppContext'
 import { useTableColumns, ColumnPicker, SortHeader, ariaSortFor } from '../shared/DataTableTools'
 import { EMPTY_ADDRESS } from '../../data/constants'
 import Pagination from '../shared/Pagination'
+import StatusBadge from '../shared/StatusBadge'
 import {
   employeeName, employeePhone, employeeEmail, employeeAddress,
   nextEmployeeNo, splitFullName, splitPhone, splitEmail, isOnPayroll, periodBounds, periodLabel,
+  employeeDeduction, employeeNetSalary,
 } from '../../utils/employee'
 import { formatDateDisplay, formatVal } from '../../utils/format'
 import EmployeeForm from './EmployeeForm'
@@ -64,6 +66,52 @@ const COLUMNS = [
     render: (e, { currency }) => (e.salary ? formatVal(e.salary, currency) : ''),
     cellClass: 'text-right whitespace-nowrap font-semibold',
     align: 'right',
+  },
+  {
+    id: 'deduction', label: 'Deduction', numeric: true,
+    value: e => employeeDeduction(e),
+    // Blank rather than a zero when nothing is held back — a column of $0.00 down the register
+    // reads as a figure someone entered, when in fact nobody has one.
+    render: (e, { currency }) => (employeeDeduction(e) ? formatVal(employeeDeduction(e), currency) : ''),
+    cellClass: 'text-right whitespace-nowrap text-rose-600 dark:text-rose-400',
+    align: 'right',
+  },
+  {
+    id: 'netSalary', label: 'Net Salary', numeric: true,
+    // Derived from the two columns beside it, so it can never disagree with them. This is the
+    // figure payroll actually pays — see the run modal.
+    value: e => employeeNetSalary(e),
+    render: (e, { currency }) => (e.salary ? formatVal(employeeNetSalary(e), currency) : ''),
+    cellClass: 'text-right whitespace-nowrap font-bold text-slate-800 dark:text-slate-100',
+    align: 'right',
+  },
+  // ── What this employee is being paid for the period the register is filtered to ──
+  // Approval used to be a tab of its own listing payroll runs. A run is a batch, but what an
+  // operator checks before releasing it is per person — so the run's own lines are read back
+  // onto the staff they pay, and the release happens from the header above.
+  // All three read from the render context rather than the employee: the figures belong to the
+  // selected period, not to the record.
+  {
+    id: 'payPeriod', label: 'Pay Period',
+    value: (e, ctx) => (ctx?.paidLines?.has(e.id) ? (ctx.selectedPeriodLabel || '') : ''),
+    cellClass: 'whitespace-nowrap',
+  },
+  {
+    id: 'payAmount', label: 'Amount', numeric: true,
+    value: (e, ctx) => ctx?.paidLines?.get(e.id) || 0,
+    render: (e, ctx) => (ctx.paidLines.has(e.id) ? formatVal(ctx.paidLines.get(e.id), ctx.currency) : ''),
+    cellClass: 'text-right whitespace-nowrap font-semibold',
+    align: 'right',
+  },
+  {
+    id: 'payStatus', label: 'Payment Status',
+    // An employee outside the run is not "unpaid" — nothing was committed for them at all,
+    // which is a different thing and worth saying rather than leaving blank.
+    value: (e, ctx) => (ctx?.paidLines?.has(e.id) ? (ctx.payStatus || 'Pending Approval') : ''),
+    render: (e, ctx) => (ctx.paidLines.has(e.id)
+      ? <StatusBadge status={ctx.payStatus || 'Pending Approval'} size="xs" />
+      : <span className="text-[10px] text-slate-400 dark:text-slate-500">Not in this run</span>),
+    cellClass: 'whitespace-nowrap',
   },
   { id: 'accountNumber', label: 'Account Number', value: e => e.accountNumber || '', cellClass: 'font-mono whitespace-nowrap' },
   { id: 'mobile', label: 'Mobile No.', value: e => employeePhone(e.mobileCode, e.mobileNo), cellClass: 'whitespace-nowrap' },
@@ -145,7 +193,7 @@ function EmptyAvatar() {
   )
 }
 
-export default function EmployeeInformation() {
+export default function EmployeeInformation({ onProcessPayroll, onApproveRun, onRejectRun }) {
   const { state, dispatch, showToast } = useApp()
   const { employees, currency } = state
   const uploadRef = useRef(null)
@@ -163,6 +211,49 @@ export default function EmployeeInformation() {
     value: state.payrollColumns?.employees,
     onChange: ids => dispatch({ type: 'SET_PAYROLL_COLUMNS', table: 'employees', ids }),
   })
+  // ── The payroll run covering the period the register is filtered to ──
+  // Only meaningful with one year and one month selected: 'all' on either widens the register
+  // past any single run, and there is then no one period to report a status for.
+  const period = year !== 'all' && month !== 'all' ? `${year}-${month}` : null
+  const selectedPeriodLabel = period
+    ? new Date(Number(year), Number(month) - 1, 1).toLocaleDateString('en-GB', { month: 'short', year: 'numeric' })
+    : ''
+  const periodRun = useMemo(
+    () => (period ? (state.payrollRuns || []).find(r => r.period === period) : null),
+    [state.payrollRuns, period]
+  )
+  // The posting the run raised is what actually gets approved — the run itself carries no
+  // status, so the release state is read off the expense it created.
+  const periodPosting = useMemo(
+    () => (periodRun ? (state.expenses || []).find(e => e.code === periodRun.code) : null),
+    [state.expenses, periodRun]
+  )
+  const paidLines = useMemo(() => {
+    const map = new Map()
+    for (const line of periodRun?.lines || []) map.set(line.employeeId, line.amount)
+    return map
+  }, [periodRun])
+  const payStatus = periodPosting?.status || null
+  const awaitingApproval = !!periodPosting && payStatus !== 'Approved'
+
+  // Every salary posting still waiting to be released, whichever month it belongs to. Payroll
+  // is normally run for the month just gone while the register opens on the current one, so a
+  // release tied only to the selected period sat invisible on the wrong filter and there was
+  // nowhere to approve it from. Newest first — the run just made is the one being looked for.
+  const outstandingRuns = useMemo(() => {
+    const postings = new Map((state.expenses || []).map(e => [e.code, e]))
+    return (state.payrollRuns || [])
+      .map(run => ({ run, posting: postings.get(run.code) }))
+      .filter(x => x.posting && x.posting.status !== 'Approved')
+      .sort((a, b) => (b.run.period || '').localeCompare(a.run.period || ''))
+  }, [state.payrollRuns, state.expenses])
+  // Only surfaced when the selected period has nothing outstanding of its own, so the two
+  // controls never both appear and compete.
+  const outstandingElsewhere = awaitingApproval ? null : outstandingRuns[0] || null
+  // Everything a cell or a sort comparison needs that isn't on the employee record.
+  const cellCtx = { currency, paidLines, selectedPeriodLabel, payStatus }
+
+  const [selectedIds, setSelectedIds] = useState(() => new Set())
   const [sort, setSort] = useState({ key: 'name', dir: 'asc' })
   const [page, setPage] = useState(1)
   const [deleting, setDeleting] = useState(null)
@@ -204,8 +295,8 @@ export default function EmployeeInformation() {
     if (!col) return filtered
     const dir = sort.dir === 'asc' ? 1 : -1
     return [...filtered].sort((a, b) => {
-      const av = col.value(a) || (col.numeric ? 0 : '')
-      const bv = col.value(b) || (col.numeric ? 0 : '')
+      const av = col.value(a, cellCtx) || (col.numeric ? 0 : '')
+      const bv = col.value(b, cellCtx) || (col.numeric ? 0 : '')
       // Blank cells sort last either way — an employee with no emergency number shouldn't
       // head the list just because the column is empty. A zero amount is a real value,
       // not a blank, so numeric columns skip this.
@@ -216,7 +307,7 @@ export default function EmployeeInformation() {
       }
       return (av - bv) * dir
     })
-  }, [filtered, sort])
+  }, [filtered, sort, cellCtx])
 
   const total = sorted.length
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
@@ -225,9 +316,38 @@ export default function EmployeeInformation() {
   const to = Math.min(safePage * PAGE_SIZE, total)
   const rows = sorted.slice(from - 1, to)
 
+  // ── Who the next payroll run pays ──
+  // Ticked rows, by employee id. Cleared whenever the period or the search changes: a run pays
+  // one month, and a selection made against a different month or a wider search is not a
+  // statement about the rows now on screen — carrying it silently would pay people the
+  // operator can no longer see.
+  const toggleOne = id => setSelectedIds(prev => {
+    const next = new Set(prev)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    return next
+  })
+  // Select-all covers everything the current filter matches, not just the page in view — the
+  // register pages at 15 and a payroll of 40 would otherwise need ticking three times.
+  const shownIds = useMemo(() => sorted.map(e => e.id), [sorted])
+  const selectedShown = shownIds.filter(id => selectedIds.has(id))
+  const allShownSelected = shownIds.length > 0 && selectedShown.length === shownIds.length
+  const someShownSelected = selectedShown.length > 0
+  const toggleAllShown = () => setSelectedIds(prev => {
+    if (allShownSelected) {
+      const next = new Set(prev)
+      shownIds.forEach(id => next.delete(id))
+      return next
+    }
+    return new Set([...prev, ...shownIds])
+  })
+
   // Any change to what is being listed returns to the first page — otherwise a filter that
   // shrinks the list leaves the table on a page that no longer exists.
   useEffect(() => { setPage(1) }, [search, sort, year, month])
+  // A tick is a statement about the rows on screen, so changing which rows those are drops it.
+  // Sorting is left out: it reorders the same people rather than changing who they are.
+  useEffect(() => { setSelectedIds(new Set()) }, [search, year, month])
 
   // These modals are local component state, so App.jsx's global Escape handler (which only
   // knows about reducer state) can't reach them.
@@ -366,8 +486,72 @@ export default function EmployeeInformation() {
             {MONTHS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
           </select>
 
+          {/* The period's release, beside the filter that chose the period. Approval is per
+              run, not per employee — a batch is committed and released whole — so it is one
+              control over the table rather than a button repeated down every row. It appears
+              only when the selected period actually has something outstanding. */}
+          {awaitingApproval && (
+            <div className="flex items-center gap-2">
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold border border-amber-200/60 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-900/30 dark:text-amber-400 whitespace-nowrap">
+                {selectedPeriodLabel} · {formatVal(periodPosting.amount, currency)} awaiting approval
+              </span>
+              <Button
+                onClick={() => onApproveRun?.(periodPosting.code)}
+                className="h-auto px-3 py-1.5 rounded-lg text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 shadow-sm transition-colors"
+              >
+                Approve
+              </Button>
+              {/* Outline, not solid: approving is the expected outcome and carries the one
+                  filled button, so refusing does not compete with it for the eye. */}
+              <Button
+                variant="outline"
+                onClick={() => onRejectRun?.(periodPosting.code)}
+                className="h-auto shadow-none px-3 py-1.5 rounded-lg text-xs font-bold border border-rose-200 dark:border-rose-800 text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-900/20 transition-colors"
+              >
+                Reject
+              </Button>
+            </div>
+          )}
+
+          {/* A run waiting on another month. Naming the month is the point — the operator has
+              just processed payroll and is looking for where to release it, and it is not on
+              the month they are filtered to. Pressing it moves the register there as well as
+              approving, so the rows they end up looking at are the ones just released. */}
+          {outstandingElsewhere && (
+            <div className="flex items-center gap-2">
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold border border-amber-200/60 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-900/30 dark:text-amber-400 whitespace-nowrap">
+                {periodLabel(outstandingElsewhere.run.period)} · {formatVal(outstandingElsewhere.posting.amount, currency)} awaiting approval
+              </span>
+              <Button
+                onClick={() => {
+                  const [y, m] = String(outstandingElsewhere.run.period || '').split('-')
+                  if (y && m) { setYear(y); setMonth(m) }
+                  onApproveRun?.(outstandingElsewhere.posting.code)
+                }}
+                className="h-auto px-3 py-1.5 rounded-lg text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 shadow-sm transition-colors"
+              >
+                Approve {periodLabel(outstandingElsewhere.run.period)}
+              </Button>
+            </div>
+          )}
+
           <div className="flex items-center gap-2 sm:ml-auto">
             <ColumnPicker columns={COLUMNS} visibleIds={visibleIds} onToggle={toggleColumn} iconOnly />
+            {/* Runs a period rather than adding a row, so it carries no plus icon. It pays the
+                ticked names and opens on the month the register is filtered to, so the run
+                matches what was just being looked at. With nothing ticked it falls back to
+                everyone on payroll that month — the normal case is the whole staff, and an
+                operator who ticked nothing meant "run it", not "run it for nobody". */}
+            <Button
+              variant="outline"
+              onClick={() => onProcessPayroll?.({
+                employeeIds: selectedShown,
+                period: period || undefined,
+              })}
+              className="h-auto shadow-none px-4 py-1.5 rounded-lg text-xs font-bold text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-600 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
+            >
+              Process Payroll{selectedShown.length ? ` (${selectedShown.length})` : ''}
+            </Button>
             <Button
               variant="outline"
               onClick={() => uploadRef.current?.click()}
@@ -400,6 +584,20 @@ export default function EmployeeInformation() {
           <table className="w-full">
             <TableHeader className="sticky top-0 z-10">
               <TableRow className="border-b-0 hover:bg-transparent">
+                {/* Who this run pays. Ticking is what Process Payroll acts on, so the header
+                    box covers everyone the current filter shows — select-all means "all of
+                    these", not every employee on the register. Indeterminate when only some
+                    are ticked, so a partial selection is visible without counting rows. */}
+                <TableHead className={`${th} w-10`}>
+                  <input
+                    type="checkbox"
+                    aria-label="Select all employees in this view"
+                    checked={allShownSelected}
+                    ref={el => { if (el) el.indeterminate = someShownSelected && !allShownSelected }}
+                    onChange={toggleAllShown}
+                    className="w-3.5 h-3.5 rounded border-slate-300 dark:border-slate-600 accent-brand-600 cursor-pointer"
+                  />
+                </TableHead>
                 <TableHead className={`${th} w-14`}><span className="sr-only">Photo</span></TableHead>
                 {/* Every header sorts, and now says so: an arrow on each, filled in on the
                     column actually in use. Before this the click worked but nothing on screen
@@ -445,6 +643,16 @@ export default function EmployeeInformation() {
                   onClick={() => setPreviewing(emp)}
                   className="group cursor-pointer hover:bg-slate-50 dark:hover:bg-white/5 transition-colors"
                 >
+                  {/* Stops the click so ticking a row doesn't also open its preview */}
+                  <TableCell className="px-4 py-2.5" onClick={e => e.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${employeeName(emp) || emp.employeeNo}`}
+                      checked={selectedIds.has(emp.id)}
+                      onChange={() => toggleOne(emp.id)}
+                      className="w-3.5 h-3.5 rounded border-slate-300 dark:border-slate-600 accent-brand-600 cursor-pointer"
+                    />
+                  </TableCell>
                   <TableCell className="px-4 py-2.5">
                     {emp.photo
                       ? <img src={emp.photo} alt="" className="w-8 h-8 rounded-full object-cover flex-shrink-0" />
@@ -453,7 +661,7 @@ export default function EmployeeInformation() {
                   {/* Cells come off the same COLUMNS list as the headers, so the two stay in
                       step. A column with no render shows its sort text; an empty one a dash. */}
                   {visibleColumns.map(col => {
-                    const content = col.render ? col.render(emp, { currency }) : col.value(emp)
+                    const content = col.render ? col.render(emp, cellCtx) : col.value(emp, cellCtx)
                     return (
                       <TableCell key={col.id} className={`px-4 py-2.5 text-xs text-slate-600 dark:text-slate-300 ${col.cellClass || ''}`}>
                         {content || '—'}

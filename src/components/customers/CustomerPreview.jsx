@@ -7,6 +7,7 @@ import IdentityDocumentsTable, { hasUploadedDocs } from '../shared/IdentityDocum
 import { formatAddress } from '../../utils/format'
 import { IDENTITY_DOC_TYPES } from '../../data/constants'
 import { getCustomerStatus } from '../../utils/customerStatus'
+import useModalA11y from '@/components/shared/useModalA11y'
 
 export default function CustomerPreview() {
   const { state, dispatch } = useApp()
@@ -24,6 +25,11 @@ export default function CustomerPreview() {
     document.addEventListener('keydown', handleEscape, true)
     return () => document.removeEventListener('keydown', handleEscape, true)
   }, [lightbox])
+
+  // Escape for the preview itself is App.jsx's (CLOSE_CUSTOMER_PREVIEW); the effect above owns
+  // only the lightbox stacked on top of it. So the hook contributes the focus trap, the focus
+  // return and the dialog semantics, and leaves both key handlers alone.
+  const modal = useModalA11y({ label: 'Customer Details', escape: false })
 
   const customer = state.previewCustomerCode
     ? state.customers.find(c => c.code === state.previewCustomerCode)
@@ -65,7 +71,7 @@ export default function CustomerPreview() {
   return (
     <>
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-      <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-xl w-full max-w-4xl h-[92vh] flex flex-col overflow-hidden">
+      <div {...modal} className="bg-white dark:bg-slate-800 rounded-2xl shadow-xl w-full max-w-4xl h-[92vh] flex flex-col overflow-hidden">
 
         {/* Header */}
         <div className="flex items-start gap-4 px-4 sm:px-6 py-4 border-b border-slate-100 dark:border-slate-700 flex-shrink-0">

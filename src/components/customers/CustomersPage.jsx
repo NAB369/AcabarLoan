@@ -5,6 +5,8 @@ import CustomerTable, { CUSTOMER_COLUMNS } from './CustomerTable'
 import CustomerWizard from './CustomerWizard'
 import CustomerPreview from './CustomerPreview'
 import { useTableColumns, ColumnPicker } from '../shared/DataTableTools'
+import { FilterMenu } from '../shared/FilterTools'
+import { isRangeActive, rangeLabel } from '../../utils/dateRange'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -18,12 +20,28 @@ import {
   AlertDialogAction,
 } from '@/components/ui/alert-dialog'
 
+// Which register a saved filter belongs to. A plain string rather than the component name so
+// a set survives the component being renamed or moved.
+const SAVED_FILTER_TABLE = 'customers'
+
 export default function CustomersPage() {
   const { state, dispatch, showToast, can } = useApp()
   const { visible, visibleIds, toggle } = useTableColumns(CUSTOMER_COLUMNS, {
     value: state.customerVisibleColumns,
     onChange: ids => dispatch({ type: 'SET_CUSTOMER_COLUMNS', ids }),
   })
+
+  // How many filters are narrowing the register right now. Drives whether Reset is on screen
+  // and whether there is anything worth saving — both answer the same question.
+  const savedFilters = state.savedFilters?.[SAVED_FILTER_TABLE] || []
+  const filterCount = [
+    !!state.customerSearch.trim(),
+    isRangeActive(state.customerDateRange),
+  ].filter(Boolean).length
+  const filterSummary = [
+    state.customerSearch.trim() && `Search “${state.customerSearch.trim()}”`,
+    isRangeActive(state.customerDateRange) && `Registered: ${rangeLabel(state.customerDateRange)}`,
+  ].filter(Boolean).join(' · ')
 
   const pendingCustomer = state.deletePendingCode
     ? state.customers.find(c => c.code === state.deletePendingCode)
@@ -66,18 +84,33 @@ export default function CustomersPage() {
             className="h-auto shadow-none md:text-xs w-full pl-8 pr-3 py-2 text-xs rounded-xl border border-slate-200 bg-white dark:bg-slate-800 dark:border-slate-700 dark:text-slate-100 dark:placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-brand-500/40 focus:border-brand-400 transition"
           />
         </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          {/* The visible "Created" label is gone from the row, so the field carries its own
-              accessible name — a bare date input announces only as "date" to a screen reader. */}
-          <input
-            type="date"
-            aria-label="Filter by created date"
-            title="Filter by created date"
-            value={state.customerDateFilter}
-            onChange={e => dispatch({ type: 'SET_CUSTOMER_DATE_FILTER', date: e.target.value })}
-            className="px-3 py-2 text-xs rounded-xl border border-slate-200 bg-white dark:bg-slate-800 dark:border-slate-700 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500/40 focus:border-brand-400 transition"
-          />
-        </div>
+        <FilterMenu
+          dateLabel="Registered"
+          dateRange={state.customerDateRange}
+          onDateRangeChange={range => dispatch({ type: 'SET_CUSTOMER_DATE_RANGE', range })}
+          saved={savedFilters}
+          activeCount={filterCount}
+          summary={filterSummary}
+          onReset={() => dispatch({ type: 'RESET_CUSTOMER_FILTERS' })}
+          onApply={entry => {
+            dispatch({ type: 'SET_CUSTOMER_SEARCH', q: entry.filter.search || '' })
+            dispatch({ type: 'SET_CUSTOMER_DATE_RANGE', range: entry.filter.dateRange })
+            showToast(`Filter “${entry.name}” applied`, 'info')
+          }}
+          onSave={name => {
+            dispatch({
+              type: 'SAVE_TABLE_FILTER',
+              tableId: SAVED_FILTER_TABLE,
+              name,
+              filter: { search: state.customerSearch, dateRange: state.customerDateRange },
+            })
+            showToast(`Filter “${name}” saved`, 'success')
+          }}
+          onDelete={id => {
+            dispatch({ type: 'DELETE_TABLE_FILTER', tableId: SAVED_FILTER_TABLE, id })
+            showToast('Saved filter deleted', 'info')
+          }}
+        />
         {/* The column picker rides with the primary action at the far end of the row rather
             than sitting above the table, so every control on this bar is in one place. */}
         <div className="flex items-center gap-2 flex-shrink-0 sm:ml-auto">

@@ -168,9 +168,13 @@ export default function WeBill365Auth({ integration, mode, embedded = false, onS
   const [linkDeposits, setLinkDeposits] = useState(false)
   const [agreed, setAgreed] = useState(false)
   const [bankError, setBankError] = useState('')
-  // An install with no WeBill365 account has nothing to sign in with, so it opens on the
-  // sign-up instead of on a login it would have to back out of. Each links to the other.
-  const [view, setView] = useState(integration.login?.registered ? 'login' : 'signup')
+  // Always the login card first, including the very first connect on an install with no
+  // account yet. It used to open straight on the sign-up form in that case, on the reasoning
+  // that there was nothing to sign in with — but connecting a provider is a sign-in action,
+  // and being handed a registration form instead reads as the wrong screen to anyone who
+  // already has a WeBill365 account and simply hasn't used it here. Signing in with no
+  // account on file says so and points at the Create Account button below it.
+  const [view, setView] = useState('login')
   const [error, setError] = useState('')
 
   // Sign-in
@@ -797,7 +801,7 @@ export default function WeBill365Auth({ integration, mode, embedded = false, onS
   // the connect popup when not — so it is its own overlay rather than part of the card.
   const profileDialog = editing && (
     <div
-      className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4 overflow-y-auto"
+      className="fixed inset-0 !mt-0 bg-black/60 z-[60] flex items-center justify-center p-4 overflow-y-auto"
       onClick={() => setEditing(false)}
       role="dialog"
       aria-modal="true"
@@ -916,7 +920,7 @@ export default function WeBill365Auth({ integration, mode, embedded = false, onS
   // remark editable and the name and currency the check settled read back beside it.
   const updateDialog = bankOpen && editingNumber && (
     <div
-      className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4 overflow-y-auto"
+      className="fixed inset-0 !mt-0 bg-black/60 z-[60] flex items-center justify-center p-4 overflow-y-auto"
       onClick={() => setBankOpen(false)}
       role="dialog"
       aria-modal="true"
@@ -1011,7 +1015,7 @@ export default function WeBill365Auth({ integration, mode, embedded = false, onS
 
   const bankDialog = bankOpen && !editingNumber && (
     <div
-      className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4 overflow-y-auto"
+      className="fixed inset-0 !mt-0 bg-black/60 z-[60] flex items-center justify-center p-4 overflow-y-auto"
       onClick={() => setBankOpen(false)}
       role="dialog"
       aria-modal="true"
@@ -1172,7 +1176,7 @@ export default function WeBill365Auth({ integration, mode, embedded = false, onS
   return (
     <>
       <div
-        className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 overflow-y-auto"
+        className="fixed inset-0 !mt-0 bg-black/60 z-50 flex items-center justify-center p-4 overflow-y-auto"
         onClick={onClose}
         role="dialog"
         aria-modal="true"
