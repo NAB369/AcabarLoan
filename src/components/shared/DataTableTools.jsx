@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { Columns3, ChevronUp, ChevronDown, ChevronsUpDown, Download } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { exportTableCsv } from '../../utils/exportCsv'
+import { useApp } from '../../context/AppContext'
 
 // Sorting and column visibility for the register tables. Both were wanted on Customers and on
 // Loan Applications at once, so they live here rather than being written twice — see the
@@ -184,20 +185,30 @@ export function ariaSortFor(column, sort) {
 // not the ten on screen — through the columns left visible in the picker beside it. So what
 // lands in the spreadsheet is what the operator narrowed the list down to, which is the whole
 // reason they narrowed it.
-export function ExportCsvButton({ columns, rows, name, ctx, onExported, label = 'Export CSV', className = '' }) {
+// `perm` is the export permission for whichever register this is on (export_customers,
+// export_loans, ...). Checked here rather than at each caller because a register carrying data out
+// of the app is exactly what an access scope is meant to be able to close, and one gate is one
+// place to get it right — see the permission grid in utils/governance.js.
+export function ExportCsvButton({ columns, rows, name, ctx, onExported, perm, label = 'Export CSV', className = '' }) {
+  const { can } = useApp()
   const count = rows?.length || 0
+  const allowed = !perm || can(perm)
+  const off = count === 0 || !allowed
   return (
     <button
       type="button"
       onClick={() => {
+        if (off) return
         exportTableCsv(name, columns, rows, ctx)
         onExported?.(count)
       }}
-      disabled={count === 0}
-      title={count ? `Export ${count} row${count === 1 ? '' : 's'} to a spreadsheet` : 'Nothing to export'}
+      disabled={off}
+      title={!allowed
+        ? 'Your account does not have permission to export this data'
+        : count ? `Export ${count} row${count === 1 ? '' : 's'} to a spreadsheet` : 'Nothing to export'}
       className={cn(
         'flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-xl border transition-colors whitespace-nowrap',
-        count === 0
+        off
           ? 'border-slate-200 dark:border-slate-700 text-slate-300 dark:text-slate-600 cursor-not-allowed'
           : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700',
         className,

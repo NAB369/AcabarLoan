@@ -1,8 +1,11 @@
 import { useEffect, useState } from 'react'
+import { AlertTriangle } from 'lucide-react'
+import { useApp } from '../../context/AppContext'
 import Sidebar from './Sidebar'
 import Header from './Header'
 
 export default function Layout({ children }) {
+  const { state } = useApp()
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
 
   // The drawer is a slide-over, so it backs out on Escape like every other overlay in the
@@ -41,6 +44,18 @@ export default function Layout({ children }) {
       <Sidebar open={mobileNavOpen} onClose={() => setMobileNavOpen(false)} />
       <main className="flex-1 flex flex-col h-full overflow-hidden relative min-w-0">
         <Header onMenuClick={() => setMobileNavOpen(true)} />
+        {/* A failed write used to be swallowed, so an install that had filled its quota kept
+            accepting work and lost all of it at the next reload. A banner rather than a toast:
+            this does not stop being true after four seconds. */}
+        {state.storageFailed && (
+          <div role="alert" className="flex items-start gap-2.5 px-4 py-2.5 bg-rose-600 text-white">
+            <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+            <p className="text-xs font-semibold leading-snug">
+              This browser stopped saving &mdash; its storage is full. Anything entered from now on
+              will be lost when the page reloads. Export what you need, then clear space.
+            </p>
+          </div>
+        )}
         {/* tabIndex -1 so the skip link has something to land on; it is not a Tab stop itself. */}
         <div
           id="main-content"

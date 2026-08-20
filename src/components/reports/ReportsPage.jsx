@@ -1073,7 +1073,7 @@ function buildLoanBreakdownSummaryRows(detailRows, sorting) {
 
 
 export default function ReportsPage() {
-  const { state, dispatch } = useApp()
+  const { state, dispatch, visibleLoans } = useApp()
   const { reportTab, reportView, loanApplications: allLoanApplications, currency, customers } = state
 
   // A loan report is always run in ONE currency. Dollars and riel are different money and cannot
@@ -1088,7 +1088,10 @@ export default function ReportsPage() {
   //
   // Totals are the one thing that cannot be mixed: singleCurrencyTotals gives a footer only when
   // every row agrees, rather than adding dollars to riel (see architecture.md).
-  const loanApplications = allLoanApplications
+  // Scoped, so a total is a total of what this account may see (see AppContext's visibleLoans).
+  // A report that quietly summed loans the operator cannot open would be worse than one that
+  // shows fewer rows.
+  const loanApplications = visibleLoans
   // Which currencies the book actually holds — a figure that cannot be split by currency is
   // stated only when there is one of them.
   const bookCurrencies = useMemo(

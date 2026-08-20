@@ -175,7 +175,9 @@ export default function LoanWizard() {
   // Anything but an explicitly deactivated account. The User Accounts panel has no status
   // field, so accounts created there carry no status at all — testing `=== 'Active'` dropped
   // every officer added after install and left only the seeded ones in the list.
-  const creditOfficers = state.systemUsers.filter(u => u.role === 'Credit Officer' && u.status !== 'Inactive')
+  // Active only: an account requested at the sign-in screen and given a role but not yet
+  // activated cannot sign in, so it must not be assignable as the officer on a loan either.
+  const creditOfficers = state.systemUsers.filter(u => u.role === 'Credit Officer' && u.status === 'Active')
 
   const selectedProductMax = useMemo(() => {
     const selectedProduct = state.loanProducts.find(p => p.name === product)

@@ -397,3 +397,12 @@ export function formatKhDMY(dateStr) {
   const dmy = `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`
   return `${KH_WEEKDAYS[d.getDay()]} ${dmy}`
 }
+
+// Two letters standing in for a person where a photo would be, in an avatar circle. Two, not one:
+// "SC" tells two Sokhas apart in a list where "S" does not.
+export const initials = name => String(name || '?')
+  .split(/\s+/)
+  .filter(Boolean)
+  .slice(0, 2)
+  .map(w => w[0].toUpperCase())
+  .join('')

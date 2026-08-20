@@ -2,9 +2,14 @@ import { LayoutDashboard, Users, HandCoins, Landmark, BarChart3, Bell, X } from 
 import { useApp } from '../../context/AppContext'
 import { companyLogoSrc } from '../../utils/companyLogo'
 import { Button } from '@/components/ui/button'
+import { TAB_PERMISSION } from '../../utils/governance'
 
 // The day-to-day loan-book modules. Integration is configuration rather than daily
 // work, so it lives under System Settings instead of here.
+//
+// The Super Admin console is deliberately NOT in this list. It is the vendor's, not the business's,
+// and it replaces this whole shell when it is open (see SuperAdminShell) — an account that governs
+// Admins reaches it from its account menu, not from the menu a teller uses to open the loan book.
 const NAV = [
   { id: 'dashboard',   label: 'Dashboard',            labelKh: 'ផ្ទាំងគ្រប់គ្រង', icon: LayoutDashboard },
   { id: 'customers',   label: 'Customer',             labelKh: 'អតិថិជន',          icon: Users, badge: true },
@@ -17,9 +22,16 @@ const NAV = [
 ]
 
 export default function Sidebar({ open, onClose }) {
-  const { state, dispatch } = useApp()
+  const { state, dispatch, can } = useApp()
   const isKh = state.language === 'kh'
   const { companyProfile } = state
+
+  // A module the account has no view permission for is not drawn. SET_TAB refuses it as well
+  // (see the reducer) — hiding a menu entry is a courtesy, refusing the action is the control.
+  const nav = NAV.filter(item => {
+    const needed = TAB_PERMISSION[item.id]
+    return !needed || can(needed)
+  })
 
   function go(tab) {
     dispatch({ type: 'SET_TAB', tab })
@@ -61,7 +73,7 @@ export default function Sidebar({ open, onClose }) {
 
       {/* Nav */}
       <nav className="flex-1 overflow-y-auto px-4 md:px-2 lg:px-4 py-2 space-y-1.5">
-        {NAV.map(({ id, label, labelKh, icon: Icon, badge }) => {
+        {nav.map(({ id, label, labelKh, icon: Icon, badge }) => {
           const active = state.activeTab === id
           const name = isKh ? labelKh : label
           return (

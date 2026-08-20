@@ -62,7 +62,7 @@ export const CUSTOMER_COLUMNS = [
 // `visible` is owned by the page, not the table, so the column picker can sit in the page's
 // toolbar next to Open New Customer rather than in a bar of its own above the table.
 export default function CustomerTable({ visible = CUSTOMER_COLUMNS }) {
-  const { state, dispatch, showToast } = useApp()
+  const { state, dispatch, showToast, can } = useApp()
   const { customers, customerSearch, customerDateRange, customerPage, customerPageSize } = state
   const { sort, toggleSort } = useTableSort()
 
@@ -157,17 +157,19 @@ export default function CustomerTable({ visible = CUSTOMER_COLUMNS }) {
                       <div className="flex items-center justify-center gap-1">
                         <Button
                           variant="ghost"
-                          title="Edit Customer"
-                          onClick={() => dispatch({ type: 'OPEN_CUSTOMER_WIZARD', code: c.code })}
-                          className="h-auto w-auto p-1.5 rounded-lg text-slate-400 hover:text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-900/30 dark:hover:text-amber-400 transition-colors"
+                          disabled={!can('edit_customer')}
+                          title={can('edit_customer') ? 'Edit Customer' : 'Your account cannot edit customers'}
+                          onClick={() => can('edit_customer') && dispatch({ type: 'OPEN_CUSTOMER_WIZARD', code: c.code })}
+                          className="h-auto w-auto p-1.5 rounded-lg text-slate-400 hover:text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-900/30 dark:hover:text-amber-400 disabled:text-slate-300 dark:disabled:text-slate-600 transition-colors"
                         >
                           <Pencil className="w-3.5 h-3.5" />
                         </Button>
                         <Button
                           variant="ghost"
-                          title="Delete Customer"
-                          onClick={() => dispatch({ type: 'CONFIRM_DELETE_CUSTOMER', code: c.code })}
-                          className="h-auto w-auto p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-900/30 dark:hover:text-rose-400 transition-colors"
+                          disabled={!can('delete_customer')}
+                          title={can('delete_customer') ? 'Delete Customer' : 'Your account cannot delete customers'}
+                          onClick={() => can('delete_customer') && dispatch({ type: 'CONFIRM_DELETE_CUSTOMER', code: c.code })}
+                          className="h-auto w-auto p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-900/30 dark:hover:text-rose-400 disabled:text-slate-300 dark:disabled:text-slate-600 transition-colors"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </Button>
@@ -218,17 +220,19 @@ export default function CustomerTable({ visible = CUSTOMER_COLUMNS }) {
             <div className="flex items-center justify-end gap-1 pt-1" onClick={e => e.stopPropagation()}>
               <Button
                 variant="ghost"
-                title="Edit Customer"
-                onClick={() => dispatch({ type: 'OPEN_CUSTOMER_WIZARD', code: c.code })}
-                className="h-auto w-auto p-1.5 rounded-lg text-slate-400 hover:text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-900/30 dark:hover:text-amber-400 transition-colors"
+                disabled={!can('edit_customer')}
+                title={can('edit_customer') ? 'Edit Customer' : 'Your account cannot edit customers'}
+                onClick={() => can('edit_customer') && dispatch({ type: 'OPEN_CUSTOMER_WIZARD', code: c.code })}
+                className="h-auto w-auto p-1.5 rounded-lg text-slate-400 hover:text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-900/30 dark:hover:text-amber-400 disabled:text-slate-300 dark:disabled:text-slate-600 transition-colors"
               >
                 <Pencil className="w-3.5 h-3.5" />
               </Button>
               <Button
                 variant="ghost"
-                title="Delete Customer"
-                onClick={() => dispatch({ type: 'CONFIRM_DELETE_CUSTOMER', code: c.code })}
-                className="h-auto w-auto p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-900/30 dark:hover:text-rose-400 transition-colors"
+                disabled={!can('delete_customer')}
+                title={can('delete_customer') ? 'Delete Customer' : 'Your account cannot delete customers'}
+                onClick={() => can('delete_customer') && dispatch({ type: 'CONFIRM_DELETE_CUSTOMER', code: c.code })}
+                className="h-auto w-auto p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-900/30 dark:hover:text-rose-400 disabled:text-slate-300 dark:disabled:text-slate-600 transition-colors"
               >
                 <Trash2 className="w-3.5 h-3.5" />
               </Button>
@@ -251,6 +255,7 @@ export default function CustomerTable({ visible = CUSTOMER_COLUMNS }) {
             />
           </div>
           <ExportCsvButton
+            perm="export_customers"
             name="customers"
             columns={visible}
             rows={ordered}
