@@ -209,7 +209,7 @@ function ComposeModal({ row, onClose }) {
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 export default function ReminderPage() {
-  const { state, dispatch, showToast } = useApp()
+  const { state, dispatch, showToast, visibleLoans } = useApp()
   const [range, setRange] = useState('due')
   const [search, setSearch] = useState('')
   const [selected, setSelected] = useState([])
@@ -229,7 +229,7 @@ export default function ReminderPage() {
   // One row per loan that still owes an installment, soonest due first. A loan is only
   // chaseable from approval onward — the same gate the loan's own Repayment Reminder tab
   // uses — and only its next unpaid installment is worth a reminder.
-  const rows = useMemo(() => (state.loanApplications || [])
+  const rows = useMemo(() => (visibleLoans || [])
     .filter(loan => loan.status === 'Active' || (loan.approvalState || 1) >= 3)
     .map(loan => {
       const next = nextUnpaidInstallment(loan)
@@ -245,7 +245,7 @@ export default function ReminderPage() {
     })
     .filter(Boolean)
     .sort((a, b) => a.next.dueDateISO.localeCompare(b.next.dueDateISO)),
-    [state.loanApplications]
+    [visibleLoans]
   )
 
   const counts = useMemo(() => ({

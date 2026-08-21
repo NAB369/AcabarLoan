@@ -78,11 +78,13 @@ export const LOAN_COLUMNS = [
 // `visible` is owned by the page, not the table, so the column picker can sit in the page's
 // toolbar next to New Application rather than in a bar of its own above the table.
 export default function LoanList({ search = '', statusFilter = 'ALL', dateRange = ALL_DATES, visible = LOAN_COLUMNS }) {
-  const { state, dispatch, showToast } = useApp()
+  const { state, dispatch, showToast, visibleLoans } = useApp()
   const [page, setPage] = useState(1)
   const { sort, toggleSort } = useTableSort()
 
-  const filtered = state.loanApplications.filter(loan => {
+  // visibleLoans, not state.loanApplications: a loan outside this account's access scope is not
+  // in the register at all, rather than shown and refused on click.
+  const filtered = visibleLoans.filter(loan => {
     const matchStatus = statusFilter === 'ALL' || loan.status === statusFilter
     // The same date the Created column shows, so a row's presence is always explainable from
     // what is on screen — an application saved before submittedAt existed falls back to its
@@ -306,6 +308,7 @@ export default function LoanList({ search = '', statusFilter = 'ALL', dateRange 
             />
           </div>
           <ExportCsvButton
+            perm="export_loans"
             name="loans"
             columns={visible}
             rows={ordered}

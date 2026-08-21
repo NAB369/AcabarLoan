@@ -1,4 +1,4 @@
-import { createContext, useContext, useReducer, useEffect, useCallback } from 'react'
+import { createContext, useContext, useReducer, useEffect, useCallback, useMemo } from 'react'
 import {
   INITIAL_CUSTOMERS, INITIAL_LOANS, INITIAL_EXPENSES, INITIAL_INCOMES,
   INITIAL_ACCOUNTS, INITIAL_SYSTEM_USERS, INITIAL_AUDIT_LOGS, INITIAL_ROLE_MATRIX, INITIAL_PERMISSION_LABELS,
@@ -10,6 +10,11 @@ import {
 import { formatDateDisplay, shiftISODate, daysBetweenISO, auditStamp } from '../utils/format'
 import { ALL_DATES } from '../utils/dateRange'
 import { seedDemoBook } from '../data/demoBook'
+import {
+  SUPER_ADMIN_ROLE, ADMIN_ROLE, GOVERN_PERMISSION, TAB_PERMISSION, isSuperAdmin,
+  effectivePermission, withPermission, emptyOverrides, emptyScope, defaultSecurity,
+  chainEntry, deviceLabel, signInBlock, inScope, PLATFORM_NAME_DEFAULT,
+} from '../utils/governance'
 
 // v5: chart-of-accounts replaced by Main Account + sub-accounts (accounts), expenses gained
 // an approval status, incomes gained a source field
@@ -90,6 +95,65 @@ function repairRepaymentEntries(entries, chartOfAccounts) {
       a.code === '5010' ? { ...a, balance: round2((a.balance || 0) + correction) } : a
     ),
   }
+}
+
+// Signing in now requires status 'Active' exactly, rather than merely "not Inactive", because a
+// third status exists: an account requested at the sign-in screen sits at 'Pending' until an Admin
+// grants it a role (see SignUpScreen). Accounts created before the User Accounts panel started
+// writing a status carry none at all, and under the old rule they could sign in — tightening the
+// rule without this would have locked those installs out of their own accounts. Absent only: a
+// status that is already set says what it says.
+// The Super Admin level added a column to the role matrix and fourteen rows to it. A saved matrix
+// predates all of them, and until now the matrix was not even persisted — so an install carries
+// either nothing or a matrix with none of the new keys, and `can('view_reports')` on it would read
+// undefined and hide the Report module from everybody.
+//
+// Reconciled the same way the seeded accounts are: the install's own answer wins for every key it
+// already has an answer for, and the seed fills in the rest. A role the install invented gets the
+// view/export keys (so nothing it could already see disappears) and nothing else — a permission
+// nobody deliberately granted must not arrive switched on.
+function mergeSeededPermissions(saved) {
+  if (!saved) return null
+  const merged = {}
+  for (const [role, seeded] of Object.entries(INITIAL_ROLE_MATRIX)) {
+    merged[role] = { ...seeded, ...(saved[role] || {}) }
+  }
+  for (const [role, cols] of Object.entries(saved)) {
+    if (merged[role]) continue
+    const defaults = Object.fromEntries(
+      Object.keys(INITIAL_ROLE_MATRIX[ADMIN_ROLE]).map(k => [k, k.startsWith('view_') || k.startsWith('export_') ? true : false]),
+    )
+    merged[role] = { ...defaults, ...cols, govern_admins: false }
+  }
+  // govern_admins is the level itself. However a saved matrix came to hold it, only Super Admin
+  // may: a matrix edited by hand in devtools must not be a way up.
+  for (const role of Object.keys(merged)) {
+    merged[role] = { ...merged[role], govern_admins: role === SUPER_ADMIN_ROLE }
+  }
+  return merged
+}
+
+function withUserStatus(saved) {
+  if (!saved) return null
+  return saved.map(u => (u.status ? u : { ...u, status: 'Active' }))
+}
+
+// An install that has been running since before the Super Admin level has its own saved account
+// list, which contains no Super Admin — so the level would exist in the code and be held by
+// nobody, Admin Control would be invisible, and the governance in this build would be
+// unreachable on every install that already had data. That is not an upgrade, it is a no-op.
+//
+// Reconciled on username, the same way the seeded chart of accounts and bank accounts are: the
+// install's own copy of an account wins, and anything the seed has since added is appended. The
+// seeded Super Admin ships with no credential, so it arrives needing one to be chosen at its
+// first sign-in rather than with a password somebody would have to be told.
+function mergeSeededUsers(saved) {
+  const withStatus = withUserStatus(saved)
+  if (!withStatus?.length) return null
+  const missing = INITIAL_SYSTEM_USERS.filter(
+    seed => !withStatus.some(u => (u.username || '').toLowerCase() === seed.username.toLowerCase()),
+  )
+  return missing.length ? [...missing, ...withStatus] : withStatus
 }
 
 // Backfills the Schedule column into a column list saved before it existed. Only ever adds it,
@@ -200,7 +264,18 @@ function loadPersistedState() {
       employees: p.employees || null,
       payrollRuns: p.payrollRuns || null,
       auditLogs: p.auditLogs || null,
-      systemUsers: p.systemUsers || null,
+      systemUsers: mergeSeededUsers(p.systemUsers),
+      // The role matrix was not persisted at all before the Super Admin level: every permission
+      // edit was lost on refresh, which is untenable once a Super Admin governs the Admin through
+      // it. Merged against the seed rather than taken as-is — see mergeSeededPermissions.
+      roleMatrix: mergeSeededPermissions(p.roleMatrix),
+      permissionLabels: p.permissionLabels ? { ...INITIAL_PERMISSION_LABELS, ...p.permissionLabels } : null,
+      // Append-only governance trail and the maker-checker queue.
+      adminAuditLogs: p.adminAuditLogs || null,
+      adminRequests: p.adminRequests || null,
+      platformName: p.platformName || null,
+      adminAuditSeq: p.adminAuditSeq || null,
+      adminRequestSeq: p.adminRequestSeq || null,
       integrations: p.integrations || null,
       customGeo: p.customGeo || null,
       // Column visibility per register. Additive — an install saved before the column picker
@@ -258,7 +333,157 @@ function renumberFeeIncome(chartOfAccounts, journalEntries) {
   }
 }
 
+const SESSION_KEY = 'acabar-session'
+
+// Two stores, because "Keep me signed in" is a real choice rather than a decoration:
+// unticked the session lives in sessionStorage and dies with the tab, ticked it lives in
+// localStorage and survives the browser closing. Read from either, so whichever the last
+// sign-in chose is the one that comes back.
+function readSession() {
+  try { return localStorage.getItem(SESSION_KEY) || sessionStorage.getItem(SESSION_KEY) || null } catch { return null }
+}
+
+// Which store held it, so the choice survives a refresh and the mirror effect keeps writing
+// to the same place rather than quietly downgrading a remembered session.
+function readRemembered() {
+  try { return !!localStorage.getItem(SESSION_KEY) } catch { return false }
+}
+
+// ── Who is acting, and what that lets them do ────────────────────────────────
+// Every governance case answers the same three questions before it changes anything: who is
+// dispatching this, does their account hold the permission for it, and is the target something
+// their level is allowed to touch. Kept as functions rather than repeated inline so a new case
+// cannot quietly skip one.
+const actorOf = state => state.systemUsers.find(u => u.username === state.currentUser) || null
+const userOf = (state, username) => state.systemUsers.find(u => u.username === username) || null
+const actorCan = (state, perm) => effectivePermission(actorOf(state), state.roleMatrix, perm)
+const actorGoverns = state => actorCan(state, GOVERN_PERMISSION)
+const activeSupers = users => users.filter(u => u.role === SUPER_ADMIN_ROLE && u.status === 'Active')
+
+// Rules 2 and 5: a Super Admin's record is not the Admin's to edit, and rule 14 — it is not
+// anybody's to delete or deactivate by accident either. Only an account that itself governs may
+// touch one, and even then rule 15 keeps the last active one standing.
+const targetOffLimits = (state, username) => {
+  const target = userOf(state, username)
+  return !!target && isSuperAdmin(target) && !actorGoverns(state)
+}
+
+// Rule 15. Applied to the last ACTIVE Super Admin whoever is asking, including a Super Admin
+// acting on their own account: an install with no way back in is not a state to allow.
+const wouldStrandInstall = (state, username, { role, status } = {}) => {
+  const target = userOf(state, username)
+  if (!target || !isSuperAdmin(target) || target.status !== 'Active') return false
+  const losingIt = (role !== undefined && role !== SUPER_ADMIN_ROLE) || (status !== undefined && status !== 'Active')
+  return losingIt && activeSupers(state.systemUsers).length <= 1
+}
+
+// One state change and the line in the trail that records it, written together — an audited action
+// whose audit is a separate dispatch is an audited action somebody can forget to audit. Rule 9 is
+// satisfied structurally rather than by discipline.
+//
+// Trimmed at 5000 entries. The chain stays verifiable from the oldest entry retained (verifyChain
+// takes the first entry's own prevHash as given), and 5000 governance events is far beyond what an
+// install of this size produces — but it is a trim, and it is stated rather than hidden.
+function withAudit(state, patch, audit) {
+  const seq = (state.adminAuditSeq || 0) + 1
+  const entry = chainEntry({
+    id: `AUD-${String(seq).padStart(6, '0')}`,
+    timestamp: auditStamp(),
+    actor: state.currentUser || 'system',
+    actorRole: state.currentRole || '',
+    module: '',
+    action: '',
+    object: '',
+    previousValue: '',
+    newValue: '',
+    device: deviceLabel(),
+    result: 'Applied',
+    ...audit,
+  }, state.adminAuditLogs[0] || null)
+  return {
+    ...state,
+    ...patch,
+    adminAuditLogs: [entry, ...state.adminAuditLogs].slice(0, 5000),
+    adminAuditSeq: seq,
+  }
+}
+
+// Maker-checker (rule 10, section 9). The Admin's attempt is recorded as a request and applied
+// only by APPROVE_ADMIN_REQUEST — which is what makes "Admin cannot grant itself permissions"
+// true of the mechanism rather than merely of the UI.
+function fileRequest(state, kind, payload, audit) {
+  const seq = (state.adminRequestSeq || 0) + 1
+  const request = {
+    id: `REQ-${String(seq).padStart(4, '0')}`,
+    kind,
+    payload,
+    status: 'Pending Super Admin Approval',
+    requestedBy: state.currentUser,
+    requestedByRole: state.currentRole,
+    requestedAt: auditStamp(),
+    decidedBy: '',
+    decidedAt: '',
+    reason: '',
+  }
+  return withAudit(state, {
+    adminRequests: [request, ...state.adminRequests],
+    adminRequestSeq: seq,
+  }, { result: 'Pending approval', ...audit })
+}
+
+// What an approved request actually does. Returns the state patch, or null if the request can no
+// longer be applied — a role deleted since, or a payload that would breach the hierarchy. Rule 4
+// lives here as well as at the point of request: an approval must not be a second way in.
+function applyRequest(state, req) {
+  const p = req.payload || {}
+  if (p.role === SUPER_ADMIN_ROLE || p.to === SUPER_ADMIN_ROLE || p.permission === GOVERN_PERMISSION) return null
+  switch (req.kind) {
+    case 'ROLE_PERMISSION': {
+      if (!state.roleMatrix[p.role]) return null
+      return { roleMatrix: { ...state.roleMatrix, [p.role]: { ...state.roleMatrix[p.role], [p.permission]: !!p.on } } }
+    }
+    case 'USER_ROLE': {
+      if (!userOf(state, p.username) || !state.roleMatrix[p.to]) return null
+      return { systemUsers: state.systemUsers.map(u => (u.username === p.username ? { ...u, role: p.to } : u)) }
+    }
+    case 'USER_STATUS': {
+      if (!userOf(state, p.username)) return null
+      return {
+        systemUsers: state.systemUsers.map(u => (u.username === p.username
+          ? { ...u, status: p.to, statusChanged: auditStamp(), role: p.to === 'Active' ? (u.role || u.requestedRole || '') : u.role }
+          : u)),
+      }
+    }
+    case 'USER_PASSWORD_RESET': {
+      if (!userOf(state, p.username)) return null
+      return {
+        systemUsers: state.systemUsers.map(u => (u.username === p.username
+          ? { ...u, passwordSalt: '', passwordHash: '', forcePasswordChange: true }
+          : u)),
+      }
+    }
+    case 'ROLE_CREATE': {
+      if (state.roleMatrix[p.role]) return null
+      const blank = Object.fromEntries(Object.keys(INITIAL_ROLE_MATRIX[ADMIN_ROLE]).map(k => [k, false]))
+      return { roleMatrix: { ...state.roleMatrix, [p.role]: blank } }
+    }
+    default:
+      return null
+  }
+}
+
 const persisted = loadPersistedState()
+
+// A restored session is only as good as the account it names. Resolved here so both the username
+// and the ROLE come back from the record: an account since deleted, deactivated, locked or
+// suspended must not walk back in on a stale storage key, and the role must not be guessed.
+const sessionUser = (() => {
+  const name = readSession()
+  if (!name) return null
+  const users = persisted.systemUsers?.length ? persisted.systemUsers : INITIAL_SYSTEM_USERS
+  const found = users.find(u => u.username === name)
+  return found && !signInBlock(found) ? found : null
+})()
 
 // The remarks the chart of accounts shipped with before every account was made to name its own
 // currency. A USD account and its KHR sibling were told apart only by a "(KHR)" suffix on the
@@ -539,7 +764,28 @@ const INITIAL_STATE = {
   reportView: null,
   // settings
   selectedRole: 'Credit Manager',
-  currentRole: 'Admin',
+  // ── Who is signed in ──────────────────────────────────────────────────────
+  // The username of the signed-in account, or null. Held in sessionStorage rather than
+  // localStorage on purpose: a session should end with the browser tab, so reopening the app
+  // tomorrow asks who you are, while a refresh mid-task does not. Only the username is kept —
+  // the credential is never held anywhere but the user record's PBKDF2 digest.
+  currentUser: sessionUser?.username || null,
+  // Whether this session was asked to outlive the tab — see readSession above.
+  rememberSession: readRemembered(),
+  // Which pre-session screen is showing: 'sign-in', 'sign-up', or 'console' — the operator's own
+  // door, which accepts only the accounts that govern Admins. In the reducer rather than in
+  // the component because it carries a URL (see navigation.js) — a request-access link has to be
+  // something a new joiner can be sent. Transient, so deliberately not persisted: a saved
+  // 'sign-up' would greet a returning install with the wrong screen.
+  authView: 'sign-in',
+  // The role permissions are read through. It is no longer a free choice: SIGN_IN sets it from
+  // the account's own role, which is what turns the roleMatrix from a description into a rule.
+  // Restored from the account, not defaulted: SIGN_IN is the only case that sets it, and a
+  // refresh never re-runs it — so a reloaded session used to read as Admin whatever role the
+  // account actually held, handing every permission to whoever pressed F5. The pre-sign-in
+  // value is irrelevant (nothing renders until a session exists, see App.jsx) but has to be
+  // something, so it stays Admin.
+  currentRole: sessionUser?.role || ADMIN_ROLE,
   userStatusFilter: 'all',
   // data
   customers: persisted.customers || INITIAL_CUSTOMERS,
@@ -572,8 +818,38 @@ const INITIAL_STATE = {
   // ADD_AUDIT_LOG) and read back by the module logs, so it is kept across reloads —
   // an audit trail that is forgotten on refresh audits nothing.
   auditLogs: persisted.auditLogs?.length ? persisted.auditLogs : INITIAL_AUDIT_LOGS,
-  roleMatrix: INITIAL_ROLE_MATRIX,
-  permissionLabels: INITIAL_PERMISSION_LABELS,
+  roleMatrix: persisted.roleMatrix || INITIAL_ROLE_MATRIX,
+  permissionLabels: persisted.permissionLabels || INITIAL_PERMISSION_LABELS,
+  // ── Super Admin governance ────────────────────────────────────────────────
+  // The trail of everything done to or by an Admin account, newest first, each entry carrying a
+  // checksum over the one before it (see utils/governance.js on what that does and does not
+  // prove). Nothing in the app edits or deletes an entry — the only case that touches this
+  // collection prepends to it.
+  adminAuditLogs: persisted.adminAuditLogs || [],
+  // Maker-checker. An Admin's own attempt to change identity or permissions lands here as a
+  // request instead of being applied, and a Super Admin approves or rejects it.
+  adminRequests: persisted.adminRequests || [],
+  // Which pane of the Admin Control console is open, and which account it is governing.
+  // Transient: a console tab is not something to restore days later.
+  // The console opens on its dashboard — every governed account at once — rather than on one
+  // account's profile: what needs a decision is a property of the fleet, not of whichever
+  // account happened to be first in the list.
+  // ── Who the operator is ───────────────────────────────────────────────────
+  // NOT the company in companyProfile. That is the BUSINESS this install serves — Acabar Plc, its
+  // loan book, its staff, its letterhead. The Super Admin sits above it and belongs to whoever
+  // operates the platform, which is a different organisation entirely: wearing the business's logo
+  // and name in the console said the opposite, that the Super Admin was one of Acabar's own.
+  //
+  // Defaults to the operator's own name rather than to the business's — borrowing the tenant's
+  // brand for the console that governs it is what this field exists to avoid.
+  platformName: persisted.platformName || PLATFORM_NAME_DEFAULT,
+  adminControlTab: 'overview',
+  adminControlUser: null,
+  // Monotonic, so an audit id or a request id is never reused even after the trail is trimmed.
+  // A length-derived id would start repeating the moment the oldest entries were dropped, and a
+  // trail with two AUD-000001 lines in it is not a trail.
+  adminAuditSeq: persisted.adminAuditSeq || 0,
+  adminRequestSeq: persisted.adminRequestSeq || 0,
   // Fee rates (% of loan principal) used to auto-calculate the Benefit to the Bank tab
   feeSettings: persisted.feeSettings || {
     adminFeeRate: 1,
@@ -626,6 +902,22 @@ const INITIAL_STATE = {
   // End of Month reads it back to refuse closing a period it has already closed.
   batchRuns: persisted.batchRuns || [],
   demoSeeded: persisted.demoSeeded,
+  // ── Screen lock ───────────────────────────────────────────────────────────
+  // This app has no login, so it has no session to time out, and the Settings panel that used
+  // to offer "Session Timeout" and "Max Login Attempts" saved neither and enforced neither.
+  // What CAN honestly be done in a browser with no server is blank the screen when a terminal
+  // is left unattended — a branch counter showing a customer's national ID, balances and
+  // address to whoever walks past is a real exposure, and this is the control that addresses
+  // it. It is a screen lock, named as one; it does not authenticate anybody and does not
+  // protect the data at rest. 0 = off.
+  screenLockMinutes: persisted.screenLockMinutes ?? 15,
+  // Transient: never persisted. A reload is a deliberate act at the keyboard, so coming back
+  // to a locked screen after one would be theatre rather than protection.
+  screenLocked: false,
+  // Set when a write to localStorage fails — the quota is the usual cause. Surfaced in the UI
+  // because the alternative is the operator working on for an hour against a store that has
+  // silently stopped accepting anything.
+  storageFailed: false,
 }
 
 // Cash moves through the real bank account held in the loan's currency AND branch —
@@ -974,7 +1266,17 @@ function reducer(state, action) {
     // sidebar shouldn't drop the user back into the sub-view they left. Account
     // Management works the same way: its landing view is the section cards with
     // nothing expanded, so the open section and its modals close too.
-    case 'SET_TAB': return {
+    // A tab the account may not open is refused here as well as hidden in the sidebar: the tab is
+    // in the URL (see utils/navigation), so a pasted or bookmarked link is a second way in and has
+    // to meet the same permission the menu does.
+    case 'SET_TAB': {
+      // Only checked once somebody is signed in. With no session the tab is being adopted from the
+      // URL while the sign-in gate is up (see App.jsx) — refusing it there would throw away the
+      // deep link the visitor arrived on, and nothing is rendered to protect yet. SIGN_IN below
+      // re-checks the adopted tab against the account that actually signs in.
+      const needed = TAB_PERMISSION[action.tab]
+      if (state.currentUser && needed && !actorCan(state, needed)) return state
+      return {
       ...state,
       activeTab: action.tab,
       loanReviewOpen: false,
@@ -998,9 +1300,19 @@ function reducer(state, action) {
       previewCustomerCode: null,
       deletePendingCode: null,
       editingCustomerCode: null,
+      }
     }
     case 'SET_CURRENCY': return { ...state, currency: action.currency }
     case 'TOGGLE_DARK_MODE': return { ...state, darkMode: !state.darkMode }
+    // Clamped to something a person would actually choose: under a minute locks mid-sentence,
+    // and beyond two hours it is off in all but name — which 0 already says plainly.
+    case 'SET_SCREEN_LOCK_MINUTES': return {
+      ...state,
+      screenLockMinutes: Math.max(0, Math.min(120, Math.round(Number(action.minutes) || 0))),
+    }
+    case 'LOCK_SCREEN': return state.screenLocked ? state : { ...state, screenLocked: true }
+    case 'UNLOCK_SCREEN': return state.screenLocked ? { ...state, screenLocked: false } : state
+    case 'STORAGE_FAILED': return state.storageFailed ? state : { ...state, storageFailed: true }
     case 'TOGGLE_LANGUAGE': return { ...state, language: state.language === 'en' ? 'kh' : 'en' }
 
     // Toasts
@@ -1013,30 +1325,231 @@ function reducer(state, action) {
     case 'SET_SETTINGS_MENU': return { ...state, activeSettingsMenu: action.menu }
     case 'SET_USER_MGMT_SUBMENU': return { ...state, activeUserMgmtSubMenu: action.sub, activeSettingsMenu: 'user-management' }
     case 'SET_SELECTED_ROLE': return { ...state, selectedRole: action.role }
-    case 'SET_CURRENT_ROLE': return { ...state, currentRole: action.role }
+    // Signing in is what decides the role, so the two move together and can never disagree.
+    // The account's last-login stamp is written here because this is the only place a sign-in
+    // happens — a screen unlock is not a new session and deliberately does not touch it.
+    case 'SIGN_IN': {
+      const user = userOf(state, action.username)
+      // Every reason an account may not open a session, in one place and applied on both sides:
+      // the sign-in screen explains it, this refuses it. Status (Pending / Inactive / Locked /
+      // Suspended) and the account's own login-time window all live in signInBlock — so no
+      // dispatch can open a session the form would have turned away.
+      if (!user || signInBlock(user)) return state
+      const session = {
+        id: `SES-${String((state.adminAuditSeq || 0) + 1).padStart(6, '0')}`,
+        startedAt: auditStamp(),
+        device: deviceLabel(),
+        remembered: !!action.remember,
+      }
+      // The tab adopted from the URL before sign-in may be one this account may not open. Sent to
+      // the dashboard rather than to a page it would immediately be refused — the deep link is a
+      // convenience, and it does not outrank the permission.
+      const wanted = TAB_PERMISSION[state.activeTab]
+      const mayOpen = !wanted || effectivePermission(user, state.roleMatrix, wanted)
+      // An account that governs Admins lands in its own console rather than on the business
+      // dashboard — that is the work it signs in to do. A deep link it may open still wins, so a
+      // Super Admin following a link to a loan gets the loan.
+      const governs = effectivePermission(user, state.roleMatrix, GOVERN_PERMISSION)
+      const landing = governs && state.activeTab === 'dashboard' ? 'admin-control' : state.activeTab
+      return withAudit(state, {
+        currentUser: user.username,
+        currentRole: user.role,
+        activeTab: mayOpen ? landing : 'dashboard',
+        rememberSession: !!action.remember,
+        screenLocked: false,
+        systemUsers: state.systemUsers.map(u => (u.username === user.username
+          // failedLogins back to zero and any force-logout stamp cleared: both describe the
+          // previous session, and carrying them into this one would end it immediately.
+          ? { ...u, lastLogin: auditStamp(), failedLogins: 0, forceLogoutAt: '', activeSession: session }
+          : u)),
+      }, {
+        actor: user.username, actorRole: user.role,
+        module: 'Session', action: 'Login', object: user.username, result: 'Success',
+      })
+    }
+
+    // A refused attempt is worth as much to the trail as a successful one, and it is what the
+    // maximum-failed-attempts policy counts. Locking happens here rather than at the screen: the
+    // screen can be reloaded to forget what it knew, the record cannot.
+    case 'RECORD_FAILED_LOGIN': {
+      const user = userOf(state, action.username)
+      if (!user) return state
+      const sec = { ...defaultSecurity(), ...(user.security || {}) }
+      const failed = (user.failedLogins || 0) + 1
+      const lock = sec.maxFailedAttempts > 0 && failed >= sec.maxFailedAttempts && user.status === 'Active'
+      return withAudit(state, {
+        systemUsers: state.systemUsers.map(u => (u.username === user.username
+          ? {
+            ...u,
+            failedLogins: failed,
+            ...(lock ? { status: 'Locked', statusChanged: auditStamp(), lockedReason: `${failed} failed sign-in attempts` } : {}),
+          }
+          : u)),
+      }, {
+        actor: user.username, actorRole: user.role, module: 'Session',
+        action: lock ? 'Account locked' : 'Failed sign-in', object: user.username,
+        previousValue: String(user.failedLogins || 0), newValue: String(failed),
+        result: lock ? 'Locked' : 'Refused',
+      })
+    }
+    // "Forgot password?" with no mail server behind it. It cannot send a link, so it does the one
+    // honest thing left: puts the ask where the person who can act on it will see it — beside the
+    // account, in the panel they already use to clear a credential.
+    //
+    // Filed from the sign-in screen, so there is no session and nothing here can be trusted to name
+    // a real account. An unknown name is a silent no-op, and the screen's confirmation reads the
+    // same either way (see LoginScreen) — otherwise this becomes a way to find out which accounts
+    // exist. An Inactive account is ignored for the same reason: it has no reset to wait for.
+    case 'REQUEST_PASSWORD_RESET': {
+      const user = userOf(state, action.username)
+      if (!user || user.status === 'Inactive') return state
+      return withAudit(state, {
+        systemUsers: state.systemUsers.map(u => (u.username === user.username
+          ? { ...u, resetRequestedAt: auditStamp() }
+          : u)),
+      }, {
+        actor: user.username,
+        actorRole: user.role,
+        module: 'Security',
+        action: 'Password reset requested',
+        object: user.username,
+        result: 'Waiting on an administrator',
+      })
+    }
+    case 'SET_AUTH_VIEW': return {
+      ...state,
+      authView: ['sign-up', 'console'].includes(action.view) ? action.view : 'sign-in',
+    }
+    // Ends the session and returns to the sign-in screen. Everything the operator had open goes
+    // with it — a half-filled wizard left on screen for the next person to read is exactly what
+    // signing out is for. The book itself stays saved; only the view is cleared.
+    case 'SIGN_OUT': return withAudit(state, {
+      // The session that is ending moves to that account's history, which is what makes the
+      // Sessions pane able to show anything at all after the fact.
+      systemUsers: state.systemUsers.map(u => (u.username === state.currentUser && u.activeSession
+        ? {
+          ...u,
+          activeSession: null,
+          sessionHistory: [{ ...u.activeSession, endedAt: auditStamp(), endedBy: action.by || 'self' }, ...(u.sessionHistory || [])].slice(0, 50),
+        }
+        : u)),
+      currentUser: null,
+      rememberSession: false,
+      screenLocked: false,
+      // Signing out lands on the sign-in form, never on the request-access form the last visitor
+      // happened to leave open.
+      authView: 'sign-in',
+      activeTab: 'dashboard',
+      loanDetailIdx: null,
+      loanOverviewOpen: false,
+      loanPreviewOpen: false,
+      loanQuickPreviewOpen: false,
+      loanWizardOpen: false,
+      customerWizardOpen: false,
+      previewCustomerCode: null,
+      activeLoan: null,
+      settingsOpen: false,
+      systemOpsOpen: false,
+    }, {
+      module: 'Session',
+      action: action.by ? `Signed out by ${action.by}` : 'Logout',
+      object: state.currentUser || '',
+      result: 'Success',
+    })
+    // Written by the first sign-in of an account that has no credential yet, and by an admin
+    // resetting one. The plain password never reaches the reducer — only the salt and digest.
+    case 'SET_USER_PASSWORD': {
+      // Rule 2: an Admin clearing a Super Admin's credential would be a way to take the level
+      // over — the target sets a new password at next sign-in, and whoever gets there first owns
+      // it. Refused unless the actor governs, or is the account itself.
+      //
+      // Only ever applied to a THIRD PARTY, though: with no session open the dispatch is the
+      // sign-in screen setting a password for an account whose password it has just verified, or
+      // one that has none at all yet. Guarding that too would leave the seeded Super Admin — which
+      // deliberately ships without a credential — unable to ever set one, and the level unusable.
+      if (state.currentUser && action.username !== state.currentUser && targetOffLimits(state, action.username)) return state
+      const setting = !!action.hash
+      return withAudit(state, {
+        systemUsers: state.systemUsers.map(u => (u.username === action.username
+          ? {
+            ...u,
+            passwordSalt: action.salt,
+            passwordHash: action.hash,
+            passwordSetAt: setting ? auditStamp() : u.passwordSetAt,
+            // A cleared credential is a forced change; one just chosen clears the flag.
+            forcePasswordChange: !setting,
+            // Either way the ask has been answered, so it stops being outstanding.
+            resetRequestedAt: '',
+          }
+          : u)),
+      }, {
+        module: 'Security',
+        action: setting ? 'Password set' : 'Password reset — must be chosen at next sign-in',
+        object: action.username,
+        result: 'Applied',
+      })
+    }
+    // ── The permission matrix, under the hierarchy ───────────────────────────
+    // Three rules meet on this one control and all three are enforced here rather than by hiding
+    // the checkbox, because a checkbox is not a rule:
+    //   · rule 3 — nobody edits their OWN role's column. That is the definition of granting
+    //     yourself a permission, and it is refused even for a Super Admin, whose column is
+    //     already complete and has nothing to gain.
+    //   · rules 2 and 6 — the Super Admin column is not editable by anyone below the level, and
+    //     govern_admins is not editable at all. The level is not a permission to be handed round.
+    //   · rule 3 again, as a workflow — an Admin's edit to any other column is FILED for approval
+    //     instead of applied (section 9). It reaches the matrix when a Super Admin approves it.
     case 'TOGGLE_ROLE_PERMISSION': {
-      const matrix = { ...state.roleMatrix }
-      matrix[action.role] = { ...matrix[action.role], [action.perm]: !matrix[action.role][action.perm] }
-      return { ...state, roleMatrix: matrix }
+      const { role, perm } = action
+      if (!state.roleMatrix[role]) return state
+      if (perm === GOVERN_PERMISSION || role === SUPER_ADMIN_ROLE) return state
+      if (role === state.currentRole) return state
+      const next = !state.roleMatrix[role][perm]
+      const audit = {
+        module: 'Permissions', action: next ? 'Role permission granted' : 'Role permission revoked',
+        object: `${role} / ${perm}`, previousValue: next ? 'denied' : 'allowed', newValue: next ? 'allowed' : 'denied',
+      }
+      if (!actorGoverns(state)) {
+        return fileRequest(state, 'ROLE_PERMISSION', { role, permission: perm, on: next },
+          { ...audit, action: `Requested ${next ? 'grant' : 'revoke'} of ${perm} for ${role}` })
+      }
+      return withAudit(state, {
+        roleMatrix: { ...state.roleMatrix, [role]: { ...state.roleMatrix[role], [perm]: next } },
+      }, audit)
     }
     // A whole role's column at once — what the preset menu on the permission matrix applies.
-    // Only keys the build knows about are written, so a stale preset cannot introduce one.
+    // Only keys the build knows about are written, so a stale preset cannot introduce one. Same
+    // three rules as the single toggle; a preset is not a way around them.
     case 'SET_ROLE_PERMISSIONS': {
       if (!state.roleMatrix[action.role]) return state
+      if (action.role === SUPER_ADMIN_ROLE || action.role === state.currentRole) return state
+      if (!actorGoverns(state)) return state
       const perms = Object.fromEntries(
-        Object.keys(state.permissionLabels).map(key => [key, !!action.permissions[key]])
+        Object.keys(state.permissionLabels).map(key => [key, key === GOVERN_PERMISSION ? false : !!action.permissions[key]])
       )
-      return { ...state, roleMatrix: { ...state.roleMatrix, [action.role]: perms } }
+      return withAudit(state, {
+        roleMatrix: { ...state.roleMatrix, [action.role]: perms },
+      }, {
+        module: 'Permissions', action: 'Role column replaced', object: action.role,
+        previousValue: Object.entries(state.roleMatrix[action.role]).filter(([, v]) => v).map(([k]) => k).join(' '),
+        newValue: Object.entries(perms).filter(([, v]) => v).map(([k]) => k).join(' '),
+      })
     }
     case 'ADD_ROLE': {
       const role = action.role.trim()
       if (!role || state.roleMatrix[role]) return state
+      // Rule 4, at its most direct: a new role named "Super Admin" would be a second one.
+      if (role === SUPER_ADMIN_ROLE) return state
+      if (!actorGoverns(state)) {
+        return fileRequest(state, 'ROLE_CREATE', { role }, {
+          module: 'Permissions', action: 'Requested new role', object: role, newValue: role,
+        })
+      }
       const blankPerms = Object.fromEntries(Object.keys(state.permissionLabels).map(key => [key, false]))
-      return {
-        ...state,
+      return withAudit(state, {
         roleMatrix: { ...state.roleMatrix, [role]: blankPerms },
         selectedRole: role,
-      }
+      }, { module: 'Permissions', action: 'Role created', object: role, newValue: role })
     }
     case 'ADD_PERMISSION': {
       const key = action.key.trim()
@@ -1078,13 +1591,236 @@ function reducer(state, action) {
     // Appended rather than prepended — the register reads as the order accounts were opened
     // in, with the seeded admin still at the top. The panel refuses a username already in
     // use; this guards the same rule so no path can produce two accounts with one name.
-    case 'ADD_SYSTEM_USER': return state.systemUsers.some(u => (u.username || '').toLowerCase() === (action.user.username || '').toLowerCase())
-      ? state
-      : { ...state, systemUsers: [...state.systemUsers, action.user] }
-    case 'UPDATE_SYSTEM_USER': return {
-      ...state,
-      systemUsers: state.systemUsers.map(u => u.username === action.username ? { ...u, ...action.updates } : u)
+    case 'ADD_SYSTEM_USER': {
+      if (state.systemUsers.some(u => (u.username || '').toLowerCase() === (action.user.username || '').toLowerCase())) return state
+      // Rule 4. The only Super Admin an install ever gets is the seeded one; another can be made
+      // only by a Super Admin changing an existing account's role, never by creating one — and
+      // never at all from the sign-in screen, which is where an unauthenticated request arrives
+      // from (see SignUpScreen).
+      const role = action.user.role === SUPER_ADMIN_ROLE && !actorGoverns(state) ? '' : action.user.role
+      return { ...state, systemUsers: [...state.systemUsers, { ...action.user, role }] }
     }
+    // Profile edits. The hierarchy is enforced here rather than only in the panel that calls it:
+    // rule 2 (an Admin may not edit a Super Admin), rule 4 (nobody below the level may hand the
+    // level out) and rule 15 (the last active Super Admin keeps the level).
+    case 'UPDATE_SYSTEM_USER': {
+      const target = userOf(state, action.username)
+      if (!target) return state
+      if (targetOffLimits(state, action.username)) return state
+      const updates = { ...action.updates }
+      if (updates.role !== undefined && updates.role !== target.role) {
+        if (updates.role === SUPER_ADMIN_ROLE && !actorGoverns(state)) delete updates.role
+        else if (wouldStrandInstall(state, action.username, { role: updates.role })) delete updates.role
+        // Rule 3 and section 9: an account that does not govern cannot re-role anybody on its own
+        // authority — the change is filed for a Super Admin to approve instead. Its own profile
+        // fields still save immediately; it is the ROLE that waits.
+        else if (!actorGoverns(state)) {
+          const filed = fileRequest(state, 'USER_ROLE',
+            { username: action.username, from: target.role, to: updates.role }, {
+              module: 'Users', action: 'Requested role change', object: action.username,
+              previousValue: target.role, newValue: updates.role,
+            })
+          delete updates.role
+          return {
+            ...filed,
+            systemUsers: filed.systemUsers.map(u => (u.username === action.username ? { ...u, ...updates } : u)),
+          }
+        }
+      }
+      // Status is not editable through here at all — SET_USER_STATUS owns it, so every status
+      // change goes past the same guards and lands in the trail.
+      delete updates.status
+      return withAudit(state, {
+        systemUsers: state.systemUsers.map(u => (u.username === action.username ? { ...u, ...updates } : u)),
+      }, {
+        module: 'Users', action: 'Edited account', object: action.username,
+        previousValue: Object.keys(updates).map(k => `${k}=${target[k] ?? ''}`).join(' '),
+        newValue: Object.entries(updates).map(([k, v]) => `${k}=${v}`).join(' '),
+      })
+    }
+
+    // ─── Super Admin governance ───────────────────────────────────────────────
+    // Activate / Deactivate / Suspend / Lock / Unlock, and the Pending → Active grant that an
+    // access request needs (see SignUpScreen). One case for all of them because they share every
+    // guard: who may act, whether the target is above them, and whether the install would be left
+    // without a Super Admin.
+    case 'SET_USER_STATUS': {
+      const target = userOf(state, action.username)
+      if (!target || target.status === action.status) return state
+      if (targetOffLimits(state, action.username)) return state
+      if (wouldStrandInstall(state, action.username, { status: action.status })) return state
+      // Nobody switches their own access off: the session would continue while the record said it
+      // should not, and unlocking it again needs the very account that was just disabled.
+      if (action.username === state.currentUser) return state
+      if (!actorCan(state, 'activate_user')) return state
+
+      const grantedRole = action.status === 'Active' ? (target.role || target.requestedRole || '') : target.role
+      const patch = {
+        systemUsers: state.systemUsers.map(u => (u.username === action.username
+          ? {
+            ...u,
+            status: action.status,
+            role: grantedRole,
+            statusChanged: auditStamp(),
+            statusReason: action.reason || '',
+            suspendedUntil: action.status === 'Suspended' ? (action.until || '') : '',
+            lockedReason: action.status === 'Locked' ? (action.reason || 'Locked by Super Admin') : '',
+            failedLogins: action.status === 'Active' ? 0 : u.failedLogins || 0,
+            // Losing Active ends the session with it — an account that may not sign in must not
+            // be left with one open (rules 8 and 12).
+            activeSession: action.status === 'Active' ? u.activeSession : null,
+            forceLogoutAt: action.status === 'Active' ? u.forceLogoutAt : auditStamp(),
+            sessionHistory: action.status !== 'Active' && u.activeSession
+              ? [{ ...u.activeSession, endedAt: auditStamp(), endedBy: state.currentUser || 'system' }, ...(u.sessionHistory || [])].slice(0, 50)
+              : u.sessionHistory,
+          }
+          : u)),
+      }
+      const audit = {
+        module: 'Users', action: `Status → ${action.status}`, object: action.username,
+        previousValue: target.status || '', newValue: action.status,
+      }
+      // An Admin activating a normal user is ordinary work and applies at once. An Admin acting on
+      // ANOTHER Admin is a change of who governs what, so it waits for a Super Admin.
+      if (!actorGoverns(state) && (target.role === ADMIN_ROLE || isSuperAdmin(target))) {
+        return fileRequest(state, 'USER_STATUS',
+          { username: action.username, from: target.status, to: action.status, reason: action.reason || '' },
+          { ...audit, action: `Requested status → ${action.status}` })
+      }
+      return withAudit(state, patch, audit)
+    }
+
+    // The permission grid in Admin Control. Writes the account's own override rather than the
+    // role's column, so one Admin can be narrowed without touching every other account that
+    // shares the role — and rule 13 holds: `can()` reads the override, so the change bites on the
+    // very next render, with no sign-out in between.
+    case 'SET_ADMIN_PERMISSION': {
+      if (!actorGoverns(state)) return state
+      const target = userOf(state, action.username)
+      if (!target || isSuperAdmin(target)) return state
+      if (action.permission === GOVERN_PERMISSION) return state
+      const roleGrants = state.roleMatrix[target.role] || {}
+      const before = effectivePermission(target, state.roleMatrix, action.permission)
+      const overrides = withPermission(target.permissionOverrides || emptyOverrides(), action.permission, !!action.on, roleGrants)
+      return withAudit(state, {
+        systemUsers: state.systemUsers.map(u => (u.username === action.username
+          ? { ...u, permissionOverrides: overrides }
+          : u)),
+      }, {
+        module: 'Permissions',
+        action: action.on ? 'Permission granted' : 'Permission revoked',
+        object: `${action.username} / ${action.permission}`,
+        previousValue: before ? 'allowed' : 'denied',
+        newValue: action.on ? 'allowed' : 'denied',
+      })
+    }
+
+    case 'SET_ADMIN_SCOPE': {
+      if (!actorGoverns(state)) return state
+      const target = userOf(state, action.username)
+      if (!target || isSuperAdmin(target)) return state
+      const scope = { ...emptyScope(), ...(action.scope || {}) }
+      return withAudit(state, {
+        systemUsers: state.systemUsers.map(u => (u.username === action.username ? { ...u, scope } : u)),
+      }, {
+        module: 'Access Scope', action: 'Scope changed', object: action.username,
+        previousValue: JSON.stringify(target.scope || emptyScope()),
+        newValue: JSON.stringify(scope),
+      })
+    }
+
+    case 'SET_ADMIN_SECURITY': {
+      if (!actorGoverns(state)) return state
+      const target = userOf(state, action.username)
+      if (!target || isSuperAdmin(target)) return state
+      const security = { ...defaultSecurity(), ...(target.security || {}), ...(action.security || {}) }
+      return withAudit(state, {
+        systemUsers: state.systemUsers.map(u => (u.username === action.username ? { ...u, security } : u)),
+      }, {
+        module: 'Security', action: 'Security policy changed', object: action.username,
+        previousValue: JSON.stringify({ ...defaultSecurity(), ...(target.security || {}) }),
+        newValue: JSON.stringify(security),
+      })
+    }
+
+    // Rule 12. What this can and cannot do is worth being exact about: it ends the session on the
+    // ACCOUNT RECORD and stamps the moment it did. The browser holding that session drops it the
+    // next time it reads state — immediately in this install, and never for a browser sitting
+    // closed on another machine, because there is no server here to push anything to.
+    case 'FORCE_LOGOUT_USER': {
+      if (!actorGoverns(state)) return state
+      const target = userOf(state, action.username)
+      if (!target) return state
+      return withAudit(state, {
+        systemUsers: state.systemUsers.map(u => (u.username === action.username
+          ? {
+            ...u,
+            activeSession: null,
+            forceLogoutAt: auditStamp(),
+            sessionHistory: u.activeSession
+              ? [{ ...u.activeSession, endedAt: auditStamp(), endedBy: state.currentUser || 'system' }, ...(u.sessionHistory || [])].slice(0, 50)
+              : u.sessionHistory,
+          }
+          : u)),
+      }, {
+        module: 'Sessions', action: 'Sessions terminated', object: action.username,
+        previousValue: target.activeSession ? 'session open' : 'no session', newValue: 'terminated',
+      })
+    }
+
+    // ─── Maker → checker ──────────────────────────────────────────────────────
+    case 'APPROVE_ADMIN_REQUEST': {
+      if (!actorGoverns(state)) return state
+      const req = state.adminRequests.find(r => r.id === action.id)
+      if (!req || req.status !== 'Pending Super Admin Approval') return state
+      const patch = applyRequest(state, req)
+      const decided = {
+        ...req,
+        status: patch ? 'Applied' : 'Rejected',
+        decidedBy: state.currentUser,
+        decidedAt: auditStamp(),
+        // A request that can no longer be applied is closed with the reason, not left pending for
+        // someone to keep trying: the role or account it named is gone or would breach the level.
+        reason: patch ? '' : 'No longer applicable — the role or account it names has changed',
+      }
+      return withAudit(state, {
+        ...(patch || {}),
+        adminRequests: state.adminRequests.map(r => (r.id === req.id ? decided : r)),
+      }, {
+        module: 'Approvals', action: patch ? 'Request approved' : 'Request could not be applied',
+        object: `${req.id} ${req.kind}`, previousValue: 'Pending Super Admin Approval',
+        newValue: decided.status, result: patch ? 'Applied' : 'Refused',
+      })
+    }
+
+    case 'REJECT_ADMIN_REQUEST': {
+      if (!actorGoverns(state)) return state
+      const req = state.adminRequests.find(r => r.id === action.id)
+      if (!req || req.status !== 'Pending Super Admin Approval') return state
+      return withAudit(state, {
+        adminRequests: state.adminRequests.map(r => (r.id === req.id
+          ? { ...r, status: 'Rejected', decidedBy: state.currentUser, decidedAt: auditStamp(), reason: action.reason || '' }
+          : r)),
+      }, {
+        module: 'Approvals', action: 'Request rejected', object: `${req.id} ${req.kind}`,
+        previousValue: 'Pending Super Admin Approval', newValue: 'Rejected',
+        result: action.reason || 'Rejected',
+      })
+    }
+
+    // The operator's own name, set by the operator. Guarded like every other governance change:
+    // the business's Admin does not get to rename the party that governs it.
+    case 'SET_PLATFORM_NAME': {
+      if (!actorGoverns(state)) return state
+      const name = String(action.name || '').trim().slice(0, 60)
+      if (name === state.platformName) return state
+      return withAudit(state, { platformName: name }, {
+        module: 'Console', action: 'Operator name changed', object: 'platform',
+        previousValue: state.platformName || '(unnamed)', newValue: name || '(unnamed)',
+      })
+    }
+    case 'SET_ADMIN_CONTROL_TAB': return { ...state, adminControlTab: action.tab }
+    case 'SET_ADMIN_CONTROL_USER': return { ...state, adminControlUser: action.username, adminControlTab: action.tab || 'profile' }
     case 'ADD_LOAN_PRODUCT': return { ...state, loanProducts: [...state.loanProducts, action.product] }
     case 'UPDATE_LOAN_PRODUCT': return {
       ...state,
@@ -2515,8 +3251,22 @@ export function AppProvider({ children }) {
         reportColumns: state.reportColumns,
         demoSeeded: state.demoSeeded,
         savedFilters: state.savedFilters,
+        screenLockMinutes: state.screenLockMinutes,
+        // The matrix has to survive a refresh now that a Super Admin governs the Admin through
+        // it — before this, every permission edit was lost on reload.
+        roleMatrix: state.roleMatrix,
+        permissionLabels: state.permissionLabels,
+        adminAuditLogs: state.adminAuditLogs,
+        adminRequests: state.adminRequests,
+        platformName: state.platformName,
+        adminAuditSeq: state.adminAuditSeq,
+        adminRequestSeq: state.adminRequestSeq,
       }))
-    } catch {}
+    } catch {
+      // Reported once, not per write: the write retries on every change, and a toast a
+      // keystroke would bury the message the operator has to act on.
+      if (!state.storageFailed) dispatch({ type: 'STORAGE_FAILED' })
+    }
     }
 
     const timer = setTimeout(write, 400)
@@ -2528,7 +3278,61 @@ export function AppProvider({ children }) {
       clearTimeout(timer)
       window.removeEventListener('beforeunload', flush)
     }
-  }, [state.customerVisibleColumns, state.loanVisibleColumns, state.payrollColumns, state.bankGroupLabels, state.accountingColumns, state.reportColumns, state.systemUsers, state.auditLogs, state.integrations, state.payrollRuns, state.customers, state.loanApplications, state.incomes, state.expenses, state.notifications, state.cashTransfers, state.repayments, state.cashSheet, state.cashCounts, state.recoveries, state.accounts, state.feeSettings, state.loanProducts, state.activeStatement, state.chartOfAccounts, state.realBankAccounts, state.journalEntries, state.companyProfile, state.employees, state.businessDay, state.batchRuns, state.customGeo, state.demoSeeded, state.savedFilters])
+  }, [state.customerVisibleColumns, state.loanVisibleColumns, state.payrollColumns, state.bankGroupLabels, state.accountingColumns, state.reportColumns, state.systemUsers, state.auditLogs, state.integrations, state.payrollRuns, state.customers, state.loanApplications, state.incomes, state.expenses, state.notifications, state.cashTransfers, state.repayments, state.cashSheet, state.cashCounts, state.recoveries, state.accounts, state.feeSettings, state.loanProducts, state.activeStatement, state.chartOfAccounts, state.realBankAccounts, state.journalEntries, state.companyProfile, state.employees, state.businessDay, state.batchRuns, state.customGeo, state.demoSeeded, state.savedFilters, state.screenLockMinutes, state.roleMatrix, state.permissionLabels, state.adminAuditLogs, state.adminRequests])
+
+  // The session follows the reducer rather than the reverse, so a sign-out in one place cannot
+  // leave a stale username behind in storage.
+  useEffect(() => {
+    try {
+      const keep = state.rememberSession ? localStorage : sessionStorage
+      const drop = state.rememberSession ? sessionStorage : localStorage
+      drop.removeItem(SESSION_KEY)
+      if (state.currentUser) keep.setItem(SESSION_KEY, state.currentUser)
+      else keep.removeItem(SESSION_KEY)
+    } catch {}
+  }, [state.currentUser, state.rememberSession])
+
+  // ── The record has the last word on this session ─────────────────────────
+  // Rule 12, and the honest limit of it. A Super Admin terminating the Admin's sessions, locking
+  // or deactivating the account writes that to the account record; this is the browser reading
+  // its own record and standing down. It is immediate for a session in this install and can never
+  // reach a browser closed on another machine — there is no server here to push to. Session
+  // timeout is enforced in the same place because it is the same question: is this session still
+  // one the record allows?
+  useEffect(() => {
+    if (!state.currentUser) return undefined
+    const me = state.systemUsers.find(u => u.username === state.currentUser)
+    if (!me) return undefined
+
+    // Status only, deliberately not the whole of signInBlock: the sign-in window is a rule about
+    // starting a session, and applying it here would sign an operator out mid-sentence the minute
+    // the window closed. Lock, Suspend and Deactivate are the controls meant to land at once.
+    const blocked = me.status !== 'Active' ? signInBlock(me) : ''
+    // A force-logout stamp with no session left open is somebody else having ended it. Deliberately
+    // NOT "no session record at all": an install signed in before this feature existed has no
+    // session record, and reading that as a termination would sign every one of them out on the
+    // first load after upgrading.
+    const terminated = !!me.forceLogoutAt && !me.activeSession
+    if (blocked || terminated) {
+      dispatch({ type: 'SIGN_OUT', by: terminated && !blocked ? 'Super Admin' : 'policy' })
+      return undefined
+    }
+
+    const minutes = Number(me.security?.sessionTimeoutMinutes) || 0
+    // Same reason: a session from before this feature has nothing to measure from.
+    if (!minutes || !me.activeSession) return undefined
+    // Absolute, not idle: the screen lock already covers idle (see App.jsx). A session timeout is
+    // a limit on how long one sign-in may last however busy the operator is.
+    const started = new Date(me.activeSession.startedAt).getTime()
+    const due = Number.isFinite(started) ? started + minutes * 60000 : NaN
+    if (!Number.isFinite(due)) return undefined
+    if (due <= Date.now()) {
+      dispatch({ type: 'SIGN_OUT', by: 'session timeout' })
+      return undefined
+    }
+    const timer = setTimeout(() => dispatch({ type: 'SIGN_OUT', by: 'session timeout' }), due - Date.now())
+    return () => clearTimeout(timer)
+  }, [state.currentUser, state.systemUsers, dispatch])
 
   // Dark mode
   useEffect(() => {
@@ -2554,12 +3358,44 @@ export function AppProvider({ children }) {
   // Whether the currently "logged in as" role has a given permission — driven
   // live by the roleMatrix so toggling a checkbox in Settings > Roles instantly
   // changes what that role can do elsewhere in the app.
+  // Nothing is permitted without a session. The app does not render its pages before sign-in
+  // (see App.jsx), so this is a floor rather than the gate — but a permission helper that
+  // answered "yes" with nobody signed in would be the wrong thing to leave lying around.
   const can = useCallback((permKey) => {
-    return !!state.roleMatrix[state.currentRole]?.[permKey]
-  }, [state.roleMatrix, state.currentRole])
+    if (!state.currentUser) return false
+    // The role grants and the account's own overrides adjust — which is what makes a Super Admin
+    // revoking one permission from one Admin take effect on the next render, without touching
+    // every other account that shares the role (rule 13). Read off the record rather than
+    // `currentRole`, so a refreshed session is governed by the same rules as a fresh sign-in.
+    const user = state.systemUsers.find(u => u.username === state.currentUser)
+    return effectivePermission(user, state.roleMatrix, permKey)
+  }, [state.roleMatrix, state.systemUsers, state.currentUser])
+
+  // ── Access scope ─────────────────────────────────────────────────────────
+  // The loan book as the signed-in account is allowed to see it. Loans carry a branch and a
+  // product, which is what makes an access scope a filter rather than a note: the register, the
+  // reminders, the dashboard figures and every report read this list, so an Admin scoped to Siem
+  // Reap does not see a Phnom Penh loan anywhere — including in a total.
+  //
+  // An account with no scope set sees everything, which is what every account carries until a
+  // Super Admin narrows it (see governance.js on why the default cannot be "nothing").
+  const myScope = state.systemUsers.find(u => u.username === state.currentUser)?.scope || null
+  const visibleLoans = useMemo(
+    () => (state.loanApplications || []).filter(loan => inScope(myScope, loan)),
+    [state.loanApplications, myScope],
+  )
+  // For one record at a time — a loan reached by URL rather than off a list.
+  const inMyScope = useCallback(record => inScope(myScope, record), [myScope])
+
+  // Who to record against a posting, an approval or an audit line. The account's own name, so
+  // the trail says which person did it rather than which role was selected at the time.
+  const currentUserName = useCallback(() => {
+    const user = state.systemUsers.find(u => u.username === state.currentUser)
+    return user?.fullName || user?.username || 'Unknown user'
+  }, [state.systemUsers, state.currentUser])
 
   return (
-    <AppContext.Provider value={{ state, dispatch, showToast, can }}>
+    <AppContext.Provider value={{ state, dispatch, showToast, can, currentUserName, visibleLoans, inMyScope }}>
       {children}
     </AppContext.Provider>
   )

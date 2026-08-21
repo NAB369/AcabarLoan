@@ -59,8 +59,12 @@ function KpiCard({ label, value, sub, icon: Icon, iconBg, trend, trendUp, valueC
 
 // ── Dashboard ─────────────────────────────────────────────────────────────────
 export default function Dashboard() {
-  const { state, dispatch } = useApp()
-  const { customers, incomes, expenses, currency, loanApplications } = state
+  const { state, dispatch, visibleLoans } = useApp()
+  const { customers, incomes, expenses, currency } = state
+  // The book as this account may see it: an Admin scoped to one branch gets that branch's
+  // portfolio, not the institution's, so the number on the dashboard and the rows in the
+  // register are always the same book (see AppContext's visibleLoans).
+  const loanApplications = visibleLoans
 
   const totalCustomers  = customers.length
   const activeCustomers = customers.filter(c => getCustomerStatus(c, loanApplications) === 'Active').length

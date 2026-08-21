@@ -2,9 +2,14 @@ import { useRef, useState } from 'react'
 import {
   X, Users, ChevronRight, ChevronDown, Building2, Link as LinkIcon,
   ToggleLeft, ToggleRight, Edit2, Check, Upload, Trash2, MoreVertical,
+  Lock, KeyRound,
+  ShieldAlert, UserCheck, UserMinus,
 } from 'lucide-react'
 import { useApp } from '../../context/AppContext'
 import { companyLogoSrc } from '../../utils/companyLogo'
+import { auditStamp } from '../../utils/format'
+import { SUPER_ADMIN_ROLE, ADMIN_ROLE, GOVERN_PERMISSION, isSuperAdmin } from '../../utils/governance'
+import StatusBadge from '../shared/StatusBadge'
 import IntegrationPage from '../integration/IntegrationPage'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -23,8 +28,7 @@ const Th = ({ children }) => (
 const SETTINGS_USER_MGMT_SUBS = [
   { id: 'user-accounts',   label: 'User Accounts' },
   { id: 'roles',           label: 'Roles & Permissions' },
-  { id: 'access-control',  label: 'Access Control' },
-  { id: 'password',        label: 'Password & Security' },
+  { id: 'access-control',  label: 'Access & Security' },
 ]
 // Which panels belong to the User Management group — the sidebar highlights the group and
 // the header shows its breadcrumb for these. Read off the list above rather than repeated,
@@ -35,7 +39,7 @@ const SETTINGS_MAIN_MENUS = [
   { id: 'integration',     label: 'Integration',      icon: LinkIcon },
 ]
 
-function Sidebar({ active, userMgmtOpen, onMenu, onUserSub, onToggleUserMgmt }) {
+function Sidebar({ active, userMgmtOpen, pendingUsers, onMenu, onUserSub, onToggleUserMgmt }) {
   const subs = SETTINGS_USER_MGMT_SUBS
   const mainMenus = SETTINGS_MAIN_MENUS
 
@@ -63,10 +67,24 @@ function Sidebar({ active, userMgmtOpen, onMenu, onUserSub, onToggleUserMgmt }) 
             <Users className="w-4 h-4" />
             User Management
           </div>
-          {userMgmtOpen
-            ? <ChevronDown className="w-3.5 h-3.5" />
-            : <ChevronRight className="w-3.5 h-3.5" />
-          }
+          <div className="flex items-center gap-1.5">
+            {/* An account requested at the sign-in screen can only be granted here, and nothing
+                else tells an Admin one is waiting — an unseen request is a person who never
+                gets in. Shown on the group row too, since that is what is visible when the
+                group is collapsed. */}
+            {pendingUsers > 0 && (
+              <span
+                title={`${pendingUsers} access ${pendingUsers === 1 ? 'request' : 'requests'} waiting`}
+                className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+              >
+                {pendingUsers}
+              </span>
+            )}
+            {userMgmtOpen
+              ? <ChevronDown className="w-3.5 h-3.5" />
+              : <ChevronRight className="w-3.5 h-3.5" />
+            }
+          </div>
         </Button>
         {userMgmtOpen && (
           <div className="ml-5 pl-3 border-l border-slate-200 dark:border-slate-600 space-y-0.5">
@@ -82,6 +100,11 @@ function Sidebar({ active, userMgmtOpen, onMenu, onUserSub, onToggleUserMgmt }) 
                 }`}
               >
                 {s.label}
+                {s.id === 'user-accounts' && pendingUsers > 0 && (
+                  <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+                    {pendingUsers}
+                  </span>
+                )}
               </Button>
             ))}
           </div>
@@ -119,13 +142,19 @@ const NEW_USER_ROW = '__new__'
 // the headers that name them, and the rest of the register stays readable while one row is
 // being changed. Adding is the same row in the same place, at the top of the table with an
 // empty username to fill in, so both actions work one way instead of two.
-function UserAccountsPanel({ users, roleMatrix, dispatch, showToast }) {
+function UserAccountsPanel({ users, roleMatrix, currentUser, can, dispatch, showToast }) {
   // Which row is open: a username, NEW_USER_ROW for the one being added, or null. One at a
   // time — two open rows means two Save buttons and no telling which one wins.
   const [editing, setEditing] = useState(null)
-  const [form, setForm] = useState({ username: '', fullName: '', role: '', branch: '' })
-  const roles = Object.keys(roleMatrix)
+  const [form, setForm] = useState({ username: '', email: '', fullName: '', role: '', branch: '' })
+  const governs = can(GOVERN_PERMISSION)
+  // Rule 4: Super Admin is not in the list of roles this panel can assign unless the person using
+  // it already holds the level. The reducer refuses it either way — this is so the option is not
+  // dangled in front of an Admin in the first place.
+  const roles = Object.keys(roleMatrix).filter(r => r !== SUPER_ADMIN_ROLE || governs)
   const adding = editing === NEW_USER_ROW
+  // Rule 2: to an Admin, a Super Admin's row is a record to read and nothing more.
+  const offLimits = u => isSuperAdmin(u) && !governs
 
   // Sized to the cell rather than the column: a full-width input in every cell stretches
   // the table past its container on narrow screens.
@@ -134,12 +163,12 @@ function UserAccountsPanel({ users, roleMatrix, dispatch, showToast }) {
 
   function startEdit(u) {
     setEditing(u.username)
-    setForm({ username: u.username, fullName: u.fullName || u.name || '', role: u.role || roles[0] || '', branch: u.branch || '' })
+    setForm({ username: u.username, email: u.email || '', fullName: u.fullName || u.name || '', role: u.role || roles[0] || '', branch: u.branch || '' })
   }
 
   function startAdd() {
     setEditing(NEW_USER_ROW)
-    setForm({ username: '', fullName: '', role: roles[0] || '', branch: '' })
+    setForm({ username: '', email: '', fullName: '', role: roles[0] || '', branch: '' })
   }
 
   function handleSave() {
@@ -153,6 +182,13 @@ function UserAccountsPanel({ users, roleMatrix, dispatch, showToast }) {
       showToast(`Username "${username}" is already taken`, 'error')
       return
     }
+    // Sign-in matches on the email as well as the username, so two accounts sharing one address
+    // would make it ambiguous which of them was being signed into.
+    const email = form.email.trim().toLowerCase()
+    if (email && users.some(u => (u.email || '').toLowerCase() === email && u.username !== editing)) {
+      showToast(`Email "${form.email.trim()}" is already used by another account`, 'error')
+      return
+    }
     if (adding) {
       // Only what this panel collects, plus an explicit Active status: the loan wizard picks
       // its Credit Officer list off `status`, so an account created without one was invisible
@@ -160,18 +196,60 @@ function UserAccountsPanel({ users, roleMatrix, dispatch, showToast }) {
       // the account is actually used.
       dispatch({
         type: 'ADD_SYSTEM_USER',
-        user: { username, fullName, role: form.role, branch: form.branch.trim(), lastLogin: '', status: 'Active' },
+        user: { username, email: form.email.trim(), fullName, role: form.role, branch: form.branch.trim(), lastLogin: '', status: 'Active' },
       })
       showToast(`User "${username}" added`, 'success')
     } else {
       dispatch({
         type: 'UPDATE_SYSTEM_USER',
         username: editing,
-        updates: { fullName, role: form.role, branch: form.branch.trim() },
+        updates: { email: form.email.trim(), fullName, role: form.role, branch: form.branch.trim() },
       })
       showToast('User account updated', 'success')
     }
     setEditing(null)
+  }
+
+  // ── Granting and withdrawing access ──────────────────────────────────────
+  // An account requested at the sign-in screen (see SignUpScreen) arrives 'Pending' with no
+  // role, and only this panel can move it: signing in refuses anything that is not Active, and
+  // `can()` grants nothing without a role, so activating and setting the role IS the approval.
+  // The role granted is whatever the row already holds, falling back to the one the applicant
+  // asked for — a note, not a grant, until it is committed here.
+  //
+  // Withdrawing access sets 'Inactive' rather than deleting the account: the request, who
+  // granted it and who took it away are the only record of it there is, and a deleted row takes
+  // that with it. Both directions are reversible, which is why neither asks for a confirmation.
+  function changeStatus(u, status) {
+    const role = status === 'Active' ? (u.role || u.requestedRole || '') : u.role
+    if (status === 'Active' && !role) {
+      showToast('Set a role for this account first — edit the row, then activate', 'error')
+      return
+    }
+    // Deactivating the account you are signed in as would leave you inside a session that the
+    // sign-in screen would no longer let you back into.
+    if (u.username === currentUser) {
+      showToast('You cannot change the status of the account you are signed in as', 'error')
+      return
+    }
+    if (offLimits(u)) {
+      showToast('Only a Super Admin can change a Super Admin account', 'error')
+      return
+    }
+    // SET_USER_STATUS rather than a profile edit: it is the case that carries the guards (the
+    // last active Super Admin, the session that has to end with the access) and writes the audit
+    // line. It also decides for itself whether this applies now or waits — an Admin acting on
+    // another Admin is a change of who governs what, and goes to the Super Admin first.
+    dispatch({ type: 'SET_USER_STATUS', username: u.username, status, reason: '' })
+    const willWait = !governs && (u.role === ADMIN_ROLE || isSuperAdmin(u))
+    showToast(
+      willWait
+        ? `Sent to a Super Admin for approval: ${u.fullName || u.username} → ${status}`
+        : status === 'Active'
+          ? `${u.fullName || u.username} activated as ${role}`
+          : `${u.fullName || u.username} → ${status}. This account can no longer sign in.`,
+      willWait ? 'info' : status === 'Active' ? 'success' : 'info',
+    )
   }
 
   // Enter saves and Escape backs out from anywhere in the row, so a one-field change
@@ -192,7 +270,8 @@ function UserAccountsPanel({ users, roleMatrix, dispatch, showToast }) {
             is not thrown away by starting something else. */}
         <Button
           onClick={adding ? () => setEditing(null) : startAdd}
-          disabled={!!editing && !adding}
+          disabled={(!!editing && !adding) || !can('create_user')}
+          title={can('create_user') ? undefined : 'Your role cannot create user accounts'}
           className={`h-auto flex-shrink-0 px-3 py-1.5 text-xs font-bold rounded-xl ${
             editing && !adding ? 'bg-slate-300 dark:bg-slate-600 cursor-not-allowed' : 'bg-brand-600 hover:bg-brand-700'
           }`}
@@ -207,16 +286,18 @@ function UserAccountsPanel({ users, roleMatrix, dispatch, showToast }) {
           <thead>
             <tr>
               <Th>Username</Th>
+              <Th>Email</Th>
               <Th>Full Name</Th>
               <Th>Role</Th>
               <Th>Branch</Th>
+              <Th>Status</Th>
               <Th>Last Login</Th>
               <Th>Actions</Th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
             {rows.length === 0 ? (
-              <tr><td colSpan={6} className="py-10 text-center text-sm text-slate-400">No users yet — add one to get started.</td></tr>
+              <tr><td colSpan={8} className="py-10 text-center text-sm text-slate-400">No users yet — add one to get started.</td></tr>
             ) : rows.map(u => {
               const isNew = u.username === NEW_USER_ROW
               const open = editing === u.username
@@ -236,6 +317,21 @@ function UserAccountsPanel({ users, roleMatrix, dispatch, showToast }) {
                         className={`${cellInput} font-mono`}
                       />
                     ) : u.username}
+                  </td>
+                  {/* What staff sign in with (see LoginScreen). Optional: an account with no
+                      email still signs in on its username, which is what keeps accounts created
+                      before this column existed usable. */}
+                  <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">
+                    {open ? (
+                      <Input
+                        type="email"
+                        value={form.email}
+                        onChange={e => set('email', e.target.value.trim())}
+                        onKeyDown={handleKeyDown}
+                        placeholder="name@acabar.com.kh"
+                        className={cellInput}
+                      />
+                    ) : (u.email || '—')}
                   </td>
                   <td className="px-4 py-3 text-xs font-medium text-slate-700 dark:text-slate-200">
                     {open ? (
@@ -259,7 +355,14 @@ function UserAccountsPanel({ users, roleMatrix, dispatch, showToast }) {
                       >
                         {roles.map(r => <option key={r} value={r}>{r}</option>)}
                       </select>
-                    ) : u.role}
+                    ) : u.role || (u.requestedRole ? (
+                      // No role is granted until the request is activated, so the row shows the
+                      // one asked for instead — the approver needs it in front of them here, not
+                      // in a second screen.
+                      <span className="text-slate-400 dark:text-slate-500">
+                        asked for <span className="font-semibold">{u.requestedRole}</span>
+                      </span>
+                    ) : '—')}
                   </td>
                   <td className="px-4 py-3 text-xs text-slate-500 dark:text-slate-400">
                     {open ? (
@@ -271,6 +374,17 @@ function UserAccountsPanel({ users, roleMatrix, dispatch, showToast }) {
                         className={cellInput}
                       />
                     ) : (u.branch || '—')}
+                  </td>
+                  {/* Changed by the buttons in Actions rather than typed, so the role and the
+                      status can never be saved out of step with each other. */}
+                  <td className="px-4 py-3 whitespace-nowrap">
+                    {isNew ? (
+                      <span className="text-xs text-slate-400">Active</span>
+                    ) : (
+                      <span title={u.status === 'Pending' && u.requestedAt ? `Requested ${u.requestedAt}` : (u.statusChanged || undefined)}>
+                        <StatusBadge status={u.status || 'Active'} size="xs" />
+                      </span>
+                    )}
                   </td>
                   {/* Not editable either way — it is stamped by signing in, not set by hand */}
                   <td className="px-4 py-3 text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap">{u.lastLogin || '—'}</td>
@@ -297,18 +411,90 @@ function UserAccountsPanel({ users, roleMatrix, dispatch, showToast }) {
                         </Button>
                       </div>
                     ) : (
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => startEdit(u)}
-                        disabled={!!editing}
-                        title={editing ? 'Finish the open row first' : 'Edit user account'}
-                        className={`h-auto w-auto p-1 rounded-lg ${
-                          editing ? 'text-slate-300 dark:text-slate-600 cursor-not-allowed' : 'text-brand-600 hover:bg-brand-50 dark:hover:bg-brand-900/30'
-                        }`}
-                      >
-                        <Edit2 className="w-3.5 h-3.5" />
-                      </Button>
+                      <div className="flex items-center gap-1">
+                        {/* The primary action on a Pending row and the only route out of it.
+                            Labelled with the role it grants, so a one-click approval still says
+                            what it is about to hand over. */}
+                        {u.status === 'Active' ? (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => changeStatus(u, 'Inactive')}
+                            disabled={!!editing || u.username === currentUser || offLimits(u) || !can('activate_user')}
+                            title={u.username === currentUser
+                              ? 'You cannot deactivate the account you are signed in as'
+                              : `Deactivate — ${u.fullName || u.username} can no longer sign in`}
+                            className={`h-auto w-auto p-1 rounded-lg ${
+                              editing || u.username === currentUser || offLimits(u) || !can('activate_user')
+                                ? 'text-slate-300 dark:text-slate-600 cursor-not-allowed'
+                                : 'text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-900/30'
+                            }`}
+                          >
+                            <UserMinus className="w-3.5 h-3.5" />
+                          </Button>
+                        ) : (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => changeStatus(u, 'Active')}
+                            disabled={!!editing || offLimits(u) || !can('activate_user')}
+                            title={u.status === 'Pending'
+                              ? `Activate as ${u.role || u.requestedRole || '— set a role first'}`
+                              : `Reactivate as ${u.role || u.requestedRole || '— set a role first'}`}
+                            className={`h-auto w-auto p-1 rounded-lg ${
+                              editing || offLimits(u) || !can('activate_user')
+                                ? 'text-slate-300 dark:text-slate-600 cursor-not-allowed'
+                                : 'text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-900/30'
+                            }`}
+                          >
+                            <UserCheck className="w-3.5 h-3.5" />
+                          </Button>
+                        )}
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => startEdit(u)}
+                          disabled={!!editing || offLimits(u) || !can('edit_user')}
+                          title={offLimits(u)
+                            ? 'Only a Super Admin can edit a Super Admin account'
+                            : !can('edit_user') ? 'Your role cannot edit user accounts'
+                            : editing ? 'Finish the open row first' : 'Edit user account'}
+                          className={`h-auto w-auto p-1 rounded-lg ${
+                            editing || offLimits(u) || !can('edit_user') ? 'text-slate-300 dark:text-slate-600 cursor-not-allowed' : 'text-brand-600 hover:bg-brand-50 dark:hover:bg-brand-900/30'
+                          }`}
+                        >
+                          <Edit2 className="w-3.5 h-3.5" />
+                        </Button>
+                        {/* Clears the credential rather than setting a new one, so this screen
+                            never has to show a password to the person doing the reset — the
+                            account then sets its own on its next sign-in, exactly as a new
+                            account does. Only offered where there is something to clear. */}
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => {
+                            dispatch({ type: 'SET_USER_PASSWORD', username: u.username, salt: '', hash: '' })
+                            showToast(`${u.fullName} will set a new password at next sign-in`, 'success')
+                          }}
+                          disabled={!!editing || !u.passwordHash || offLimits(u) || !can('edit_user')}
+                          title={u.resetRequestedAt
+                            ? `Reset requested ${u.resetRequestedAt} — clear the password so this account can choose a new one`
+                            : offLimits(u) ? 'Only a Super Admin can reset a Super Admin password' : u.passwordHash
+                            ? 'Reset password — this account sets a new one at next sign-in'
+                            : 'No password on file yet; this account sets one at next sign-in'}
+                          className={`h-auto w-auto p-1 rounded-lg ${
+                            editing || !u.passwordHash || offLimits(u) || !can('edit_user')
+                              ? 'text-slate-300 dark:text-slate-600 cursor-not-allowed'
+                              // An outstanding ask is amber and ringed, so the row says it is waiting
+                              // rather than leaving it to be noticed in a tooltip.
+                              : u.resetRequestedAt
+                                ? 'text-amber-600 bg-amber-50 ring-1 ring-amber-300 dark:bg-amber-900/30 dark:ring-amber-700'
+                                : 'text-slate-400 hover:text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-900/30'
+                          }`}
+                        >
+                          <KeyRound className="w-3.5 h-3.5" />
+                        </Button>
+                      </div>
                     )}
                   </td>
                 </tr>
@@ -335,10 +521,14 @@ const PresetItem = ({ onClick, children }) => (
 // Which module each permission belongs to. A permission added at runtime has no group of
 // its own, so it falls to "Other" rather than disappearing from the matrix.
 const PERMISSION_GROUPS = [
-  { label: 'Customers',  keys: ['add_customer'] },
-  { label: 'Loans',      keys: ['open_loan', 'review_loan', 'disburse_loan', 'write_off'] },
+  { label: 'Customers',  keys: ['view_customers', 'add_customer', 'edit_customer', 'delete_customer', 'export_customers'] },
+  { label: 'Loans',      keys: ['view_loans', 'open_loan', 'review_loan', 'disburse_loan', 'write_off', 'request_restructure', 'export_loans'] },
   { label: 'Accounting', keys: ['manage_accounting', 'view_accounting'] },
+  { label: 'Reports',    keys: ['view_reports', 'export_reports'] },
   { label: 'Operations', keys: ['run_operations'] },
+  // The keys that govern the app itself rather than the book. Last, and read as a group, because
+  // this is the block a Super Admin is deciding about when it narrows what an Admin may run.
+  { label: 'Administration', keys: ['view_users', 'create_user', 'edit_user', 'activate_user', 'view_settings', 'manage_settings', 'govern_admins'] },
 ]
 
 // A permission that only reads is one the "Read-only" preset leaves on — decided on the
@@ -355,7 +545,7 @@ function groupedPermissions(permissionLabels) {
   return rest.length ? [...grouped, { label: 'Other', keys: rest }] : grouped
 }
 
-function RolesPanel({ roleMatrix, permissionLabels, selectedRole, users, dispatch, showToast }) {
+function RolesPanel({ roleMatrix, permissionLabels, selectedRole, users, currentRole, can, dispatch, showToast }) {
   const [newRole, setNewRole] = useState('')
   const [newPermLabel, setNewPermLabel] = useState('')
   // Which add field is showing: null | 'role' | 'permission'
@@ -364,6 +554,33 @@ function RolesPanel({ roleMatrix, permissionLabels, selectedRole, users, dispatc
   const roles = Object.keys(roleMatrix)
   const permKeys = Object.keys(permissionLabels)
   const groups = groupedPermissions(permissionLabels)
+  const governs = can(GOVERN_PERMISSION)
+
+  // Which cells this account may touch at all, and why not when it may not. The rules are the
+  // reducer's — this only keeps the UI from offering what would be refused (see the guards on
+  // TOGGLE_ROLE_PERMISSION): the level is not handed out through a checkbox, the Super Admin
+  // column is not editable below the level, and nobody edits their own role's column.
+  const columnHint = (role, key) => {
+    if (key === GOVERN_PERMISSION) return 'The Super Admin level is not a permission that can be granted here'
+    if (role === SUPER_ADMIN_ROLE) return 'The Super Admin column cannot be changed'
+    if (role === currentRole) return 'You cannot change the permissions of your own role'
+    if (!governs) return 'Sent to a Super Admin for approval'
+    return ''
+  }
+  const editableColumn = (role, key) =>
+    key !== GOVERN_PERMISSION && role !== SUPER_ADMIN_ROLE && role !== currentRole
+
+  // An Admin's toggle is a REQUEST (see the reducer); a Super Admin's applies at once. The toast
+  // has to say which happened, or a change that is waiting on somebody reads as one that landed.
+  function toggle(role, key, enabled) {
+    dispatch({ type: 'TOGGLE_ROLE_PERMISSION', role, perm: key })
+    showToast(
+      governs
+        ? `${permissionLabels[key]} ${enabled ? 'revoked from' : 'granted to'} ${role}`
+        : `Sent to a Super Admin for approval: ${enabled ? 'revoke' : 'grant'} ${permissionLabels[key]} for ${role}`,
+      governs ? 'success' : 'info',
+    )
+  }
 
   function applyPreset(role, kind) {
     const permissions =
@@ -561,10 +778,15 @@ function RolesPanel({ roleMatrix, permissionLabels, selectedRole, users, dispatc
                           <Button
                             variant="ghost"
                             size="icon"
-                            onClick={() => dispatch({ type: 'TOGGLE_ROLE_PERMISSION', role, perm: key })}
+                            disabled={!editableColumn(role, key)}
+                            onClick={() => toggle(role, key, enabled)}
                             aria-pressed={enabled}
-                            title={`${permissionLabels[key]} — ${role}: ${enabled ? 'on' : 'off'}`}
-                            className={`h-auto w-auto p-0 hover:bg-transparent ${enabled ? 'text-emerald-600 hover:text-emerald-700' : 'text-slate-300 dark:text-slate-600 hover:text-slate-400'}`}
+                            title={columnHint(role, key) || `${permissionLabels[key]} — ${role}: ${enabled ? 'on' : 'off'}`}
+                            className={`h-auto w-auto p-0 hover:bg-transparent ${
+                              !editableColumn(role, key)
+                                ? 'text-slate-200 dark:text-slate-700 cursor-not-allowed'
+                                : enabled ? 'text-emerald-600 hover:text-emerald-700' : 'text-slate-300 dark:text-slate-600 hover:text-slate-400'
+                            }`}
                           >
                             {enabled
                               ? <ToggleRight className="w-5 h-5" />
@@ -614,82 +836,103 @@ function RolesPanel({ roleMatrix, permissionLabels, selectedRole, users, dispatc
   )
 }
 
-function AccessControlPanel({ showToast }) {
-  const [sessionTimeout, setSessionTimeout] = useState(30)
-  const [maxAttempts, setMaxAttempts] = useState(5)
-  return (
-    <div className="max-w-md">
-      <h2 className="text-sm font-bold text-slate-800 dark:text-slate-100 mb-4">Access Control</h2>
-      <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700 p-6 space-y-5">
-        <div>
-          <Label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">
-            Session Timeout (minutes)
-          </Label>
-          <Input
-            type="number" min="1" max="480"
-            value={sessionTimeout}
-            onChange={e => setSessionTimeout(Number(e.target.value))}
-            className="w-full border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-brand-500"
-          />
-        </div>
-        <div>
-          <Label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">
-            Max Login Attempts
-          </Label>
-          <Input
-            type="number" min="1" max="20"
-            value={maxAttempts}
-            onChange={e => setMaxAttempts(Number(e.target.value))}
-            className="w-full border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-brand-500"
-          />
-        </div>
-        <Button
-          onClick={() => showToast('Access control settings saved', 'success')}
-          className="h-auto w-full bg-brand-600 hover:bg-brand-700 py-2.5 rounded-xl text-xs font-bold"
-        >
-          Save Settings
-        </Button>
-      </div>
-    </div>
-  )
-}
+// ── Access & Security ────────────────────────────────────────────────────────
+// This panel replaces two that were theatre. "Access Control" offered a session timeout and a
+// max-login-attempts limit; "Password & Security" offered a minimum length and an expiry. All
+// four were React state in the panel: Save dispatched nothing, persisted nothing, enforced
+// nothing, and raised a success toast. An administrator could set a 90-day password expiry, be
+// told it was saved, and have it not exist — which is worse than not offering it, because it
+// tells the person responsible for securing this install that a control is in place.
+//
+// What is left is the one control this build can honestly enforce, and a plain statement of
+// what it cannot. Everything in the second list needs a server; none of it can be faked here.
+function SecurityPanel({ showToast }) {
+  const { state, dispatch } = useApp()
+  const minutes = state.screenLockMinutes
 
-function PasswordPanel({ showToast }) {
-  const [minLen, setMinLen] = useState(8)
-  const [expiry, setExpiry] = useState(90)
+  const LOCK_OPTIONS = [0, 5, 10, 15, 30, 60]
+
   return (
-    <div className="max-w-md">
-      <h2 className="text-sm font-bold text-slate-800 dark:text-slate-100 mb-4">Password & Security</h2>
+    <div className="max-w-xl space-y-4">
+      <h2 className="text-sm font-bold text-slate-800 dark:text-slate-100">Access &amp; Security</h2>
+
       <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700 p-6 space-y-5">
         <div>
-          <Label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">
-            Minimum Password Length
-          </Label>
-          <Input
-            type="number" min="6" max="32"
-            value={minLen}
-            onChange={e => setMinLen(Number(e.target.value))}
-            className="w-full border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-brand-500"
-          />
+          <div className="flex items-center gap-2">
+            <Lock className="w-4 h-4 text-brand-600 dark:text-brand-400" />
+            <h3 className="text-xs font-bold text-slate-800 dark:text-slate-100">Screen lock</h3>
+            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200/60 dark:bg-emerald-900/30 dark:text-emerald-400 dark:border-emerald-800">
+              Enforced
+            </span>
+          </div>
+          <p className="text-[11px] leading-relaxed text-slate-500 dark:text-slate-400 mt-2">
+            Covers the loan book when this terminal is left idle, so a customer&rsquo;s ID, address
+            and balances are not on display to whoever walks past the counter. Anyone at this
+            keyboard can resume &mdash; it hides the screen, it does not sign anyone out.
+          </p>
+          <div className="flex flex-wrap gap-1.5 mt-3">
+            {LOCK_OPTIONS.map(value => {
+              const on = minutes === value
+              return (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => {
+                    dispatch({ type: 'SET_SCREEN_LOCK_MINUTES', minutes: value })
+                    showToast(value === 0 ? 'Screen lock switched off' : `Screen locks after ${value} minutes idle`, 'success')
+                  }}
+                  aria-pressed={on}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                    on
+                      ? 'bg-brand-600 text-white'
+                      : 'bg-slate-50 dark:bg-slate-700/50 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700'
+                  }`}
+                >
+                  {value === 0 ? 'Off' : `${value} min`}
+                </button>
+              )
+            })}
+          </div>
+          {/* Saved as it is pressed. No Save button, because there is nothing to batch and a
+              Save button is exactly what made the old panels look like they worked. */}
+          <p className="text-[10px] text-slate-400 dark:text-slate-500 mt-2">
+            Applies immediately and is remembered on this install.
+          </p>
         </div>
-        <div>
-          <Label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">
-            Password Expiry (days)
-          </Label>
-          <Input
-            type="number" min="0" max="365"
-            value={expiry}
-            onChange={e => setExpiry(Number(e.target.value))}
-            className="w-full border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-brand-500"
-          />
-          <p className="text-[10px] text-slate-400 mt-1">Set to 0 for passwords that never expire.</p>
+      </div>
+
+      {/* Stated, not hidden. Whoever is asked to sign this system off needs to read this before
+          it goes anywhere near a real borrower. */}
+      <div className="rounded-2xl border border-amber-200/70 dark:border-amber-900 bg-amber-50/70 dark:bg-amber-900/20 p-5">
+        <div className="flex items-start gap-3">
+          <ShieldAlert className="w-5 h-5 text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5" />
+          <div className="min-w-0">
+            <h3 className="text-xs font-bold text-slate-800 dark:text-slate-100">
+              What this build does not do
+            </h3>
+            <p className="text-[11px] text-slate-600 dark:text-slate-300 mt-1 leading-relaxed">
+              Acabar runs entirely in this browser with no server behind it, so the controls below
+              cannot be provided here at all &mdash; and must not be assumed.
+            </p>
+            <ul className="mt-3 space-y-1.5 text-[11px] text-slate-600 dark:text-slate-300">
+              {[
+                ['No login or user accounts', 'Anyone who opens this page has full access. The role picker in the header is a demo control, not a permission boundary.'],
+                ['No passwords', 'Nothing to set a length or expiry for. Provider passwords (WeBill365, WeUMS365) are checked and dropped, never stored.'],
+                ['Permissions are advisory', 'Roles decide what the interface offers, not what the data allows. Anyone with developer tools can change either.'],
+                ['Data is stored unencrypted', 'Customer names, national IDs, addresses and balances are held in this browser in plain text. Encrypting them here would only hide the key alongside them.'],
+              ].map(([title, detail]) => (
+                <li key={title} className="flex gap-2">
+                  <span className="text-amber-600 dark:text-amber-500 flex-shrink-0">&bull;</span>
+                  <span><span className="font-semibold text-slate-700 dark:text-slate-200">{title}.</span> {detail}</span>
+                </li>
+              ))}
+            </ul>
+            <p className="text-[11px] font-semibold text-amber-800 dark:text-amber-300 mt-3 leading-relaxed">
+              Keep real borrower data off shared machines until authentication is served from a
+              backend.
+            </p>
+          </div>
         </div>
-        <Button
-          onClick={() => showToast('Password policy saved', 'success')}
-          className="h-auto w-full bg-brand-600 hover:bg-brand-700 py-2.5 rounded-xl text-xs font-bold"
-        >
-          Save Policy
-        </Button>
       </div>
     </div>
   )
@@ -885,12 +1128,13 @@ function CompanyProfilePanel({ profile, dispatch, showToast }) {
 
 // ─── Main Modal ───────────────────────────────────────────────────────────────
 export default function SettingsModal() {
-  const { state, dispatch, showToast } = useApp()
+  const { state, dispatch, showToast, can } = useApp()
   const {
     settingsOpen, activeSettingsMenu, activeUserMgmtSubMenu,
     systemUsers, roleMatrix, permissionLabels, selectedRole,
     companyProfile,
   } = state
+  const pendingUsers = systemUsers.filter(u => u.status === 'Pending').length
 
   const [userMgmtOpen, setUserMgmtOpen] = useState(true)
 
@@ -937,6 +1181,7 @@ export default function SettingsModal() {
         <Sidebar
           active={activePanel}
           userMgmtOpen={userMgmtOpen}
+          pendingUsers={pendingUsers}
           onMenu={handleMenu}
           onUserSub={handleUserSub}
           onToggleUserMgmt={handleToggleUserMgmt}
@@ -989,10 +1234,9 @@ export default function SettingsModal() {
 
           {/* Panel content */}
           <div className="flex-1 overflow-y-auto p-4 sm:p-6">
-            {activePanel === 'user-accounts'  && <UserAccountsPanel users={systemUsers} roleMatrix={roleMatrix} dispatch={dispatch} showToast={showToast} />}
-            {activePanel === 'roles'           && <RolesPanel roleMatrix={roleMatrix} permissionLabels={permissionLabels} selectedRole={selectedRole} users={systemUsers} dispatch={dispatch} showToast={showToast} />}
-            {activePanel === 'access-control'  && <AccessControlPanel showToast={showToast} />}
-            {activePanel === 'password'        && <PasswordPanel showToast={showToast} />}
+            {activePanel === 'user-accounts'  && <UserAccountsPanel users={systemUsers} roleMatrix={roleMatrix} currentUser={state.currentUser} can={can} dispatch={dispatch} showToast={showToast} />}
+            {activePanel === 'roles'           && <RolesPanel roleMatrix={roleMatrix} permissionLabels={permissionLabels} selectedRole={selectedRole} users={systemUsers} currentRole={state.currentRole} can={can} dispatch={dispatch} showToast={showToast} />}
+            {(activePanel === 'access-control' || activePanel === 'password') && <SecurityPanel showToast={showToast} />}
             {activePanel === 'company-profile' && <CompanyProfilePanel profile={companyProfile} dispatch={dispatch} showToast={showToast} />}
             {activePanel === 'integration'     && <IntegrationPage embedded />}
           </div>

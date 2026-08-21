@@ -1,6 +1,7 @@
 import { useState, useId } from 'react'
-import { Bell, Moon, Sun, Settings, LogOut, User, ChevronLeft, Menu, MonitorCog, ChevronDown, Check } from 'lucide-react'
+import { Bell, Moon, Sun, Settings, Lock, LogOut, User, ChevronLeft, Menu, MonitorCog, ChevronDown, Check, ShieldCheck } from 'lucide-react'
 import { useApp } from '../../context/AppContext'
+import { GOVERN_PERMISSION } from '../../utils/governance'
 import { currentLoanRef } from '../../utils/navigation'
 import { Button } from '@/components/ui/button'
 import {
@@ -9,12 +10,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-
-// There is no login, so the role switcher stands in for one. Who it names comes from the user
-// accounts in Settings rather than from invented staff — a fresh install has only the
-// administrator, and the other roles read as the role itself until someone is added to them.
-const nameForRole = (systemUsers, role) =>
-  systemUsers.find(u => u.role === role && u.status !== 'Inactive')?.fullName || role
 
 // Flags are drawn inline rather than using emoji — Windows renders regional
 // indicator pairs as bare letters ("GB"), so 🇬🇧 would not read as a flag.
@@ -78,12 +73,15 @@ const LANGUAGES = [
 ]
 
 export default function Header({ onMenuClick }) {
-  const { state, dispatch, showToast } = useApp()
+  const { state, dispatch, showToast, can } = useApp()
   const [notifOpen, setNotifOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
   const [langOpen, setLangOpen] = useState(false)
   const isKh = state.language === 'kh'
   const activeLang = LANGUAGES.find(l => l.code === state.language) || LANGUAGES[0]
+  // The account this session belongs to. Its role is what can() reads, so the header shows the
+  // person and their role together rather than offering a choice between roles.
+  const signedIn = state.systemUsers.find(u => u.username === state.currentUser) || null
 
   const unread = state.notifications.filter(n => !n.read).length
   const dayOpen = state.businessDay?.status === 'open'
@@ -298,7 +296,7 @@ export default function Header({ onMenuClick }) {
                 <User className="w-4 h-4" />
               </div>
               <div className="text-left hidden md:block">
-                <p className="text-xs font-bold text-slate-800 dark:text-slate-200">{nameForRole(state.systemUsers, state.currentRole)}</p>
+                <p className="text-xs font-bold text-slate-800 dark:text-slate-200">{signedIn?.fullName || state.currentRole}</p>
                 <p className="text-[10px] text-slate-400 dark:text-slate-500">{state.currentRole}</p>
               </div>
             </Button>
@@ -307,42 +305,62 @@ export default function Header({ onMenuClick }) {
             align="end"
             className="w-[calc(100vw-1.5rem)] max-w-64 rounded-2xl shadow-xl p-2 dark:bg-slate-800 dark:border-slate-700"
           >
+            {/* The role picker that used to live here is gone. It let anyone become Admin in two
+                clicks, which made the permission matrix a suggestion rather than a rule. The role
+                now comes from the account that signed in, so changing it means signing in as
+                somebody else — this reads that account back instead of offering a choice. */}
             <p className="px-3 pt-1.5 pb-1 text-[10px] font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-widest">
-              Logged in as (demo)
+              Signed in as
             </p>
-            <div className="px-1 pb-2 flex flex-col gap-0.5">
-              {Object.keys(state.roleMatrix).map(role => (
-                <DropdownMenuItem
-                  key={role}
-                  onSelect={() => {
-                    dispatch({ type: 'SET_CURRENT_ROLE', role })
-                    showToast(`Switched to ${nameForRole(state.systemUsers, role)} (${role})`, 'info')
-                  }}
-                  className={`flex-col items-start w-full px-3 py-2 rounded-xl cursor-pointer ${
-                    state.currentRole === role
-                      ? 'bg-brand-600 text-white focus:bg-brand-600 focus:text-white data-[highlighted]:bg-brand-600 data-[highlighted]:text-white'
-                      : 'text-slate-600 dark:text-slate-400'
-                  }`}
-                >
-                  <p className="text-xs font-semibold">{nameForRole(state.systemUsers, role)}</p>
-                  <p className={`text-[10px] ${state.currentRole === role ? 'text-white/70' : 'text-slate-400 dark:text-slate-500'}`}>{role}</p>
-                </DropdownMenuItem>
-              ))}
+            <div className="px-3 pb-2">
+              <p className="text-xs font-bold text-slate-800 dark:text-slate-200">{signedIn?.fullName || '—'}</p>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                {state.currentRole}
+                {signedIn?.branch ? <span className="text-slate-400 dark:text-slate-500"> · {signedIn.branch}</span> : null}
+              </p>
+              <p className="font-mono text-[10px] text-slate-400 dark:text-slate-500 mt-0.5">{signedIn?.username}</p>
             </div>
             <div className="border-t border-slate-100 dark:border-slate-700 my-1" />
+            {/* Only for the vendor's own account, and only here: the console is not in the sidebar
+                because the sidebar belongs to the business. This is the way back across after a
+                Super Admin has opened the loan book to see what an owner sees. */}
+            {can(GOVERN_PERMISSION) && (
+              <DropdownMenuItem
+                onSelect={() => dispatch({ type: 'SET_TAB', tab: 'admin-control' })}
+                className="gap-2.5 px-3 py-2 rounded-xl text-xs font-semibold cursor-pointer text-brand-700 dark:text-brand-300"
+              >
+                <ShieldCheck className="w-4 h-4" />
+                Super Admin Console
+              </DropdownMenuItem>
+            )}
+            {/* System Settings holds the company profile, the integrations and the role matrix, so
+                "Admin cannot change global security settings unless explicitly permitted" starts
+                with not being able to open them. A Super Admin grants view_settings back per
+                account under Customers → Permissions. */}
             <DropdownMenuItem
-              onSelect={() => dispatch({ type: 'OPEN_SETTINGS' })}
+              disabled={!can('view_settings')}
+              onSelect={() => { if (can('view_settings')) dispatch({ type: 'OPEN_SETTINGS' }) }}
               className="flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200 cursor-pointer"
             >
               <Settings className="w-4 h-4" />
               {isKh ? 'ការកំណត់' : 'Settings'}
             </DropdownMenuItem>
+            {/* Two different needs at a shared counter, so both are offered: locking keeps the
+                session and asks for this user's password to resume; signing out ends it and
+                returns to the sign-in screen for whoever is next. */}
             <DropdownMenuItem
-              onSelect={() => showToast('Sign out (mock)', 'info')}
+              onSelect={() => { dispatch({ type: 'LOCK_SCREEN' }); showToast('Screen locked', 'info') }}
+              className="flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 cursor-pointer"
+            >
+              <Lock className="w-4 h-4" />
+              {isKh ? 'ចាក់សោអេក្រង់' : 'Lock screen'}
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={() => { dispatch({ type: 'SIGN_OUT' }); showToast('Signed out', 'info') }}
               className="flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm text-rose-600 focus:text-rose-600 focus:bg-rose-50 data-[highlighted]:bg-rose-50 data-[highlighted]:text-rose-600 cursor-pointer"
             >
               <LogOut className="w-4 h-4" />
-              {isKh ? 'ចាកចេញ' : 'Sign Out'}
+              {isKh ? 'ចាកចេញ' : 'Sign out'}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>

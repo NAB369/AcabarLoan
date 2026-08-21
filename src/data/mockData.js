@@ -435,8 +435,15 @@ export const INITIAL_COMPANY_PROFILE = {
 // accounts at all would have no Admin to sign in as and no way to add one. The single
 // administrator is the minimum a usable install needs; every other user is created in
 // Settings → User Management.
+// The install's two governing accounts. The Admin is the one that was always here and keeps doing
+// the day-to-day work; the Super Admin sits above it and governs it (see utils/governance.js).
+//
+// Neither ships with a password — `needsPassword` sends the first sign-in through choosing one.
+// That matters most for the Super Admin: a known starting credential on the account that governs
+// every other account is the single worst thing this file could contain.
 export const INITIAL_SYSTEM_USERS = [
-  { username:'admin', fullName:'System Administrator', role:'Admin', branch:'Phnom Penh HQ', department:'IT', lastLogin:'', status:'Active', statusChanged:'' },
+  { username:'superadmin', email:'superadmin@acabar.com.kh', fullName:'Super Administrator', role:'Super Admin', branch:'Phnom Penh HQ', department:'IT', lastLogin:'', status:'Active', statusChanged:'' },
+  { username:'admin', email:'admin@acabar.com.kh', fullName:'System Administrator', role:'Admin', branch:'Phnom Penh HQ', department:'IT', lastLogin:'', status:'Active', statusChanged:'' },
 ]
 
 // Payroll staff register — the Employee Information page. A name is stored split into
@@ -616,15 +623,53 @@ export const INITIAL_PERMISSION_LABELS = {
   request_restructure: 'Request Loan Restructure',
   run_operations:    'Run EOD/EOM Operations',
   view_accounting:   'View Accounting Module',
+  // Added with the Super Admin level. Everything the modules could already DO was gated; what
+  // could be SEEN and EXPORTED was not, so "control the Admin's access scope" had nothing to
+  // switch off. These are the keys the Admin Control permission grid drives — see
+  // utils/governance.js, which maps each one to its cell in the module x action table.
+  view_customers:    'View Customer Module',
+  edit_customer:     'Edit Customer',
+  delete_customer:   'Delete Customer',
+  export_customers:  'Export Customer Data',
+  view_loans:        'View Loan Module',
+  export_loans:      'Export Loan Data',
+  view_reports:      'View Report Module',
+  export_reports:    'Export Reports',
+  view_users:        'View User Accounts',
+  create_user:       'Create User Account',
+  edit_user:         'Edit User Account',
+  activate_user:     'Activate / Deactivate User',
+  view_settings:     'Open System Settings',
+  manage_settings:   'Change System Settings',
+  // The level itself, not a module capability: it is what the Admin Control console requires.
+  // Only a Super Admin holds it, and only a Super Admin can hand it out — see the reducer guards.
+  govern_admins:     'Govern Admin Accounts (Super Admin)',
 }
 
+// Every role's column. The seeded defaults for the keys added with the Super Admin level are
+// deliberately generous on the view/export side — an install that has been running without them
+// must not lose sight of a module the day this ships — and closed on the ones that change who can
+// do what. `mergeSeededPermissions` in AppContext applies these defaults to a saved matrix.
 export const INITIAL_ROLE_MATRIX = {
   // request_restructure rewrites a live loan's contract terms, so it sits with the other
   // decisions on an existing loan (review, write-off) rather than with origination: the
   // manager who owns the credit decision, and Admin. Toggle it per role in
   // Settings > Roles & Permissions — this matrix is the seed, not a lock.
-  'Admin':          { add_customer:true,  open_loan:true,  review_loan:true,  disburse_loan:true,  manage_accounting:true,  write_off:true,  request_restructure:true,  run_operations:true,  view_accounting:true  },
-  'Credit Officer': { add_customer:true,  open_loan:true,  review_loan:false, disburse_loan:false, manage_accounting:false, write_off:false, request_restructure:false, run_operations:false, view_accounting:false },
-  'Credit Manager': { add_customer:false, open_loan:false, review_loan:true,  disburse_loan:false, manage_accounting:false, write_off:true,  request_restructure:true,  run_operations:true,  view_accounting:true  },
-  'Accountant':     { add_customer:false, open_loan:false, review_loan:false, disburse_loan:true,  manage_accounting:true,  write_off:false, request_restructure:false, run_operations:true,  view_accounting:true  },
+  // The level above Admin. Holds everything, including govern_admins, which no other role may be
+  // given: the guards in the reducer refuse it from anyone who is not already a Super Admin.
+  'Super Admin':    { add_customer:true,  open_loan:true,  review_loan:true,  disburse_loan:true,  manage_accounting:true,  write_off:true,  request_restructure:true,  run_operations:true,  view_accounting:true,
+                      view_customers:true, edit_customer:true,  delete_customer:true,  export_customers:true,  view_loans:true, export_loans:true, view_reports:true, export_reports:true,
+                      view_users:true,     create_user:true,    edit_user:true,        activate_user:true,     view_settings:true,  manage_settings:true,  govern_admins:true },
+  'Admin':          { add_customer:true,  open_loan:true,  review_loan:true,  disburse_loan:true,  manage_accounting:true,  write_off:true,  request_restructure:true,  run_operations:true,  view_accounting:true,
+                      view_customers:true, edit_customer:true,  delete_customer:true,  export_customers:true,  view_loans:true, export_loans:true, view_reports:true, export_reports:true,
+                      view_users:true,     create_user:true,    edit_user:true,        activate_user:true,     view_settings:true,  manage_settings:true,  govern_admins:false },
+  'Credit Officer': { add_customer:true,  open_loan:true,  review_loan:false, disburse_loan:false, manage_accounting:false, write_off:false, request_restructure:false, run_operations:false, view_accounting:false,
+                      view_customers:true, edit_customer:true,  delete_customer:false, export_customers:true,  view_loans:true, export_loans:true, view_reports:true, export_reports:true,
+                      view_users:false,    create_user:false,   edit_user:false,       activate_user:false,    view_settings:false, manage_settings:false, govern_admins:false },
+  'Credit Manager': { add_customer:false, open_loan:false, review_loan:true,  disburse_loan:false, manage_accounting:false, write_off:true,  request_restructure:true,  run_operations:true,  view_accounting:true,
+                      view_customers:true, edit_customer:false, delete_customer:false, export_customers:true,  view_loans:true, export_loans:true, view_reports:true, export_reports:true,
+                      view_users:false,    create_user:false,   edit_user:false,       activate_user:false,    view_settings:false, manage_settings:false, govern_admins:false },
+  'Accountant':     { add_customer:false, open_loan:false, review_loan:false, disburse_loan:true,  manage_accounting:true,  write_off:false, request_restructure:false, run_operations:true,  view_accounting:true,
+                      view_customers:true, edit_customer:false, delete_customer:false, export_customers:false, view_loans:true, export_loans:true, view_reports:true, export_reports:true,
+                      view_users:false,    create_user:false,   edit_user:false,       activate_user:false,    view_settings:false, manage_settings:false, govern_admins:false },
 }
